@@ -1,0 +1,17 @@
+{
+  "description": "Permission gate for bonez memory writes: prompts before the bonez MCP `memory` tool runs save/update/delete. recall passes through untouched.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "__memory$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/gate-memory-write.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

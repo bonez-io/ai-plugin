@@ -1,0 +1,55 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JSON validity of all manifests
+        run: |
+          set -euo pipefail
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json; do
+            jq empty "$f"
+            echo "ok: $f"
+          done
+
+      - name: Version parity across manifests
+        run: |
+          set -euo pipefail
+          plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
+          marketplace_version="$(jq -r '.plugins[] | select(.name == "bonez") | .version' .claude-plugin/marketplace.json)"
+          server_version="$(jq -r '.version' server.json)"
+          echo "plugin.json:      $plugin_version"
+          echo "marketplace.json: $marketplace_version"
+          echo "server.json:      $server_version"
+          if [ "$plugin_version" != "$marketplace_version" ] || [ "$plugin_version" != "$server_version" ]; then
+            echo "::error::Version drift between manifests — one version, everywhere (see PostHog's 1.1.58/1.0.56/1.1.52/1.0.54 drift for why)."
+            exit 1
+          fi
+
+      - name: Hook scripts parse (bash -n)
+        run: |
+          set -euo pipefail
+          for f in hooks/*.sh tests/*.sh; do
+            bash -n "$f"
+            echo "ok: $f"
+          done
+
+      - name: Memory-write gate tests
+        run: ./tests/test_gate.sh
+
+      - name: Skill frontmatter sanity
+        run: |
+          set -euo pipefail
+          for f in skills/*/SKILL.md; do
+            head -1 "$f" | grep -qx -- '---' || { echo "::error::$f missing frontmatter"; exit 1; }
+            grep -q '^name:' "$f" || { echo "::error::$f missing name"; exit 1; }
+            grep -q '^description:' "$f" || { echo "::error::$f missing description"; exit 1; }
+            echo "ok: $f"
+          done

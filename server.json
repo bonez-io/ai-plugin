@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.bonez/mcp",
+  "title": "Bonez MCP Server",
+  "description": "The bonez org context lake over MCP — fused search across code, decisions, tickets, PRs, docs, and people; BGQ graph queries; org rules and durable memories.",
+  "repository": {
+    "url": "https://github.com/bonez-io/ai-plugin",
+    "source": "github"
+  },
+  "websiteUrl": "https://bonez.io",
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://gateway.bonez.io/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <bonez API key> — mint one in console.bonez.io under API keys",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

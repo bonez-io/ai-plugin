@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "bonez": {
+      "type": "http",
+      "url": "${BONEZ_MCP_URL:-https://gateway.bonez.io/mcp}",
+      "headers": {
+        "x-bonez-mcp-consumer": "claude-code-plugin",
+        "Authorization": "Bearer ${BONEZ_API_KEY:-}"
+      }
+    }
+  }
+}
