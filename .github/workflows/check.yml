@@ -41,7 +41,7 @@ jobs:
             echo "ok: $f"
           done
 
-      - name: Memory-write gate tests
+      - name: Write gate tests
         run: ./tests/test_gate.sh
 
       - name: Skill frontmatter sanity

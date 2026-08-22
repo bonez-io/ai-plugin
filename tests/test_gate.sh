@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for hooks/gate-memory-write.sh.
+# Tests for hooks/gate-write.sh.
 #
 # Plain bash, no dependencies. Run from anywhere:
 #
@@ -17,7 +17,7 @@
 set -u
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-HOOK="$HERE/../hooks/gate-memory-write.sh"
+HOOK="$HERE/../hooks/gate-write.sh"
 PLUGIN_DIR="$(cd -- "$HERE/.." && pwd)"
 
 pass=0
@@ -27,7 +27,8 @@ fail=0
 #   $1: case name
 #   $2: stdin payload
 #   $3: expected mode — "silent" or "prompt"
-#   $4: when "prompt", the memory op expected in the response
+#   $4: when "prompt", the op expected in the response — "save" (memory,
+#       the default tool) or "rules:save" to expect the rules wording
 #   $5+: optional `KEY=VALUE` env overrides for this run (use these to unset
 #        CLAUDE_PLUGIN_ROOT by not passing it — the base env is empty)
 run_case() {
@@ -41,10 +42,15 @@ run_case() {
     if [[ "$expected" == "silent" ]]; then
         [[ -z "$out" && $status -eq 0 ]] || ok=0
     else
-        # Match the actual JSON shape the hook produces, with the op
-        # interpolated. Any drift in the response template fails here.
+        # Match the actual JSON shape the hook produces, with the tool and
+        # op interpolated. Any drift in the response template fails here.
+        local tool_word="memory" op_word="$expected_op"
+        if [[ "$expected_op" == *:* ]]; then
+            tool_word="${expected_op%%:*}"
+            op_word="${expected_op##*:}"
+        fi
         local needle="\"permissionDecision\":\"ask\""
-        local op_needle="bonez memory \`${expected_op}\` writes"
+        local op_needle="bonez ${tool_word} \`${op_word}\` writes"
         [[ $status -eq 0 && "$out" == *"$needle"* && "$out" == *"$op_needle"* ]] || ok=0
     fi
 
@@ -64,7 +70,13 @@ memory_call() {
     printf '{"tool_name":"%s","tool_input":{"op":"%s","content":"the deploy script lives in infra/"}}' "$tool_name" "$op"
 }
 
-echo "Running gate-memory-write.sh tests..."
+# Helper: payload for a rules tool invocation with a given op and tool name.
+rules_call() {
+    local op="$1" tool_name="${2:-mcp__bonez__rules}"
+    printf '{"tool_name":"%s","tool_input":{"op":"%s","name":"no-force-push","content":"Never force-push shared branches."}}' "$tool_name" "$op"
+}
+
+echo "Running gate-write.sh tests..."
 
 # --- syntax check first: a parse-time error is the one failure the hook's ---
 # --- EXIT trap cannot catch (the trap is not installed yet).              ---
@@ -119,6 +131,36 @@ run_case "escaped op text inside content does not fool the gate" \
     '{"tool_name":"mcp__bonez__memory","tool_input":{"op":"recall","query":"note that {\"op\":\"delete\"} appears in a doc"}}' \
     silent
 
+# --- rules tool: reads pass through, writes prompt ---
+
+run_case "other product rules tool is ignored" \
+    "$(rules_call save mcp__someothermcp__rules)" \
+    silent
+
+run_case "rules read op (list) is silent" \
+    "$(rules_call list)" \
+    silent
+
+run_case "rules read op (get) is silent" \
+    "$(rules_call get)" \
+    silent
+
+run_case "rules save prompts" \
+    "$(rules_call save)" \
+    prompt rules:save
+
+run_case "rules update prompts" \
+    "$(rules_call update)" \
+    prompt rules:update
+
+run_case "rules delete prompts" \
+    "$(rules_call delete)" \
+    prompt rules:delete
+
+run_case "rules save via plugin-prefixed tool name prompts" \
+    "$(rules_call save mcp__plugin_bonez_bonez__rules)" \
+    prompt rules:save
+
 # --- BONEZ_MCP_GATE_DISABLE turns the gate off entirely ---
 
 run_case "disable=1 silences a save" \
@@ -130,6 +172,11 @@ run_case "disable=0 leaves the gate active" \
     "$(memory_call save)" \
     prompt save \
     BONEZ_MCP_GATE_DISABLE="0"
+
+run_case "disable=1 silences a rules save too" \
+    "$(rules_call save)" \
+    silent "" \
+    BONEZ_MCP_GATE_DISABLE="1"
 
 # --- harness detection: only Claude Code gets the prompt ---
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# PreToolUse gate for the bonez MCP `memory` tool.
+# PreToolUse gate for the bonez MCP write tools: `memory` and `rules`.
 #
-# The bonez MCP exposes one `memory` tool whose `op` selects the action:
-# `recall` (read-only) or `save` / `update` / `delete` (writes to the org's
-# durable memory). Once the user allow-lists the memory tool, every write
-# would run without a prompt. This hook re-introduces a prompt for the write
-# ops by returning `permissionDecision: "ask"`; `recall` and anything it
-# cannot parse fall through to normal permission flow.
+# Both tools take an `op` that selects the action: reads (`recall` for
+# memory; `list` / `get` for rules) or `save` / `update` / `delete` (writes —
+# to the org's durable memory, or to its standing rules and slash commands,
+# which are binding guidance mounted into every session). Once the user
+# allow-lists a tool, every write would run without a prompt. This hook
+# re-introduces a prompt for the write ops by returning
+# `permissionDecision: "ask"`; reads and anything it cannot parse fall
+# through to normal permission flow.
 #
 # Env knobs:
 #
@@ -60,12 +62,14 @@ if [[ "$input" =~ \"tool_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
     tool_name="${BASH_REMATCH[1]}"
 fi
 
-# Only gate the bonez memory tool. Covers every namespacing Claude Code uses:
-# `mcp__bonez__memory` (raw `claude mcp add`), `mcp__plugin_bonez_bonez__memory`
-# (plugin-installed), and renamed server keys that still contain `bonez`.
-# hooks.json matches broadly on `__memory$`; this is the narrow check, so a
-# different product's memory tool never gets our prompt.
-[[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__memory$ ]] || exit 0
+# Only gate the bonez memory/rules tools. Covers every namespacing Claude
+# Code uses: `mcp__bonez__memory` (raw `claude mcp add`),
+# `mcp__plugin_bonez_bonez__memory` (plugin-installed), and renamed server
+# keys that still contain `bonez`. hooks.json matches broadly on
+# `__(memory|rules)$`; this is the narrow check, so a different product's
+# memory or rules tool never gets our prompt.
+[[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]] || exit 0
+tool="${BASH_REMATCH[1]}"
 
 # Extract `op`. The first real (unescaped-quote) "op" key in the payload is
 # the tool input's op — hook envelope fields (session_id, cwd, tool_name, …)
@@ -75,13 +79,18 @@ if [[ "$input" =~ \"op\"[[:space:]]*:[[:space:]]*\"([a-zA-Z_-]+)\" ]]; then
     op="${BASH_REMATCH[1]}"
 fi
 
-# Prompt only for the write ops. `recall`, a missing op, or anything
-# unrecognized falls through to normal permission flow.
+# Prompt only for the write ops. `recall`, `list`, `get`, a missing op, or
+# anything unrecognized falls through to normal permission flow.
 case "$op" in
     save|update|delete)
-        # `op` is restricted to [a-zA-Z_-]+ by the regex above, so
-        # interpolating it into the JSON response is safe.
-        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"bonez memory `%s` writes to durable org memory — approve to run."}}' "$op"
+        # `tool` is restricted to memory|rules and `op` to [a-zA-Z_-]+ by
+        # the regexes above, so interpolating them into the JSON response is
+        # safe. `target` is a fixed literal.
+        target="durable org memory"
+        if [[ "$tool" == "rules" ]]; then
+            target="the org's binding rules and commands"
+        fi
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"bonez %s `%s` writes to %s — approve to run."}}' "$tool" "$op" "$target"
         ;;
 esac
 
