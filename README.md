@@ -35,11 +35,21 @@ Any other MCP client: streamable-HTTP endpoint `https://gateway.bonez.io/mcp` wi
 | --- | --- |
 | `BONEZ_API_KEY` | Personal bonez API key (`bnz_…`), minted in console.bonez.io. Required. |
 | `BONEZ_MCP_URL` | Override the MCP endpoint — qa (`https://qa.gateway.bonez.io/mcp`) or a local gateway. Defaults to prod. |
-| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the memory-write permission prompt (headless/CI runs). |
+| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the memory/rules write permission prompts (headless/CI runs). |
+
+### API key scopes
+
+Keys come in three tiers — mint the smallest one that covers what your agent does:
+
+| Scope | Unlocks |
+| --- | --- |
+| `read` | Everything read-only: `search`, `schema`, `query`, `fetch`, `context`, plus `memory` recall and `rules` list/get. |
+| `read+memory` | `read`, plus `memory` save/update/delete. |
+| `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 
 ## The tools
 
-Six tools, one loop: **`search` → `schema` → `query` → `fetch`**.
+Seven tools, one loop: **`search` → `schema` → `query` → `fetch`**.
 
 | Tool | What it does |
 | --- | --- |
@@ -49,6 +59,7 @@ Six tools, one loop: **`search` → `schema` → `query` → `fetch`**.
 | `fetch` | Dereference anything — `~handle`, vendor URL, urn, or `repo_id/path[:line]` — into the full record with provenance and temporal status. |
 | `context` | The mount: the same org identity, knowledge, rules, and memory bands bonez's own first-party agents boot with. |
 | `memory` | The pen: `recall` freely; `save`/`update`/`delete` durable facts back into the lake (gated behind a permission prompt by this plugin). |
+| `rules` | The rulebook: `list`/`get` the org's standing rules and slash commands freely; `save`/`update`/`delete` change binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
 
 ## Skills
 
@@ -72,7 +83,7 @@ Plus two commands: `/bonez:context` and `/bonez:search <query>`.
 .mcp.json         the bonez MCP server (BONEZ_MCP_URL-overridable)
 skills/           8 skills
 commands/         /bonez:context, /bonez:search
-hooks/            PreToolUse gate prompting before memory writes
+hooks/            PreToolUse gate prompting before memory and rules writes
 server.json       MCP registry entry for the remote server
 tests/            gate tests (run in CI)
 ```
