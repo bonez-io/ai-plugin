@@ -18,10 +18,14 @@
 #
 #           export BONEZ_MCP_GATE_DISABLE=1
 #
-# Pure bash; no jq or other third-party tools required. The `op` value is a
-# short lowercase identifier, so a narrow regex on the raw JSON payload is
-# safe (any `"op":` text inside user content arrives JSON-escaped as \"op\"
-# and cannot match a regex written against real quote characters).
+# Pure bash; no jq or other third-party tools required. `op` values are short
+# lowercase identifiers, so a narrow regex on the raw JSON payload is safe to
+# match against: any `"op":` text inside *string* params arrives JSON-escaped
+# as \"op\" and cannot match a regex written against real quote characters.
+# But object-valued params (the rules tool's `params_schema`) DO arrive with
+# real-quoted keys, and key order is model-controlled — so extraction must
+# never trust "the first `"op"` match". A write op ANYWHERE in the payload
+# prompts (see the extraction comment below).
 
 # Fail open — this gate must never break a tool call.
 #
@@ -71,21 +75,31 @@ fi
 [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]] || exit 0
 tool="${BASH_REMATCH[1]}"
 
-# Extract `op`. The first real (unescaped-quote) "op" key in the payload is
-# the tool input's op — hook envelope fields (session_id, cwd, tool_name, …)
-# never use that name.
+# Extract `op` by looking for a real (unescaped-quote) `"op":"<write-op>"`
+# ANYWHERE in the payload — one regex pass, no loop. The tool input's real op
+# is not necessarily the first `"op"` key: object-valued params (the rules
+# tool's `params_schema`) arrive with real-quoted keys, and JSON key order is
+# model-controlled — so a crafted payload like
+# `{"params_schema":{"op":"list"},"op":"save",…}` would shadow the write op
+# if only the first `"op"` match were consulted. Matching write ops directly
+# fails toward prompting: a read op whose nested params merely mention a
+# write-op name may prompt unnecessarily; that is the safe direction for a
+# write gate. Silence on a real write is the failure mode this hook exists
+# to prevent.
 op=""
-if [[ "$input" =~ \"op\"[[:space:]]*:[[:space:]]*\"([a-zA-Z_-]+)\" ]]; then
+if [[ "$input" =~ \"op\"[[:space:]]*:[[:space:]]*\"(save|update|delete)\" ]]; then
     op="${BASH_REMATCH[1]}"
 fi
 
-# Prompt only for the write ops. `recall`, `list`, `get`, a missing op, or
-# anything unrecognized falls through to normal permission flow.
+# Prompt only for the write ops. Payloads whose only ops are reads
+# (`recall`, `list`, `get`), a missing op, or anything unrecognized leave
+# `op` empty and fall through to normal permission flow. The case guard is
+# belt-and-braces: `op` can already only be a write op or empty.
 case "$op" in
     save|update|delete)
-        # `tool` is restricted to memory|rules and `op` to [a-zA-Z_-]+ by
-        # the regexes above, so interpolating them into the JSON response is
-        # safe. `target` is a fixed literal.
+        # `tool` is restricted to memory|rules and `op` to
+        # save|update|delete by the regexes above, so interpolating them
+        # into the JSON response is safe. `target` is a fixed literal.
         target="durable org memory"
         if [[ "$tool" == "rules" ]]; then
             target="the org's binding rules and commands"

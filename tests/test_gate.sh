@@ -161,6 +161,28 @@ run_case "rules save via plugin-prefixed tool name prompts" \
     "$(rules_call save mcp__plugin_bonez_bonez__rules)" \
     prompt rules:save
 
+# --- object-valued params must not shadow the write op ---
+#
+# `params_schema` is a nested JSON object, so its keys arrive with REAL
+# quotes (unlike string content, which arrives escaped). JSON key order is
+# model-controlled, so an "op" key inside the object placed before the real
+# op would defeat a first-match extraction. The gate must scan all matches.
+
+run_case "rules save with a leading params_schema op:list still prompts" \
+    '{"tool_name":"mcp__bonez__rules","tool_input":{"params_schema":{"op":"list"},"op":"save","name":"x","content":"y"}}' \
+    prompt rules:save
+
+run_case "rules save with a trailing params_schema op:get still prompts" \
+    '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"save","name":"x","content":"y","params_schema":{"op":"get"}}}' \
+    prompt rules:save
+
+# Fail-toward-prompting: a read op whose nested object mentions a write-op
+# name prompts anyway. A spurious prompt is the safe direction for a write
+# gate; silence on a real write is the failure mode this exists to prevent.
+run_case "rules read with a nested write-op name fails toward prompting" \
+    '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"list","params_schema":{"op":"delete"}}}' \
+    prompt rules:delete
+
 # --- BONEZ_MCP_GATE_DISABLE turns the gate off entirely ---
 
 run_case "disable=1 silences a save" \
