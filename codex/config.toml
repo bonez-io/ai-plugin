@@ -1,0 +1,45 @@
+# bonez MCP server for Codex — paste into ~/.codex/config.toml
+# (or <repo>/.codex/config.toml for a trusted-project-only install).
+#
+# `auth` defaults to "oauth" when omitted, so this is the same no-key,
+# browser-OAuth default install as the Claude Code leg: the first tool call
+# 401s and Codex walks you through sign-in. Verified against the streamable
+# HTTP `mcp_servers` config documented at
+# https://developers.openai.com/codex/mcp — see the repo README's Codex
+# section for what's confirmed vs assumed.
+
+[mcp_servers.bonez]
+url = "https://gateway.bonez.io/mcp"
+
+# --- CLI equivalent of the block above ---
+#   codex mcp add bonez --url https://gateway.bonez.io/mcp
+#   codex mcp login bonez   # run the OAuth flow now instead of waiting for a 401
+#   codex mcp list          # confirm it's there; `/mcp` inside the TUI does too
+
+# --- Headless / CI: API key instead of OAuth (same lane as Claude Code) ---
+# OAuth needs a browser. For CI runners and other headless contexts, mint a
+# key in console.bonez.io under API keys, export it, and point Codex at the
+# env var instead — do not paste the key into this file.
+#
+#   export BONEZ_API_KEY=bnz_...
+#
+# [mcp_servers.bonez]
+# url = "https://gateway.bonez.io/mcp"
+# bearer_token_env_var = "BONEZ_API_KEY"
+
+# --- qa / local gateway ---
+# Edit the `url` above directly — Codex does not expand ${VAR} shell syntax
+# inside config.toml the way the Claude Code leg's .mcp.json does.
+#   url = "https://qa.gateway.bonez.io/mcp"
+
+# --- Optional: coarse write friction on memory/rules (see README) ---
+# Codex has no per-argument write gate (no equivalent of the Claude Code
+# PreToolUse "ask" hook — see README). The closest native approximation
+# prompts for EVERY call to a tool, including harmless reads like `recall`
+# or `list`/`get`, not just save/update/delete:
+#
+# [mcp_servers.bonez.tools.memory]
+# approval_mode = "approve"
+#
+# [mcp_servers.bonez.tools.rules]
+# approval_mode = "approve"
