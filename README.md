@@ -15,25 +15,49 @@ claude plugin marketplace add bonez-io/ai-plugin
 claude plugin install bonez@bonez
 ```
 
-Then set your API key (mint one in [console.bonez.io](https://console.bonez.io) under **API keys**):
+That's it — no key to mint, no env var to set. The bundled `.mcp.json` ships with no
+`Authorization` header, so the first call gets a 401 and Claude Code walks you through
+OAuth in the browser automatically. You need to be a member of an org that's already
+onboarded to bonez; sign in there.
+
+To run that flow yourself instead of waiting for the first tool call (Claude Code
+v2.1.186+):
+
+```bash
+claude mcp login bonez
+```
+
+That opens a browser, you authorize, and `/mcp` shows `bonez` connected.
+
+### Headless / CI: API key instead
+
+OAuth needs a browser, so CI runners, remote boxes, and other headless contexts still use
+a personal API key. This lane isn't going away — it's just no longer the default. Mint one
+in [console.bonez.io](https://console.bonez.io) under **API keys**, then add the header
+yourself (the shipped `.mcp.json` deliberately omits it — Claude Code will not fall back to
+OAuth once *any* `Authorization` header is configured, even one that resolves empty):
 
 ```bash
 export BONEZ_API_KEY=bnz_...
+claude mcp add --transport http bonez "${BONEZ_MCP_URL:-https://gateway.bonez.io/mcp}" \
+  --header "Authorization: Bearer ${BONEZ_API_KEY}"
 ```
 
 ### Raw MCP (any client, no plugin)
+
+Any MCP client that speaks OAuth discovery: point it at the streamable-HTTP endpoint
+`https://gateway.bonez.io/mcp` with no `Authorization` header and let it 401 into the
+browser flow. Clients that don't: same endpoint, `Authorization: Bearer <key>` header.
 
 ```bash
 claude mcp add --transport http bonez https://gateway.bonez.io/mcp --header "Authorization: Bearer <key>"
 ```
 
-Any other MCP client: streamable-HTTP endpoint `https://gateway.bonez.io/mcp` with an `Authorization: Bearer <key>` header.
-
 ### Environment
 
 | Variable | Purpose |
 | --- | --- |
-| `BONEZ_API_KEY` | Personal bonez API key (`bnz_…`), minted in console.bonez.io. Required. |
+| `BONEZ_API_KEY` | Personal bonez API key (`bnz_…`), minted in console.bonez.io. Optional — only needed for the headless/CI key lane; the default install authenticates via OAuth instead. |
 | `BONEZ_MCP_URL` | Override the MCP endpoint — qa (`https://qa.gateway.bonez.io/mcp`) or a local gateway. Defaults to prod. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the memory/rules write permission prompts (headless/CI runs). |
 
@@ -80,7 +104,7 @@ Plus two commands: `/bonez:context` and `/bonez:search <query>`.
 
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
-.mcp.json         the bonez MCP server (BONEZ_MCP_URL-overridable)
+.mcp.json         the bonez MCP server (BONEZ_MCP_URL-overridable, OAuth by default)
 skills/           8 skills
 commands/         /bonez:context, /bonez:search
 hooks/            PreToolUse gate prompting before memory and rules writes
