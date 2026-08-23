@@ -29,6 +29,52 @@ claude mcp login bonez
 
 That opens a browser, you authorize, and `/mcp` shows `bonez` connected.
 
+### OpenAI Codex
+
+MCP config in Codex lives in `~/.codex/config.toml`, shared by Codex CLI, the
+IDE extension, and the desktop app — no separate GUI "add server" flow is
+documented beyond that shared file, so config.toml (directly or via the CLI)
+is the one path in:
+
+```bash
+codex mcp add bonez --url https://gateway.bonez.io/mcp
+codex mcp login bonez   # run OAuth now instead of waiting for a 401
+```
+
+Or paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml`
+yourself — same OAuth-by-default install as Claude Code (`auth` defaults to
+`"oauth"` for a streamable-HTTP server with no bearer token configured).
+
+Guidance ports:
+
+- [`codex/AGENTS.md`](codex/AGENTS.md) — the 8 skills compressed into
+  always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
+  `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
+  directory tree.
+- [`codex/skills/`](codex/skills/) — the same 8 skills, ported ~verbatim,
+  because Codex turns out to support the same on-demand `SKILL.md` format
+  Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
+  `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
+  a common but wrong guess. AGENTS.md above is the belt; these are the
+  suspenders, loaded on demand instead of always in context.
+- [`codex/prompts/`](codex/prompts/) — `/prompts:context` and
+  `/prompts:search`, ported from `commands/`. Copy to `~/.codex/prompts/`
+  (top-level `.md` files only). Upstream marks custom prompts deprecated in
+  favor of skills; included anyway since they still work today.
+
+**Write-gate gap.** Claude Code's `hooks/gate-write.sh` pauses for
+interactive approval before every `rules`/`memory` write, because rules bind
+every future session in the org. Codex has no equivalent: its `PreToolUse`
+hook can only unconditionally allow or deny a call — `permissionDecision:
+"ask"` is parsed but explicitly unimplemented upstream, and Codex fails open
+(marks the hook run failed, lets the call through) rather than blocking. The
+closest native substitute is `approval_mode = "approve"` on the MCP server's
+`memory`/`rules` tools in `config.toml` (commented out in
+[`codex/config.toml`](codex/config.toml)), but that prompts for *every* call
+including harmless `recall`/`list`/`get`, not just writes. **Writes are
+unguarded by default on the Codex leg — there is no bundled equivalent of
+the Claude Code gate.**
+
 ### Headless / CI: API key instead
 
 OAuth needs a browser, so CI runners, remote boxes, and other headless contexts still use
@@ -110,6 +156,7 @@ commands/         /bonez:context, /bonez:search
 hooks/            PreToolUse gate prompting before memory and rules writes
 server.json       MCP registry entry for the remote server
 tests/            gate tests (run in CI)
+codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
 ```
 
 ## Development
