@@ -69,6 +69,16 @@ const DEBOUNCE_MS = Number.isFinite(_parsedDebounceMs) && _parsedDebounceMs >= 0
 // plugin load, so it always hits this fallback). A key installed one way must be visible to a
 // hook firing the other way, so the fallback has to be this same computed path, not some
 // unrelated directory of our own choosing.
+// What we can honestly claim about the stored key's protection. `chmod 0o600` is not a
+// permission model on Windows — Node maps it onto the read-only flag, so the file stays
+// readable by every account on the machine. Saying "mode 600" there would be a false
+// promise about a credential, so the message states what is actually true per platform.
+function credentialProtection() {
+  return process.platform === "win32"
+    ? "protected by your Windows user profile's ACLs — chmod is not enforced on Windows"
+    : "mode 600 — this machine only"
+}
+
 function dataDir() {
   return process.env.CLAUDE_PLUGIN_DATA || join(homedir(), ".claude", "plugins", "data", "bonez-bonez")
 }
@@ -184,6 +194,9 @@ async function cmdHook(agent, event) {
     const child = spawn(process.execPath, [SELF_PATH, "_upload", agent, event, payloadFile], {
       detached: true,
       stdio: "ignore",
+      // On Windows `detached` means "own console", and without this the user gets a console
+      // window flashing on screen at the end of EVERY session. Ignored on posix.
+      windowsHide: true,
     })
     child.unref()
   } catch {
@@ -484,7 +497,7 @@ function consentText(cfg) {
     "  Turn off without uninstalling:  BONEZ_SESSION_SYNC=0",
     "  Turn off persistently:          bonez-session-sync.mjs disable",
     "  Check status any time:          bonez-session-sync.mjs status",
-    `Credential stored at: ${configPath()} (mode 600 — this machine only).`,
+    `Credential stored at: ${configPath()} (${credentialProtection()}).`,
   ].join("\n")
 }
 
