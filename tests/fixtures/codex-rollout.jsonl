@@ -1,0 +1,5 @@
+{"timestamp":"2026-08-24T11:00:00.000Z","cwd":"/tmp/bonez-session-sync-fixture-repo","payload":{"type":"session_meta","role":"system","content":"session started"}}
+{"timestamp":"2026-08-24T11:00:05.000Z","payload":{"role":"user","content":"The deploy script fails on the staging env, can you find out why?"}}
+{"timestamp":"2026-08-24T11:00:15.000Z","payload":{"role":"assistant","content":"Looking at the staging logs now."}}
+{"timestamp":"2026-08-24T11:00:25.000Z","payload":{"role":"user","content":"Found it — rotate this token when you're done: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}}
+{"timestamp":"2026-08-24T11:00:40.000Z","payload":{"role":"assistant","content":"Fixed the staging env var and confirmed the deploy succeeds."}}

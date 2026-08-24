@@ -43,3 +43,58 @@ url = "https://gateway.bonez.io/mcp"
 #
 # [mcp_servers.bonez.tools.rules]
 # approval_mode = "approve"
+
+# --- Optional: session capture (off until you run `install` — see README) ---
+# Mirrors the Claude Code leg's hooks/hooks.json SessionEnd hook: at the end
+# of (and, via the SessionStart catch-up below, the start of) a session,
+# hands the transcript to the SAME bin/bonez-session-sync.mjs the Claude
+# Code leg uses, which is a silent no-op until you've run
+# `bonez-session-sync.mjs install <bnz_...key>` once (mint a sessions-scoped
+# key in console.bonez.io — scope = sessions). This block does nothing by
+# itself even with `hooks = true` below and no install: consent is gated at
+# BOTH layers on purpose.
+#
+# EDIT THE COMMAND PATH before enabling — Codex does not expand ${VAR} or
+# ~ inside config.toml (same caveat as the `url` field above), so point it
+# at wherever you placed this plugin's bin/bonez-session-sync.mjs, e.g. a
+# checkout of bonez-io/ai-plugin:
+#
+#   command = "node /absolute/path/to/ai-plugin/bin/bonez-session-sync.mjs hook codex session-end"
+#
+# Hooks are themselves opt-in per Codex install (off by default):
+#
+# [features]
+# hooks = true
+#
+# SessionEnd: codex-rs hardcodes the matcher's `reason` to the literal
+# string "other" regardless of why the session actually ended (verified
+# against codex-rs/hooks/src/events/session_end.rs) — match on exactly
+# that, not on the richer clear/resume/logout-style reasons Claude Code
+# exposes. Codex caps SessionEnd at 1s default / 3s hard max inside a 5s
+# teardown bound, well above what this hook needs (it detaches to a
+# background process and returns immediately — see the README), but
+# `timeout` is pinned to the hard max anyway as headroom.
+#
+# [[hooks.SessionEnd]]
+# matcher = "other"
+#
+# [[hooks.SessionEnd.hooks]]
+# type = "command"
+# command = "node /absolute/path/to/ai-plugin/bin/bonez-session-sync.mjs hook codex session-end"
+# timeout = 3
+#
+# SessionStart: transcript_path on SessionEnd is `Option<PathBuf>` and can
+# be absent, and a session killed outright (crash, SIGKILL) never fires
+# SessionEnd at all — so the following SessionStart is the durable
+# fallback. It resolves the ENDED session from disk (session_id, walking
+# ~/.codex/sessions/**) rather than trusting SessionEnd's payload, and
+# flushes at most the one most-recently-modified not-yet-synced session —
+# never the session that's just starting.
+#
+# [[hooks.SessionStart]]
+# matcher = "startup|resume|clear|compact"
+#
+# [[hooks.SessionStart.hooks]]
+# type = "command"
+# command = "node /absolute/path/to/ai-plugin/bin/bonez-session-sync.mjs hook codex session-start"
+# timeout = 5

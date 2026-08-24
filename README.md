@@ -106,16 +106,22 @@ claude mcp add --transport http bonez https://gateway.bonez.io/mcp --header "Aut
 | `BONEZ_API_KEY` | Personal bonez API key (`bnz_…`), minted in console.bonez.io. Optional — only needed for the headless/CI key lane; the default install authenticates via OAuth instead. |
 | `BONEZ_MCP_URL` | Override the MCP endpoint — qa (`https://qa.gateway.bonez.io/mcp`) or a local gateway. Defaults to prod. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the memory/rules write permission prompts (headless/CI runs). |
+| `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
+| `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — qa or a local gateway. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io`. |
 
 ### API key scopes
 
-Keys come in three tiers — mint the smallest one that covers what your agent does:
+`read` / `read+memory` / `read+write` are nested tiers for the MCP tool surface (`/mcp`).
+`sessions` is a separate, disjoint lane for the [session capture](#session-capture) uploader's
+two calls (`/api/import/presign`, `/api/import/{id}/complete`) — it never reaches `/mcp`, and an
+MCP-scoped key never reaches the import routes. Mint the smallest one that covers what you need:
 
 | Scope | Unlocks |
 | --- | --- |
 | `read` | Everything read-only: `search`, `schema`, `query`, `fetch`, `context`, plus `memory` recall and `rules` list/get. |
 | `read+memory` | `read`, plus `memory` save/update/delete. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
+| `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 
 ## The tools
 
@@ -146,6 +152,54 @@ Judgment for using the lake well — traps, defaults, when to stop:
 
 Plus two commands: `/bonez:context` and `/bonez:search <query>`.
 
+## Session capture
+
+Your Claude Code and Codex conversations already hold everything the harness itself learns from
+— what you tried, what broke, what you decided. This plugin can capture them into the same
+`bonez` knowledge graph the desktop app's manual "Import history" feature feeds, so the org
+learns from them too. It is **off by default** and stays off until you explicitly install it.
+
+**What it does:** at the end of a matching session (Claude Code's `SessionEnd`; Codex's
+`SessionEnd`, plus its `SessionStart` as a durable fallback for sessions that crashed or hit
+Codex's tight `SessionEnd` timeout before it could fire), a hook hands the transcript to
+`bin/bonez-session-sync.mjs`, which detaches to a background process immediately — the hook
+itself never makes a network call and is invisible either way: it never prints anything and
+never fails the harness's hook check. The background process parses and scrubs the transcript
+on-device (secrets — API keys, tokens, private keys, passwords, connection strings — are masked
+*before* anything leaves the machine), then uploads one conversation through the same
+presign → PUT → complete pipeline the desktop importer uses. v1 captures conversations only —
+not `CLAUDE.md`, auto-memories, commands, or subagents (those change on a different cadence; a
+separate follow-up).
+
+**Install (once per machine):**
+
+```bash
+# mint a sessions-scoped key in console.bonez.io under API keys (scope = sessions), then:
+bonez-session-sync.mjs install bnz_... --repo /path/to/repo   # repeat --repo for more
+# or: bonez-session-sync.mjs install bnz_... --global         # every repo on this machine
+```
+
+Run from inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's
+`PATH`, so the bare command above works; otherwise invoke it by its full path (`node
+<plugin-root>/bin/bonez-session-sync.mjs install ...`). With no `--repo` given, `install` scopes
+capture to whatever directory you ran it from. `install` prints exactly what uploads, where it
+goes, and who can read it before anything is captured.
+
+| Command | Does |
+| --- | --- |
+| `install <bnz_...key> [--repo <path>]... [--global]` | Store the key (mode 600) and turn capture on. Repo-scoped by default; `--global` captures every repo on this machine. |
+| `status` | Enabled/disabled, scope, repos, sessions synced so far. Never prints the raw key. |
+| `disable` / `enable` | Turn capture off/on without discarding the installed key. |
+
+Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
+config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.
+
+**Codex leg:** hooks are opt-in per Codex install (`[features] hooks = true` in `config.toml`,
+off by default) on top of this plugin's own `install` gate — see the commented-out block in
+[`codex/config.toml`](codex/config.toml), which needs its `command` path edited to point at
+wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/`~` in
+`config.toml`, same caveat as the MCP `url` field above).
+
 ## Layout
 
 ```
@@ -153,17 +207,19 @@ Plus two commands: `/bonez:context` and `/bonez:search <query>`.
 .mcp.json         the bonez MCP server (BONEZ_MCP_URL-overridable, OAuth by default)
 skills/           8 skills
 commands/         /bonez:context, /bonez:search
-hooks/            PreToolUse gate prompting before memory and rules writes
+hooks/            PreToolUse write gate + SessionEnd session-capture hook
+bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
 server.json       MCP registry entry for the remote server
-tests/            gate tests (run in CI)
+tests/            gate tests + session-capture tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
 ```
 
 ## Development
 
 ```bash
-claude --plugin-dir . # load the working tree for one session
-./tests/test_gate.sh  # hook gate tests
+claude --plugin-dir .         # load the working tree for one session
+./tests/test_gate.sh          # hook gate tests
+./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
 claude plugin validate .
 ```
 

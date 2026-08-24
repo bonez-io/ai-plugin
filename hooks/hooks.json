@@ -1,5 +1,5 @@
 {
-  "description": "Permission gate for bonez writes: prompts before the bonez MCP `memory` and `rules` tools run save/update/delete. Reads (recall, list, get) pass through untouched.",
+  "description": "Permission gate for bonez writes (prompts before the bonez MCP `memory` and `rules` tools run save/update/delete — reads pass through untouched), plus opt-in session capture: at SessionEnd, hands the transcript to bonez-session-sync.mjs, which is a silent no-op until `install` has been run (see README — Session capture).",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,18 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/hooks/gate-write.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/bin/bonez-session-sync.mjs\" hook claude session-end",
             "timeout": 5
           }
         ]
