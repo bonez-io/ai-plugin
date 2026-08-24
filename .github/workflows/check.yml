@@ -11,6 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
@@ -43,6 +47,17 @@ jobs:
 
       - name: Write gate tests
         run: ./tests/test_gate.sh
+
+      - name: bonez-session-sync.mjs syntax + vendored bundle
+        run: |
+          set -euo pipefail
+          for f in bin/*.mjs bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
+            node --check "$f"
+            echo "ok: $f"
+          done
+
+      - name: Session capture tests
+        run: ./tests/test_session_sync.sh
 
       - name: Skill frontmatter sanity
         run: |
