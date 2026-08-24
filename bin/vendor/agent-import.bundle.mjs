@@ -155,6 +155,88 @@ function isoMs(value) {
   const t = Date.parse(value);
   return Number.isNaN(t) ? undefined : t;
 }
+function cursorBubbleToMessages(bubble, scrubber, ctx) {
+  const out = [];
+  const text = scrubber.scrubText(bubble.text || bubble.richText || "");
+  if (text)
+    out.push({ role: bubble.type === 1 ? "user" : "assistant", text });
+  const tfd = bubble?.toolFormerData;
+  if (!tfd || typeof tfd !== "object" || !tfd.name)
+    return out;
+  const id = String(tfd.toolCallId || bubble.bubbleId || "") || undefined;
+  const input = cursorToolInput(tfd, scrubber);
+  out.push({
+    role: "tool",
+    tool: String(tfd.name),
+    text: JSON.stringify(input).slice(0, 4000),
+    toolCallId: id,
+    toolInput: input,
+    cwd: ctx.cwd,
+    gitBranch: ctx.gitBranch,
+    sourceId: bubble.bubbleId || undefined
+  });
+  if (tfd.result !== undefined || tfd.error !== undefined) {
+    const result = cursorToolResult(tfd, scrubber);
+    out.push({
+      role: "tool",
+      tool: "result",
+      text: (typeof result === "string" ? result : JSON.stringify(result)).slice(0, 4000),
+      toolResultFor: id,
+      toolResult: result,
+      toolError: tfd.status === "error" || tfd.error !== undefined ? true : undefined,
+      cwd: ctx.cwd,
+      gitBranch: ctx.gitBranch,
+      sourceId: bubble.bubbleId || undefined
+    });
+  }
+  return out;
+}
+function cursorToolInput(tfd, scrubber) {
+  const raw = tfd.params ?? tfd.rawArgs;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return scrubber.scrubValue(parsed);
+      }
+    } catch {}
+    return raw ? { raw: scrubber.scrubText(raw) } : {};
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return scrubber.scrubValue(raw);
+  }
+  return {};
+}
+function cursorToolResult(tfd, scrubber) {
+  const raw = tfd.result !== undefined ? tfd.result : tfd.error;
+  if (typeof raw === "string") {
+    try {
+      return scrubber.scrubValue(JSON.parse(raw));
+    } catch {
+      return scrubber.scrubText(raw);
+    }
+  }
+  return raw === undefined ? undefined : scrubber.scrubValue(raw);
+}
+function cursorTerminalCwd(tfd) {
+  if (!tfd || typeof tfd !== "object")
+    return;
+  const name = String(tfd.name || "");
+  if (name !== "run_terminal_cmd" && name !== "run_terminal_command_v2")
+    return;
+  try {
+    const params = typeof tfd.params === "string" ? JSON.parse(tfd.params) : undefined;
+    if (typeof params?.cwd === "string" && params.cwd)
+      return params.cwd;
+  } catch {}
+  try {
+    const result = typeof tfd.result === "string" ? JSON.parse(tfd.result) : undefined;
+    if (typeof result?.resultingWorkingDirectory === "string" && result.resultingWorkingDirectory) {
+      return result.resultingWorkingDirectory;
+    }
+  } catch {}
+  return;
+}
 async function collectCursor(scrubber, repos, scope) {
   const dbPath = paths.cursorState();
   if (!existsSync2(dbPath))
@@ -213,7 +295,9 @@ async function collectCursor(scrubber, repos, scope) {
       } catch {
         continue;
       }
+      const gitBranch = typeof conv.createdOnBranch === "string" && conv.createdOnBranch ? conv.createdOnBranch : undefined;
       const messages = [];
+      let cwd = ws;
       for (const mh of conv.fullConversationHeadersOnly ?? []) {
         const bid = mh.bubbleId;
         if (!bid)
@@ -227,10 +311,10 @@ async function collectCursor(scrubber, repos, scope) {
         } catch {
           continue;
         }
-        const text = scrubber.scrubText(bubble.text || bubble.richText || "");
-        if (!text)
-          continue;
-        messages.push({ role: bubble.type === 1 ? "user" : "assistant", text });
+        const foundCwd = cursorTerminalCwd(bubble.toolFormerData);
+        if (foundCwd)
+          cwd = foundCwd;
+        messages.push(...cursorBubbleToMessages(bubble, scrubber, { cwd, gitBranch }));
       }
       if (!messages.length)
         continue;
@@ -269,14 +353,32 @@ function claudeContentToMessages(content, scrubber) {
         if (t.trim())
           msgs.push({ role: "_", text: t });
       } else if (b.type === "tool_use") {
-        msgs.push({ role: "tool", tool: b.name ?? "", text: JSON.stringify(scrubber.scrubValue(b.input ?? {})).slice(0, 4000) });
+        const input = scrubber.scrubValue(b.input ?? {});
+        msgs.push({
+          role: "tool",
+          tool: b.name ?? "",
+          text: JSON.stringify(input).slice(0, 4000),
+          toolCallId: b.id || undefined,
+          toolInput: input
+        });
       } else if (b.type === "tool_result") {
         const c = scrubber.scrubValue(b.content ?? "");
-        msgs.push({ role: "tool", tool: "result", text: (typeof c === "string" ? c : JSON.stringify(c)).slice(0, 4000) });
+        msgs.push({
+          role: "tool",
+          tool: "result",
+          text: (typeof c === "string" ? c : JSON.stringify(c)).slice(0, 4000),
+          toolResultFor: b.tool_use_id || undefined,
+          toolResult: c,
+          toolError: b.is_error === true ? true : undefined
+        });
       }
     }
   }
   return msgs;
+}
+function sessionIdFromPath(p) {
+  const leaf = p.split(/[\\/]/).pop() ?? p;
+  return leaf.replace(/\.jsonl$/, "") || p;
 }
 function parseClaudeFile(path, scrubber, repos, scope) {
   let raw;
@@ -321,6 +423,9 @@ function parseClaudeFile(path, scrubber, repos, scope) {
       if (m.role === "_")
         m.role = role;
       m.ts = ts;
+      m.cwd = ev.cwd;
+      m.gitBranch = ev.gitBranch;
+      m.sourceId = ev.uuid || undefined;
       messages.push(m);
     }
   }
@@ -330,7 +435,7 @@ function parseClaudeFile(path, scrubber, repos, scope) {
     return null;
   return {
     agent: "claude-code",
-    sessionId: path.split("/").pop()?.replace(/\.jsonl$/, "") ?? path,
+    sessionId: sessionIdFromPath(path),
     title,
     workspacePath: cwd,
     repo: repoFor(cwd, repos),
@@ -387,6 +492,26 @@ function codexText(content, scrubber) {
   return scrubber.scrubText(parts.filter(Boolean).join(`
 `));
 }
+function codexToolInput(rawValue, scrubber) {
+  if (typeof rawValue === "string") {
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return scrubber.scrubValue(parsed);
+      }
+    } catch {}
+    return { raw: scrubber.scrubText(rawValue) };
+  }
+  if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+    return scrubber.scrubValue(rawValue);
+  }
+  return {};
+}
+var CODEX_EXIT_CODE_RE = /\b(?:Process exited with code|Exit code:?)\s+(\d+)/i;
+function codexToolError(output) {
+  const match = CODEX_EXIT_CODE_RE.exec(output);
+  return match ? match[1] !== "0" : undefined;
+}
 function parseCodexFile(path, scrubber, repos, scope) {
   let raw;
   try {
@@ -415,7 +540,40 @@ function parseCodexFile(path, scrubber, repos, scope) {
       firstTs = firstTs ?? ts;
       lastTs = ts;
     }
-    const node = ev?.payload?.role ? ev.payload : ev;
+    const payload = ev?.payload && typeof ev.payload === "object" ? ev.payload : undefined;
+    const payloadType = payload?.type;
+    if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+      const callId = String(payload.call_id ?? "") || undefined;
+      const rawInput = payloadType === "function_call" ? payload.arguments : payload.input;
+      const input = codexToolInput(rawInput, scrubber);
+      messages.push({
+        role: "tool",
+        tool: String(payload.name ?? ""),
+        text: JSON.stringify(input).slice(0, 4000),
+        toolCallId: callId,
+        toolInput: input,
+        cwd,
+        ts
+      });
+      continue;
+    }
+    if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
+      const callId = String(payload.call_id ?? "") || undefined;
+      const rawOutput = payload.output;
+      const output = scrubber.scrubText(typeof rawOutput === "string" ? rawOutput : JSON.stringify(rawOutput ?? ""));
+      messages.push({
+        role: "tool",
+        tool: "result",
+        text: output.slice(0, 4000),
+        toolResultFor: callId,
+        toolResult: output,
+        toolError: codexToolError(output),
+        cwd,
+        ts
+      });
+      continue;
+    }
+    const node = payload?.role ? payload : ev;
     if (!node || !CODEX_ROLES.has(node.role))
       continue;
     const text = codexText(node.content ?? node.text ?? "", scrubber);
@@ -429,7 +587,7 @@ function parseCodexFile(path, scrubber, repos, scope) {
     return null;
   return {
     agent: "codex",
-    sessionId: path.split("/").pop()?.replace(/\.jsonl$/, "") ?? path,
+    sessionId: sessionIdFromPath(path),
     workspacePath: cwd,
     repo: repoFor(cwd, repos),
     createdAt: firstTs,
@@ -532,6 +690,8 @@ export {
   parseClaudeFile,
   normalizeRepos,
   listFiles,
+  cursorTerminalCwd,
+  cursorBubbleToMessages,
   collectCursor,
   collectCodex,
   collectClaude,
