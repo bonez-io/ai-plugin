@@ -13,6 +13,7 @@ var HIGH_PRECISION = [
   ["slack_token", /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g],
   ["google_api_key", /\bAIza[0-9A-Za-z_-]{35}\b/g],
   ["stripe_key", /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/g],
+  ["bonez_api_key", /\bbnz_[0-9a-f]{32,}\b/g],
   ["jwt", /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b/g],
   ["bearer_token", /\bbearer\s+[A-Za-z0-9._-]{16,}\b/gi],
   ["connection_string", /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?):\/\/[^\s:'"]+:[^\s@'"]+@[^\s'"]+/gi]
