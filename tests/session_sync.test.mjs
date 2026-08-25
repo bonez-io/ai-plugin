@@ -377,7 +377,18 @@ describe("OAuth credential lane (1SI-1033)", () => {
   test("login refuses cleanly when no OAuth client is configured in this build", async () => {
     const dataDir = freshDir("oauth-unconfigured")
     const res = await runCli(["login", "--global"], {
-      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_OAUTH_CLIENT_ID: "" },
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        // An EXPLICIT empty value means "this build has no client". The guard reads it with
+        // `??` for exactly this reason: under `||` the empty string looks unset, falls back
+        // to the shipped client id, and this test starts a REAL device flow against the real
+        // Auth0 and polls it for fifteen minutes. That is how the bug was found.
+        BONEZ_OAUTH_CLIENT_ID: "",
+        // Belt to that braces: even if the guard regresses, discovery has nowhere to go, so
+        // the test fails in a second instead of hanging. A test whose failure mode is a
+        // 15-minute stall is a test nobody will run.
+        BONEZ_GATEWAY_URL: "http://127.0.0.1:1",
+      },
     })
     assert.equal(res.status, 1)
     // Points at the lane that DOES work rather than failing somewhere inside the device flow.

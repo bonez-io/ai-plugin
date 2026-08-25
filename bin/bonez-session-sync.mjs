@@ -49,11 +49,14 @@ const _parsedDebounceMs = Number.parseInt(process.env.BONEZ_SESSION_SYNC_DEBOUNC
 const DEBOUNCE_MS = Number.isFinite(_parsedDebounceMs) && _parsedDebounceMs >= 0 ? _parsedDebounceMs : 120_000
 
 // The public OAuth client this plugin authenticates as (see the credential section below).
-// Empty until the Auth0 application exists — `login` then refuses with a message pointing at
-// the key lane, rather than failing somewhere deep in the device flow with a bare
-// "unknown client". Same shape as the gateway's own OAuth work, which was inert until the
-// tenant was configured. BONEZ_OAUTH_CLIENT_ID overrides it for testing against another app.
-const OAUTH_CLIENT_ID_BUILTIN = ""
+// PUBLIC by design and safe to ship in a distributed CLI: it is an identifier, not a secret
+// (RFC 8252 §8.5), and it grants nothing on its own — every token still requires the user's
+// own browser sign-in, and the scope it may ask for (`bonez:sessions`) is upload-only.
+// Verified 2026-08-25 against both the prod and qa MCP audiences: POST /oauth/device/code
+// returns a device_code + user_code rather than "unknown client".
+// Empty would make `login` refuse with a pointer at the key lane instead of failing deep in
+// the flow. BONEZ_OAUTH_CLIENT_ID overrides it for testing against another Auth0 app.
+const OAUTH_CLIENT_ID_BUILTIN = "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm"
 
 // -------------------------------------------------------------------------------- data dir
 
@@ -274,7 +277,12 @@ function findCodexCatchupTarget(currentSessionId) {
 // distributed CLI is not a secret. Security comes from the user's own browser consent and
 // from the token being scoped to `bonez:sessions` — upload-only, and refused on /mcp by the
 // gateway precisely so a long-lived credential in a config file can't read the org lake.
-const OAUTH_CLIENT_ID = process.env.BONEZ_OAUTH_CLIENT_ID || OAUTH_CLIENT_ID_BUILTIN
+// `??`, never `||` — the same trap DEBOUNCE_MS documents above. `BONEZ_OAUTH_CLIENT_ID=""`
+// is a deliberate "this build has no client", and `||` would treat that empty string as
+// unset and fall back to the real one. That is not a style point: with `||`, anything
+// setting the variable empty to DISABLE the flow instead starts a real device flow against
+// the real Auth0 and polls it for fifteen minutes.
+const OAUTH_CLIENT_ID = process.env.BONEZ_OAUTH_CLIENT_ID ?? OAUTH_CLIENT_ID_BUILTIN
 const OAUTH_SCOPES = "bonez:sessions offline_access"
 // Refresh this far before the token actually expires, so an upload that starts just under the
 // wire doesn't 401 midway through presign → PUT → complete.
