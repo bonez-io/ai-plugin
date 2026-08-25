@@ -174,22 +174,42 @@ separate follow-up).
 **Install (once per machine):**
 
 ```bash
-# mint a sessions-scoped key in console.bonez.io under API keys (scope = sessions), then:
-bonez-session-sync.mjs install bnz_... --repo /path/to/repo   # repeat --repo for more
-# or: bonez-session-sync.mjs install bnz_... --global         # every repo on this machine
+bonez-session-sync.mjs login --repo /path/to/repo   # repeat --repo for more
+bonez-session-sync.mjs login --global               # every repo on this machine
 ```
+
+That opens a browser, you sign in the same way you did for the MCP server itself — GitHub,
+Google, or any other bonez login — and approve. Nothing to mint, nothing to paste.
+
+The uploader runs its **own** OAuth rather than borrowing the one your coding agent holds,
+because it has to: the hook is a separate OS process with no access to the MCP client's
+keychain, and that client's token is pinned to `POST /mcp` anyway. So it does the device
+flow (RFC 8628), which exists precisely for the case where the program asking for a token
+isn't the one the human authorizes in. The token it gets is scoped to `bonez:sessions` —
+upload-only. The gateway refuses it on `/mcp`, so this credential cannot read the lake even
+though it sits on your disk.
 
 Run from inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's
 `PATH`, so the bare command above works; otherwise invoke it by its full path (`node
-<plugin-root>/bin/bonez-session-sync.mjs install ...`). With no `--repo` given, `install` scopes
-capture to whatever directory you ran it from. `install` prints exactly what uploads, where it
+<plugin-root>/bin/bonez-session-sync.mjs login ...`). With no `--repo` given, `login` scopes
+capture to whatever directory you ran it from, and prints exactly what uploads, where it
 goes, and who can read it before anything is captured.
+
+**Headless / CI**, where there's no browser to sign in with: mint a sessions-scoped key in
+[console.bonez.io](https://console.bonez.io) under **API keys** (scope = *Session capture*)
+and use `install` instead. Same two-lane shape as the MCP server itself.
+
+```bash
+bonez-session-sync.mjs install bnz_... --global
+```
 
 | Command | Does |
 | --- | --- |
-| `install <bnz_...key> [--repo <path>]... [--global]` | Store the key (mode 600) and turn capture on. Repo-scoped by default; `--global` captures every repo on this machine. |
-| `status` | Enabled/disabled, scope, repos, sessions synced so far. Never prints the raw key. |
-| `disable` / `enable` | Turn capture off/on without discarding the installed key. |
+| `login [--repo <path>]... [--global]` | Browser sign-in, then turn capture on. Repo-scoped by default; `--global` captures every repo on this machine. Also re-authorizes an existing install. |
+| `logout` | Discard the credential and stop capture. |
+| `install <bnz_...key> [--repo <path>]... [--global]` | The headless lane: store a sessions-scoped key (mode 600) and turn capture on. Same scope options. |
+| `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far. Never prints a key or token. |
+| `disable` / `enable` | Turn capture off/on without discarding the credential. |
 
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
 config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.

@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
+import { startStubOAuth } from "./lib/stub-oauth.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
@@ -231,6 +232,239 @@ describe("install / status / disable / enable", () => {
     const mode = (statSync(join(dataDir, "config.json")).mode & 0o777).toString(8)
     assert.equal(mode, "600")
     rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
+// ---------------------------------------------------------------------------- OAuth lane
+
+describe("OAuth credential lane (1SI-1033)", () => {
+  test("hasCredential / describeCredential — two lanes, and neither leaks the secret", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+
+    assert.equal(mod.hasCredential(null), false)
+    assert.equal(mod.hasCredential({}), false)
+    assert.equal(mod.hasCredential({ apiKey: TEST_KEY }), true)
+    assert.equal(mod.hasCredential({ oauth: { refreshToken: "rt" } }), true)
+    // An access token with no refresh token still counts as installed — it works until it
+    // expires, and `describeCredential` is what says so out loud.
+    assert.equal(mod.hasCredential({ oauth: { accessToken: "at" } }), true)
+
+    // `status` output gets pasted into issues. The raw secret must never be in it.
+    const keyLine = mod.describeCredential({ apiKey: TEST_KEY })
+    assert.doesNotMatch(keyLine, new RegExp(TEST_KEY))
+    const oauthLine = mod.describeCredential({
+      oauth: { accessToken: "at-secret-value", refreshToken: "rt-secret-value", expiresAt: Date.now() + 600_000 },
+    })
+    assert.doesNotMatch(oauthLine, /at-secret-value|rt-secret-value/)
+    assert.match(oauthLine, /OAuth/)
+    assert.match(mod.describeCredential({ oauth: { accessToken: "x", expiresAt: Date.now() - 1 } }), /expired/)
+    assert.match(mod.describeCredential({ oauth: { accessToken: "x", expiresAt: Date.now() + 600_000 } }),
+                 /no refresh token/)
+  })
+
+  test("discoverAuthServer walks gateway metadata -> AS metadata, hardcoding nothing", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const as = await startStubOAuth()
+    try {
+      const found = await mod.discoverAuthServer(as.url)
+      assert.equal(found.deviceEndpoint, `${as.url}/oauth/device/code`)
+      assert.equal(found.tokenEndpoint, `${as.url}/oauth/token`)
+      assert.equal(found.resource, `${as.url}/mcp`)
+      // Both documents were actually read — the endpoints came from discovery, not a constant.
+      assert.equal(as.calls.prm, 1)
+      assert.equal(as.calls.oidc, 1)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("discoverAuthServer says which document failed, not just that something did", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    await assert.rejects(
+      () => mod.discoverAuthServer("http://127.0.0.1:1"),
+      (err) => /OAuth metadata|fetch failed|ECONNREFUSED/.test(err.message),
+    )
+  })
+
+  test("resolveBearer: an API key wins and costs no round trip", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const as = await startStubOAuth()
+    try {
+      const bearer = await mod.resolveBearer({ apiKey: TEST_KEY, oauth: { refreshToken: "rt" } }, as.url)
+      assert.equal(bearer, TEST_KEY)
+      assert.equal(as.calls.token.length, 0)
+      assert.equal(as.calls.prm, 0)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("resolveBearer: a still-valid access token is reused as-is", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const as = await startStubOAuth()
+    try {
+      const cfg = { oauth: { accessToken: "at-live", refreshToken: "rt", expiresAt: Date.now() + 30 * 60_000 } }
+      assert.equal(await mod.resolveBearer(cfg, as.url), "at-live")
+      assert.equal(as.calls.token.length, 0)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("resolveBearer: an expiring token refreshes, and the new one is persisted", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const dataDir = freshDir("oauth-refresh")
+    const as = await startStubOAuth({ rotateRefreshToken: "rt-2" })
+    const savedDataDir = process.env.CLAUDE_PLUGIN_DATA
+    process.env.CLAUDE_PLUGIN_DATA = dataDir
+    try {
+      // Inside TOKEN_SKEW_MS of expiry, so it must refresh rather than hand back a token that
+      // would expire mid-upload.
+      const cfg = { enabled: true, scope: "global", repos: [],
+                    oauth: { accessToken: "at-stale", refreshToken: "rt-1", expiresAt: Date.now() + 30_000 } }
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify(cfg))
+
+      const bearer = await mod.resolveBearer(cfg, as.url)
+      assert.equal(bearer, "at-refreshed-1")
+      assert.equal(as.calls.token[0].grant_type, "refresh_token")
+      assert.equal(as.calls.token[0].refresh_token, "rt-1")
+
+      const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      assert.equal(written.oauth.accessToken, "at-refreshed-1")
+      // Auth0 rotated the refresh token; the rotated one must be what we keep.
+      assert.equal(written.oauth.refreshToken, "rt-2")
+      // Fields the refresh has no business touching survive it.
+      assert.equal(written.enabled, true)
+      assert.equal(written.scope, "global")
+    } finally {
+      if (savedDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA
+      else process.env.CLAUDE_PLUGIN_DATA = savedDataDir
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("resolveBearer: a non-rotating AS keeps the refresh token it already had", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const dataDir = freshDir("oauth-norotate")
+    const as = await startStubOAuth({ rotateRefreshToken: null })
+    const savedDataDir = process.env.CLAUDE_PLUGIN_DATA
+    process.env.CLAUDE_PLUGIN_DATA = dataDir
+    try {
+      const cfg = { oauth: { accessToken: "at-stale", refreshToken: "rt-keep", expiresAt: Date.now() - 1 } }
+      writeFileSync(join(dataDir, "config.json"), JSON.stringify(cfg))
+      await mod.resolveBearer(cfg, as.url)
+      const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      // Storing null here would lock the user out of every future refresh silently.
+      assert.equal(written.oauth.refreshToken, "rt-keep")
+    } finally {
+      if (savedDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA
+      else process.env.CLAUDE_PLUGIN_DATA = savedDataDir
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("resolveBearer: no credential, and an expired one with no refresh token, both say what to do", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    await assert.rejects(() => mod.resolveBearer({}, "http://127.0.0.1:1"), /login.*install|install.*login/s)
+    await assert.rejects(
+      () => mod.resolveBearer({ oauth: { accessToken: "at", expiresAt: Date.now() - 1 } }, "http://127.0.0.1:1"),
+      /run `login` again/,
+    )
+  })
+
+  test("login refuses cleanly when no OAuth client is configured in this build", async () => {
+    const dataDir = freshDir("oauth-unconfigured")
+    const res = await runCli(["login", "--global"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_OAUTH_CLIENT_ID: "" },
+    })
+    assert.equal(res.status, 1)
+    // Points at the lane that DOES work rather than failing somewhere inside the device flow.
+    assert.match(res.stderr, /install <bnz_\.\.\.key>/)
+    assert.equal(existsSync(join(dataDir, "config.json")), false)
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("login: full device flow, polls through authorization_pending, stores no key", async () => {
+    const dataDir = freshDir("oauth-login")
+    const as = await startStubOAuth({ pendingPolls: 2 })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: {
+          CLAUDE_PLUGIN_DATA: dataDir,
+          BONEZ_GATEWAY_URL: as.url,
+          BONEZ_OAUTH_CLIENT_ID: "test-client",
+          BONEZ_DEVICE_POLL_FLOOR_MS: "1",
+        },
+      })
+      assert.equal(res.status, 0, res.stderr)
+      // The user is told where to go and what happens next.
+      assert.match(res.stdout, /\/activate\?user_code=WXYZ-1234/)
+      assert.match(res.stdout, /installed and ENABLED/)
+      assert.match(res.stdout, /cannot read the lake/)
+
+      // It asked for exactly the upload-only scope, against the resource discovery named.
+      assert.equal(as.calls.device[0].client_id, "test-client")
+      assert.equal(as.calls.device[0].scope, "bonez:sessions offline_access")
+      assert.equal(as.calls.device[0].audience, `${as.url}/mcp`)
+
+      // RFC 8628 §3.5: it kept polling instead of giving up on the first pending answer.
+      assert.equal(as.calls.token.length, 3)
+      assert.equal(as.calls.token[0].grant_type, "urn:ietf:params:oauth:grant-type:device_code")
+
+      const cfg = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      assert.equal(cfg.oauth.accessToken, "at-1")
+      assert.equal(cfg.oauth.refreshToken, "rt-1")
+      assert.equal(cfg.enabled, true)
+      assert.equal(cfg.scope, "global")
+      // The whole point: nothing pasted, nothing key-shaped on disk.
+      assert.equal(cfg.apiKey, undefined)
+      assert.doesNotMatch(readFileSync(join(dataDir, "config.json"), "utf8"), /bnz_/)
+      assert.equal((statSync(join(dataDir, "config.json")).mode & 0o777).toString(8), "600")
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("login refuses a credential with a fuse in it — no refresh token, no install", async () => {
+    const dataDir = freshDir("oauth-norefresh")
+    const as = await startStubOAuth({ refreshTokenOnLogin: null })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client",
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      assert.equal(res.status, 1)
+      assert.match(res.stderr, /offline access/)
+      // Capture would have died silently within the hour, in a background process nobody
+      // watches. Nothing must be written.
+      assert.equal(existsSync(join(dataDir, "config.json")), false)
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("logout removes both lanes and stops capture", async () => {
+    const dataDir = freshDir("oauth-logout")
+    const as = await startStubOAuth()
+    try {
+      await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client",
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      const res = await runCli(["logout"], { env: { CLAUDE_PLUGIN_DATA: dataDir } })
+      assert.equal(res.status, 0)
+      const cfg = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      assert.equal(cfg.oauth, undefined)
+      assert.equal(cfg.apiKey, undefined)
+      assert.equal(cfg.enabled, false)
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
   })
 })
 
