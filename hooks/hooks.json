@@ -1,5 +1,5 @@
 {
-  "description": "Permission gate for bonez writes (prompts before the bonez MCP `memory` and `rules` tools run save/update/delete — reads pass through untouched), plus opt-in session capture: at SessionEnd, hands the transcript to bonez-session-sync.mjs, which is a silent no-op until `install` has been run (see README — Session capture).",
+  "description": "Permission gate for bonez writes (prompts before the bonez MCP `memory` and `rules` tools run save/update/delete — reads pass through untouched), plus opt-in session capture: at SessionEnd, hands the transcript to bonez-session-sync.mjs, which is a silent no-op until `login` (or, headless, `install`) has been run (see README — Session capture).",
   "hooks": {
     "PreToolUse": [
       {

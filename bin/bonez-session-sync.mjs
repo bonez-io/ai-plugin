@@ -48,6 +48,13 @@ const SELF_PATH = fileURLToPath(import.meta.url)
 const _parsedDebounceMs = Number.parseInt(process.env.BONEZ_SESSION_SYNC_DEBOUNCE_MS ?? "", 10)
 const DEBOUNCE_MS = Number.isFinite(_parsedDebounceMs) && _parsedDebounceMs >= 0 ? _parsedDebounceMs : 120_000
 
+// The public OAuth client this plugin authenticates as (see the credential section below).
+// Empty until the Auth0 application exists — `login` then refuses with a message pointing at
+// the key lane, rather than failing somewhere deep in the device flow with a bare
+// "unknown client". Same shape as the gateway's own OAuth work, which was inert until the
+// tenant was configured. BONEZ_OAUTH_CLIENT_ID overrides it for testing against another app.
+const OAUTH_CLIENT_ID_BUILTIN = ""
+
 // -------------------------------------------------------------------------------- data dir
 
 // ${CLAUDE_PLUGIN_DATA} is the writable, per-plugin, per-user directory Claude Code sets for
@@ -119,6 +126,12 @@ function saveConfig(cfg) {
   writeJsonAtomic(configPath(), cfg, 0o600)
 }
 
+// Two credential lanes now (see the credential section below), so "installed" can no longer
+// be spelled `cfg.apiKey`. A config carrying neither is a config that will never upload.
+function hasCredential(cfg) {
+  return Boolean(cfg?.apiKey || cfg?.oauth?.refreshToken || cfg?.oauth?.accessToken)
+}
+
 const loadState = () => readJsonSafe(statePath(), {})
 function saveState(state) {
   writeJsonAtomic(statePath(), state, 0o600)
@@ -166,7 +179,7 @@ async function cmdHook(agent, event) {
   if (event !== "session-end" && event !== "session-start") return
 
   const cfg = loadConfig()
-  if (!cfg || !cfg.enabled || !cfg.apiKey) return // never installed, or explicitly disabled
+  if (!cfg || !cfg.enabled || !hasCredential(cfg)) return // never installed, or explicitly disabled
 
   const raw = readStdinSync()
   if (!raw || !raw.trim()) return
@@ -246,6 +259,191 @@ function findCodexCatchupTarget(currentSessionId) {
   if (!newest) return null
   const sessionId = newest.p.split("/").pop()?.replace(/\.jsonl$/, "") ?? newest.p
   return { sessionId, transcriptPath: newest.p }
+}
+
+// ------------------------------------------------------------------- credential (key or OAuth)
+
+// The uploader is a separate OS process from the MCP client, so it cannot borrow the OAuth
+// token that client holds (another application's keychain), and even if it could,
+// MCP_AUDIENCE_ROUTES pins that token to POST /mcp — not the two import routes this needs.
+// So it runs its OWN OAuth: RFC 8628 device flow, whose whole point is that the process
+// asking for the token doesn't have to be the process the user authorizes in. Same Auth0,
+// same GitHub/Google/whatever sign-in, no console visit and nothing to paste.
+//
+// A public client, per RFC 8252 §8.5: there is no secret, because a secret shipped inside a
+// distributed CLI is not a secret. Security comes from the user's own browser consent and
+// from the token being scoped to `bonez:sessions` — upload-only, and refused on /mcp by the
+// gateway precisely so a long-lived credential in a config file can't read the org lake.
+const OAUTH_CLIENT_ID = process.env.BONEZ_OAUTH_CLIENT_ID || OAUTH_CLIENT_ID_BUILTIN
+const OAUTH_SCOPES = "bonez:sessions offline_access"
+// Refresh this far before the token actually expires, so an upload that starts just under the
+// wire doesn't 401 midway through presign → PUT → complete.
+const TOKEN_SKEW_MS = 120_000
+// RFC 8628 §3.5 sets 5s as the default polling interval, and an AS that omits `interval`
+// means exactly that — so this is the floor a real login honours. Overridable only so the test
+// suite can drive the pending/slow_down branches without spending 5s a poll to do it; same
+// escape hatch, and same reason, as BONEZ_SESSION_SYNC_DEBOUNCE_MS above.
+const _parsedPollFloor = Number.parseInt(process.env.BONEZ_DEVICE_POLL_FLOOR_MS ?? "", 10)
+const DEVICE_POLL_FLOOR_MS = Number.isFinite(_parsedPollFloor) && _parsedPollFloor >= 0 ? _parsedPollFloor : 5_000
+
+async function fetchJson(url, init) {
+  const res = await fetch(url, init)
+  const text = await res.text().catch(() => "")
+  let json = {}
+  try {
+    json = text ? JSON.parse(text) : {}
+  } catch {
+    /* non-JSON body — ok/status and `text` are what callers check */
+  }
+  return { ok: res.ok, status: res.status, json, text }
+}
+
+// Everything about the authorization server is DISCOVERED, never hardcoded: the gateway's
+// RFC 9728 metadata names its AS, and that AS's own OIDC metadata names the two endpoints.
+// So pointing this at qa (BONEZ_GATEWAY_URL) or at a future tenant needs no code change, and
+// the uploader can never end up talking to an AS the resource server doesn't actually trust.
+async function discoverAuthServer(gatewayUrl) {
+  const prm = await fetchJson(`${gatewayUrl}/.well-known/oauth-protected-resource`)
+  if (!prm.ok) throw new Error(`could not read ${gatewayUrl}'s OAuth metadata (HTTP ${prm.status})`)
+  const issuer = (prm.json.authorization_servers ?? [])[0]
+  const resource = prm.json.resource
+  if (!issuer) throw new Error(`${gatewayUrl} names no authorization server — is OAuth configured?`)
+  const base = issuer.replace(/\/+$/, "")
+  const meta = await fetchJson(`${base}/.well-known/openid-configuration`)
+  if (!meta.ok) throw new Error(`could not read ${base}'s OIDC metadata (HTTP ${meta.status})`)
+  const deviceEndpoint = meta.json.device_authorization_endpoint
+  const tokenEndpoint = meta.json.token_endpoint
+  if (!deviceEndpoint || !tokenEndpoint) {
+    throw new Error(`${base} does not offer the device-code flow`)
+  }
+  return { issuer, resource, deviceEndpoint, tokenEndpoint }
+}
+
+function formBody(fields) {
+  return new URLSearchParams(fields).toString()
+}
+
+const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" }
+
+async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
+  if (!OAUTH_CLIENT_ID) {
+    throw new Error(
+      "OAuth login is not configured in this build.\n" +
+        "Use a key instead: bonez-session-sync.mjs install <bnz_...key>\n" +
+        "(or set BONEZ_OAUTH_CLIENT_ID if you are testing against your own Auth0 app).",
+    )
+  }
+  const as = await discoverAuthServer(gatewayUrl)
+  // `audience` rather than RFC 8707 `resource`: Auth0's device-code endpoint is documented in
+  // terms of `audience`, and it is what decides whether the issued token's `aud` is the MCP
+  // resource the gateway validates against. `resource` works on /authorize once the tenant's
+  // Resource Parameter Compatibility Profile is on; this endpoint is not that endpoint.
+  const start = await fetchJson(as.deviceEndpoint, {
+    method: "POST",
+    headers: FORM_HEADERS,
+    body: formBody({ client_id: OAUTH_CLIENT_ID, scope: OAUTH_SCOPES, audience: as.resource }),
+  })
+  if (!start.ok) {
+    throw new Error(`device authorization failed (HTTP ${start.status}): ${start.json.error_description ?? start.text}`)
+  }
+  const { device_code: deviceCode, user_code: userCode, expires_in: expiresIn } = start.json
+  const verifyUrl = start.json.verification_uri_complete || start.json.verification_uri
+  onPrompt(
+    [
+      "",
+      "  Open this page to authorize bonez session capture:",
+      `    ${verifyUrl}`,
+      start.json.verification_uri_complete ? "" : `  and enter the code:  ${userCode}`,
+      "",
+      `  Waiting for you to approve (this code expires in ${Math.round((expiresIn ?? 900) / 60)} minutes)…`,
+      "",
+    ]
+      .filter((l) => l !== "")
+      .join("\n"),
+  )
+
+  // RFC 8628 §3.5: poll at the server's `interval`, and back off by 5s more each time it says
+  // slow_down. Anything other than the two "keep waiting" errors is terminal — polling through
+  // access_denied or expired_token would just burn the user's time to reach the same answer.
+  let intervalMs = Math.max((start.json.interval ?? 5) * 1000, DEVICE_POLL_FLOOR_MS)
+  const deadline = Date.now() + (expiresIn ?? 900) * 1000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs))
+    const res = await fetchJson(as.tokenEndpoint, {
+      method: "POST",
+      headers: FORM_HEADERS,
+      body: formBody({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: OAUTH_CLIENT_ID,
+      }),
+    })
+    if (res.ok && res.json.access_token) return { ...tokensFrom(res.json), issuer: as.issuer }
+    const err = res.json.error
+    if (err === "authorization_pending") continue
+    if (err === "slow_down") {
+      intervalMs += 5_000
+      continue
+    }
+    if (err === "access_denied") throw new Error("authorization was denied in the browser")
+    if (err === "expired_token") throw new Error("the code expired before it was approved — run login again")
+    throw new Error(`token request failed: ${res.json.error_description ?? err ?? `HTTP ${res.status}`}`)
+  }
+  throw new Error("the code expired before it was approved — run login again")
+}
+
+function tokensFrom(payload) {
+  return {
+    accessToken: payload.access_token,
+    // Auth0 only returns this when the client asked for `offline_access` AND the API allows
+    // it. Without one, capture would stop working silently the first time the access token
+    // expires, so `login` checks for it rather than storing a credential with a fuse in it.
+    refreshToken: payload.refresh_token ?? null,
+    expiresAt: Date.now() + (payload.expires_in ?? 3600) * 1000,
+  }
+}
+
+async function refreshAccessToken(gatewayUrl, refreshToken) {
+  const as = await discoverAuthServer(gatewayUrl)
+  const res = await fetchJson(as.tokenEndpoint, {
+    method: "POST",
+    headers: FORM_HEADERS,
+    body: formBody({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: OAUTH_CLIENT_ID,
+    }),
+  })
+  if (!res.ok || !res.json.access_token) {
+    throw new Error(`refresh failed: ${res.json.error_description ?? res.json.error ?? `HTTP ${res.status}`}`)
+  }
+  // Auth0 rotates refresh tokens when rotation is on and omits the field when it isn't —
+  // `?? refreshToken` keeps the existing one in the second case rather than storing null and
+  // locking the user out of every future refresh.
+  return { ...tokensFrom(res.json), refreshToken: res.json.refresh_token ?? refreshToken }
+}
+
+// The one place the upload path asks "what do I authenticate with". Returns a bearer string,
+// or throws with a message worth putting in the log. A bnz_ key wins when both are present:
+// it is the explicit, headless-lane choice, and it needs no network round trip to use.
+async function resolveBearer(cfg, gatewayUrl) {
+  if (cfg.apiKey) return cfg.apiKey
+  const oauth = cfg.oauth
+  if (!oauth?.refreshToken && !oauth?.accessToken) {
+    throw new Error("no credential installed — run `login`, or `install <bnz_...key>`")
+  }
+  if (oauth.accessToken && oauth.expiresAt && Date.now() < oauth.expiresAt - TOKEN_SKEW_MS) {
+    return oauth.accessToken
+  }
+  if (!oauth.refreshToken) {
+    throw new Error("the stored access token expired and there is no refresh token — run `login` again")
+  }
+  const fresh = await refreshAccessToken(gatewayUrl, oauth.refreshToken)
+  // Re-read before writing: a concurrent `disable` or `--repo` edit must not be clobbered by
+  // an upload that happened to refresh its token at the same moment. Only `oauth` is ours.
+  const current = loadConfig() ?? cfg
+  saveConfig({ ...current, oauth: { ...fresh, issuer: oauth.issuer } })
+  return fresh.accessToken
 }
 
 // -------------------------------------------------------------------------------- upload (background)
@@ -374,7 +572,14 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath }) {
   const gatewayUrl = gatewayBaseUrl()
   const wireAgent = agent === "claude" ? "claude-code" : "codex"
 
-  const pre = await presign(gatewayUrl, cfg.apiKey, wireAgent, scope)
+  let bearer
+  try {
+    bearer = await resolveBearer(cfg, gatewayUrl)
+  } catch (err) {
+    await log(`upload: session=${sessionId} agent=${agent} skipped — ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  const pre = await presign(gatewayUrl, bearer, wireAgent, scope)
   if (!pre.ok || !pre.json.upload_id || !pre.json.url) {
     await log(`upload: session=${dedupKey} agent=${agent} presign failed — HTTP ${pre.status}`)
     return
@@ -386,7 +591,7 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath }) {
     return
   }
 
-  const done = await completeUpload(gatewayUrl, cfg.apiKey, pre.json.upload_id)
+  const done = await completeUpload(gatewayUrl, bearer, pre.json.upload_id)
   if (!done.ok) {
     await log(`upload: session=${dedupKey} agent=${agent} complete failed — HTTP ${done.status}`)
     return
@@ -419,7 +624,7 @@ async function cmdUpload(agent, event, payloadFile) {
     return
   }
   const cfg = loadConfig()
-  if (!cfg || !cfg.enabled || !cfg.apiKey) {
+  if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
     await log("upload: skipped — not installed or disabled")
     return
   }
@@ -465,6 +670,18 @@ function parseInstallArgs(rest) {
   return { repos, global }
 }
 
+// What `status` says about the credential. Never the token, and never the key beyond its
+// display prefix — this output routinely ends up pasted into an issue.
+function describeCredential(cfg) {
+  if (cfg.apiKey) return `API key ${maskKey(cfg.apiKey)}`
+  const oauth = cfg.oauth
+  if (!oauth) return "(none — run `login`)"
+  if (!oauth.expiresAt) return "OAuth"
+  const mins = Math.round((oauth.expiresAt - Date.now()) / 60_000)
+  const freshness = mins > 0 ? `token valid ${mins}m` : "token expired, refreshes on next upload"
+  return `OAuth${oauth.refreshToken ? "" : " (no refresh token)"} — ${freshness}`
+}
+
 function maskKey(key) {
   if (!key) return "(none)"
   return key.length <= 10 ? "****" : `${key.slice(0, 10)}${"*".repeat(Math.min(24, key.length - 10))}`
@@ -498,6 +715,9 @@ function consentText(cfg) {
     "  Turn off persistently:          bonez-session-sync.mjs disable",
     "  Check status any time:          bonez-session-sync.mjs status",
     `Credential stored at: ${configPath()} (${credentialProtection()}).`,
+    cfg.oauth
+      ? "Signed in with OAuth, scoped to session upload only — this credential cannot read the lake."
+      : "Using an API key. `login` swaps it for browser sign-in with no key on disk.",
   ].join("\n")
 }
 
@@ -516,11 +736,64 @@ function cmdInstall(key, rest) {
   console.log(consentText(cfg))
 }
 
+async function cmdLogin(rest) {
+  const { repos: explicitRepos, global } = parseInstallArgs(rest)
+  const scope = global ? "global" : "repo"
+  const repos = global ? [] : normalizeRepos(explicitRepos.length ? explicitRepos : [process.cwd()])
+  let tokens
+  try {
+    tokens = await deviceLogin(gatewayBaseUrl())
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err))
+    process.exitCode = 1
+    return
+  }
+  if (!tokens.refreshToken) {
+    // Without one, capture works until the access token expires and then stops — silently,
+    // in a background process nobody is watching. Refuse now, loudly, rather than install a
+    // credential with a fuse in it.
+    console.error(
+      "Authorization succeeded but no refresh token was issued, so capture would stop working\n" +
+        "within the hour. Enable offline access for this application/API in Auth0, then run login again.",
+    )
+    process.exitCode = 1
+    return
+  }
+  // Preserve an existing install's fields (enabled/installedAt) so `login` can also be used to
+  // re-authorize an install that already exists, without resetting it.
+  const current = loadConfig() ?? {}
+  const cfg = {
+    ...current,
+    enabled: true,
+    scope,
+    repos,
+    oauth: tokens,
+    installedAt: current.installedAt ?? new Date().toISOString(),
+  }
+  delete cfg.apiKey
+  saveConfig(cfg)
+  console.log(consentText(cfg))
+}
+
+function cmdLogout() {
+  const cfg = loadConfig()
+  if (!cfg) {
+    console.log("bonez session capture: not installed — nothing to log out of.")
+    return
+  }
+  delete cfg.oauth
+  delete cfg.apiKey
+  cfg.enabled = false
+  saveConfig(cfg)
+  console.log("bonez session capture: credential removed and capture disabled. Run `login` to set it up again.")
+}
+
 function cmdStatus() {
   const cfg = loadConfig()
   if (!cfg) {
     console.log("bonez session capture: not installed.")
-    console.log("Run: bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
+    console.log("Run: bonez-session-sync.mjs login [--repo <path>]... [--global]")
+    console.log("  (headless, no browser: install <bnz_...key> with the same options)")
     return
   }
   const state = loadState()
@@ -528,7 +801,7 @@ function cmdStatus() {
     `bonez session capture: ${cfg.enabled ? "enabled" : "disabled"}${
       disabledByEnv() ? " (env override BONEZ_SESSION_SYNC=0 is ALSO active)" : ""
     }`,
-    `  key:      ${maskKey(cfg.apiKey)}`,
+    `  sign-in:  ${describeCredential(cfg)}`,
     `  scope:    ${cfg.scope}`,
   ]
   if (cfg.scope === "repo") {
@@ -596,6 +869,12 @@ async function main() {
       }
       process.exit(0)
       break
+    case "login":
+      await cmdLogin(rest)
+      return
+    case "logout":
+      cmdLogout()
+      return
     case "install":
       cmdInstall(rest[0], rest.slice(1))
       return
@@ -612,7 +891,10 @@ async function main() {
       console.log("bonez-session-sync — capture Claude Code / Codex sessions into bonez")
       console.log("")
       console.log("usage:")
+      console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")
+      console.log("  bonez-session-sync.mjs logout")
       console.log("  bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
+      console.log("                                                                  headless lane")
       console.log("  bonez-session-sync.mjs status")
       console.log("  bonez-session-sync.mjs disable")
       console.log("  bonez-session-sync.mjs enable")
@@ -634,6 +916,10 @@ if (isMain) await main()
 export {
   buildBundle,
   cmdHook,
+  describeCredential,
+  discoverAuthServer,
+  hasCredential,
+  resolveBearer,
   cmdUpload,
   contentHashOf,
   dataDir,

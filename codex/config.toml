@@ -44,15 +44,15 @@ url = "https://gateway.bonez.io/mcp"
 # [mcp_servers.bonez.tools.rules]
 # approval_mode = "approve"
 
-# --- Optional: session capture (off until you run `install` — see README) ---
+# --- Optional: session capture (off until you run `login` — see README) ---
 # Mirrors the Claude Code leg's hooks/hooks.json SessionEnd hook: at the end
 # of (and, via the SessionStart catch-up below, the start of) a session,
 # hands the transcript to the SAME bin/bonez-session-sync.mjs the Claude
 # Code leg uses, which is a silent no-op until you've run
-# `bonez-session-sync.mjs install <bnz_...key>` once (mint a sessions-scoped
-# key in console.bonez.io — scope = sessions). This block does nothing by
-# itself even with `hooks = true` below and no install: consent is gated at
-# BOTH layers on purpose.
+# `bonez-session-sync.mjs login` once (browser sign-in — same GitHub/Google/
+# bonez identity as the MCP server; `install <bnz_...key>` is the headless
+# alternative). This block does nothing by itself even with `hooks = true`
+# below and no login: consent is gated at BOTH layers on purpose.
 #
 # EDIT THE COMMAND PATH before enabling — Codex does not expand ${VAR} or
 # ~ inside config.toml (same caveat as the `url` field above), so point it

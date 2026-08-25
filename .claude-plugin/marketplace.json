@@ -11,7 +11,7 @@
       "displayName": "Bonez",
       "source": "./",
       "description": "Bring your organization's context lake into your coding agent — fused org search across code, decisions, tickets, PRs, docs, and people; graph-powered code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "author": {
         "name": "Bonez",
         "url": "https://bonez.io"
