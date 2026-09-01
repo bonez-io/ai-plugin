@@ -163,11 +163,18 @@ jobs:
           cmp -s "$mlogo" "cursor/$mlogo" || { echo "::error::the two logo copies differ"; exit 1; }
           echo "ok: marketplace entry logo resolves from both roots"
 
-          # Cursor obtains its OAuth client by dynamic registration, the same way
-          # the Codex leg did — so there is no client id to pin here. What DOES
-          # matter is that the url is literal: Cursor expands neither ${VAR} nor ~,
-          # and the Claude leg's .mcp.json deliberately uses ${BONEZ_MCP_URL:-...},
-          # which arriving here would leave no reachable server at all.
+          # OAuth is pinned to the Bonez CLI application rather than left to dynamic
+          # registration. DCR is enabled on the tenant, but it creates THIRD-PARTY
+          # clients and that quota is already spent by the two Claude Code and Codex
+          # clients registered earlier (tpc_* in the Auth0 app list) — a third
+          # registration returns 403 "reached the limit of entities of this type",
+          # and Cursor then shows an Authenticate button that does nothing at all.
+          # Pinning a first-party client sidesteps the quota entirely.
+          jq -e '.mcpServers.bonez.auth.CLIENT_ID | type == "string" and length > 0' cursor/mcp.json >/dev/null \
+            || { echo "::error::cursor/mcp.json needs auth.CLIENT_ID (third-party DCR quota is full)"; exit 1; }
+          # The url must also be literal: Cursor expands neither ${VAR} nor ~, and the
+          # Claude leg's .mcp.json uses ${BONEZ_MCP_URL:-...} which would leave no
+          # reachable server here at all.
           url="$(jq -r '.mcpServers.bonez.url' cursor/mcp.json)"
           case "$url" in
             https://*) ;;
@@ -176,7 +183,7 @@ jobs:
           case "$url" in
             *'${'*|*'~'*) echo "::error::cursor/mcp.json url contains shell/tilde syntax Cursor will not expand: $url"; exit 1 ;;
           esac
-          echo "ok: cursor mcp url is literal"
+          echo "ok: cursor mcp url is literal and OAuth client pinned"
 
           # The MCP registry takes icons by HTTPS URL, not a repo path, so the
           # only thing CI can assert is that they are well-formed and themed.
