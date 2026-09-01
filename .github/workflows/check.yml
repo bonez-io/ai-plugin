@@ -140,6 +140,15 @@ jobs:
           cmp -s assets/logo.svg "cursor/$logo" || {
             echo "::error::cursor/$logo has drifted from assets/logo.svg"; exit 1; }
           python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1])" "cursor/$logo"
+          # A logo with a fixed width/height renders at THAT size in a marketplace
+          # card sized for ~128 and reads as missing. Every logo that actually
+          # renders (cursor/plugin-template, published plugins) ships viewBox only.
+          if grep -qE '<svg[^>]*\b(width|height)=' "cursor/$logo"; then
+            echo "::error::cursor/$logo pins width/height — ship viewBox only or the card renders it tiny."
+            exit 1
+          fi
+          grep -q 'viewBox="0 0 128 128"' "cursor/$logo" || {
+            echo "::error::cursor/$logo should use a 128x128 viewBox"; exit 1; }
 
           # The MCP registry takes icons by HTTPS URL, not a repo path, so the
           # only thing CI can assert is that they are well-formed and themed.
