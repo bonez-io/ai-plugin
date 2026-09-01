@@ -144,7 +144,7 @@ jobs:
           # The MCP registry takes icons by HTTPS URL, not a repo path, so the
           # only thing CI can assert is that they are well-formed and themed.
           jq -e '.icons | length >= 1' server.json >/dev/null || { echo "::error::server.json has no icons"; exit 1; }
-          jq -e '[.icons[] | select(.src | startswith("https://"))] | length == (.icons | length)' server.json >/dev/null \
+          jq -e '(.icons | map(select(.src | startswith("https://"))) | length) == (.icons | length)' server.json >/dev/null \
             || { echo "::error::server.json icons must all be https"; exit 1; }
           echo "ok: logo present in plugin, icons declared for the registry"
 
