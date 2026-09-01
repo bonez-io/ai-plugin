@@ -150,6 +150,19 @@ jobs:
           grep -q 'viewBox="0 0 128 128"' "cursor/$logo" || {
             echo "::error::cursor/$logo should use a 128x128 viewBox"; exit 1; }
 
+          # The marketplace CARD reads its logo from the marketplace ENTRY, not from
+          # the plugin manifest — declaring it only in plugin.json leaves a generic
+          # package placeholder in the listing (observed 2026-09-01; gitroomhq/postiz-agent
+          # sets it in both). And since the entry's `source` is ./cursor, a relative
+          # logo path could plausibly resolve from EITHER the marketplace root or the
+          # plugin source, so the asset must exist at both and be identical.
+          mlogo="$(jq -r '.plugins[] | select(.name=="bonez") | .logo // empty' .cursor-plugin/marketplace.json)"
+          test -n "$mlogo" || { echo "::error::marketplace entry has no logo — the card will show a placeholder"; exit 1; }
+          test -f "$mlogo" || { echo "::error::$mlogo missing (marketplace-root relative)"; exit 1; }
+          test -f "cursor/$mlogo" || { echo "::error::cursor/$mlogo missing (plugin-source relative)"; exit 1; }
+          cmp -s "$mlogo" "cursor/$mlogo" || { echo "::error::the two logo copies differ"; exit 1; }
+          echo "ok: marketplace entry logo resolves from both roots"
+
           # The MCP registry takes icons by HTTPS URL, not a repo path, so the
           # only thing CI can assert is that they are well-formed and themed.
           jq -e '.icons | length >= 1' server.json >/dev/null || { echo "::error::server.json has no icons"; exit 1; }

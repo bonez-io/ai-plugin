@@ -12,7 +12,34 @@
     {
       "name": "bonez",
       "source": "./cursor",
-      "description": "Bring your organization's context lake into Cursor — org search, graph queries, standing rules and durable memories over the bonez MCP, with an approval gate on memory/rules writes."
+      "version": "0.6.0",
+      "logo": "assets/logo.svg",
+      "category": "productivity",
+      "license": "MIT",
+      "homepage": "https://bonez.io",
+      "repository": "https://github.com/bonez-io/ai-plugin",
+      "author": {
+        "name": "Bonez",
+        "url": "https://bonez.io"
+      },
+      "description": "Bring your organization's context lake into Cursor — org search across code, decisions, tickets, PRs, docs and people; graph-powered navigation (callers, blast radius, tests-for); standing org rules and durable memories over the bonez MCP, with an approval gate on memory/rules writes.",
+      "keywords": [
+        "context",
+        "knowledge-graph",
+        "org-memory",
+        "code-navigation",
+        "code-search",
+        "prior-art",
+        "blast-radius",
+        "mcp"
+      ],
+      "tags": [
+        "context",
+        "knowledge-graph",
+        "code-search",
+        "mcp",
+        "org-memory"
+      ]
     }
   ]
 }
