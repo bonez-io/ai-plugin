@@ -77,51 +77,68 @@ the Claude Code gate.**
 
 ### Cursor
 
-Cursor has no plugin manager, so "install" means writing four things into the
-places Cursor already reads. The installer does that and **merges** — it never
-clobbers an existing `mcp.json`/`hooks.json`, backs both up as
-`*.bonez-backup`, and is safe to re-run (it reports "already current", and
-repairs the hook path if you move the checkout):
+Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
+install brings the MCP server, the 8 skills, both commands, and the write gate.
 
-```bash
-git clone https://github.com/bonez-io/ai-plugin && cd ai-plugin
-node bin/bonez-cursor-install.mjs            # --dry-run first if you like
-```
+**From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
+Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
+**Customize -> Install** to pick project or user scope.
 
-| | goes to | what it is |
+**Before it is listed**, install it as a team marketplace or locally:
+
+- **Team marketplace** — Dashboard -> Plugins -> **Team Marketplaces** ->
+  **Add Marketplace** -> *Import from Repo*, pointed at
+  `bonez-io/ai-plugin`. The repo root carries
+  [`.cursor-plugin/marketplace.json`](.cursor-plugin/marketplace.json), which is
+  what Cursor indexes. Set **Marketplace Access**, pick a distribution mode
+  (*Default Off* / *Default On* / *Required*), and optionally **Enable Auto
+  Refresh** — that needs the Cursor GitHub App on the repo and re-indexes at
+  most once every 10 minutes.
+- **Locally** — clone into `~/.cursor/plugins/local/` and reload Cursor.
+
+Then run `/bonez-context`. The first tool call opens the browser sign-in — no
+key to mint, same OAuth-by-default install as the Claude Code leg.
+
+The plugin lives in [`cursor/`](cursor/) and uses Cursor's default paths, so
+every part is discovered without configuration:
+
+| Part | Path | What it is |
 | --- | --- | --- |
-| MCP server | `~/.cursor/mcp.json` | OAuth by default — no key to mint |
-| Write gate | `~/.cursor/hooks.json` | `beforeMCPExecution` → `hooks/gate-write.sh` |
-| 8 skills | `~/.agents/skills/` | the same `SKILL.md` format and path Codex reads |
-| 2 commands | `~/.cursor/commands/` | `/bonez-context`, `/bonez-search` |
+| Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
+| MCP server | `cursor/mcp.json` | OAuth by default |
+| Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
+| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
+| Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `./hooks/gate-write.sh` |
 
-Restart Cursor, then run `/bonez-context`. The first tool call opens the
-browser sign-in.
+`cursor/hooks/gate-write.sh` is a two-line shim: Cursor resolves a plugin's hook
+`command` from the *plugin* root, but the gate is shared with the Claude Code leg
+and lives at the repo root, so the shim `exec`s the real one rather than keeping
+a second copy that could drift.
 
-`--project <dir>` installs into `<dir>/.cursor` + `<dir>/.agents/skills` instead
-of the home directory, for config you want checked into one repo. `--url` points
-at a different gateway.
+**The write gate works here** — unlike the Codex leg. Cursor's
+`beforeMCPExecution` genuinely supports `permission: "ask"`, so `memory`/`rules`
+writes get the same approval prompt Claude Code gives them; reads pass through
+untouched.
 
-To wire it by hand instead, [`cursor/mcp.json`](cursor/mcp.json) and
-[`cursor/hooks.json`](cursor/hooks.json) are the two files to merge in — replace
-the placeholder path in the latter, since Cursor expands neither `${VAR}` nor `~`
-inside `hooks.json` (the same caveat the Codex leg carries).
-[`cursor/AGENTS.md`](cursor/AGENTS.md) is the optional always-in-context digest,
-copied to your project root or `~/.cursor/AGENTS.md`.
+Two details the gate has to absorb, because Cursor's own sources disagree:
 
-**The write gate works here.** Cursor's `beforeMCPExecution` supports
-`permission: "ask"`, so `memory`/`rules` writes get the same approval prompt as
-the Claude Code leg — the one thing the Codex leg cannot do. Reads pass through
-untouched. `hooks/gate-write.sh` speaks both protocols and picks by the payload's
-`hook_event_name`; `failClosed` is `false`, so a hook failure can never block a
-tool call.
+- **Who identifies the server.** The [hooks
+  docs](https://cursor.com/docs/agent/hooks) document `mcp_server_name`; the
+  published `cursor-hooks` types carry `url`/`command` and no server name at
+  all. The gate accepts *any* of `mcp_server_name`, `url`, or a flattened
+  `mcp__bonez__…` tool name — requiring only the first would mean the gate
+  silently never fires on a build that omits it.
+- **Response casing.** The types declare `userMessage`/`agentMessage`; the docs
+  page prints `user_message`/`agent_message`. Both spellings are emitted, since
+  an unknown key is ignored either way. `permission` — the field that actually
+  gates the call — is agreed by both.
 
 **Session-capture gap.** Cursor is not wired for session capture. Its transcripts
-are opt-in and its on-disk format is not one this repo has a parser for, and both
+are opt-in and this repo has no parser for their on-disk format; both
 `bin/bonez-session-sync.mjs` (format-specific parsers) and the gateway's wire
-enum would need a Cursor case. Rather than ship a guess, the Cursor `hooks.json`
-carries **no** `sessionEnd` hook — Claude Code and Codex remain the two legs that
-capture sessions.
+enum would need a Cursor case. Rather than ship a guess, the plugin carries **no**
+`sessionEnd` hook — Claude Code and Codex remain the two legs that capture
+sessions.
 
 ### Headless / CI: API key instead
 
@@ -282,7 +299,8 @@ bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
-cursor/           Cursor leg — mcp.json, hooks.json, AGENTS.md, commands/ (see Install → Cursor; write gate works, no session capture)
+.cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Install → Cursor; write gate works, no session capture)
 ```
 
 One gate, three harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
@@ -301,4 +319,4 @@ claude --plugin-dir .         # load the working tree for one session
 claude plugin validate .
 ```
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases), skill-set parity across harness legs with the Codex divergence pinned, and a Cursor-leg wiring check that dry-runs the installer.
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root.

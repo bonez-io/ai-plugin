@@ -105,13 +105,24 @@ fi
 # at all, making this the ONLY filter on that leg.
 tool=""
 if [[ "$protocol" == "cursor" ]]; then
-    server_name=""
-    if [[ "$input" =~ \"mcp_server_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
-        server_name="${BASH_REMATCH[1]}"
+    # Which field identifies the server is NOT settled across Cursor's own
+    # sources: cursor.com/docs/agent/hooks documents `mcp_server_name`, while the
+    # published `cursor-hooks` types (BeforeMCPExecutionPayload) carry only
+    # tool_name/tool_input/url?/command?. Requiring `mcp_server_name` would mean
+    # the gate SILENTLY NEVER FIRES on any build that omits it — the worst
+    # failure available to a write gate. So accept identification from whichever
+    # of the three is present, and only give up when none of them names bonez.
+    identified=0
+    if [[ "$input" =~ \"mcp_server_name\"[[:space:]]*:[[:space:]]*\"([^\"]*bonez[^\"]*)\" ]]; then
+        identified=1
+    elif [[ "$input" =~ \"url\"[[:space:]]*:[[:space:]]*\"([^\"]*bonez[^\"]*)\" ]]; then
+        identified=1
+    elif [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]]; then
+        # A build that flattens the server into the tool name the way Claude Code
+        # does identifies itself that way and needs no separate server field.
+        identified=1
     fi
-    [[ "$server_name" == *bonez* ]] || exit 0
-    # Accept the bare name, and tolerate a namespaced one in case a future
-    # Cursor build flattens it the way Claude Code does.
+    (( identified )) || exit 0
     [[ "$tool_name" =~ ^(mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__)?(memory|rules)$ ]] || exit 0
     tool="${BASH_REMATCH[2]}"
 else
@@ -173,7 +184,14 @@ case "$op" in
             # `permission`, plus the two message fields it renders. "ask" is
             # genuinely supported here — unlike Codex, whose PreToolUse parses
             # "ask" but leaves it unimplemented (see README).
-            printf '{"permission":"ask","user_message":"%s","agent_message":"%s"}' "$reason" "$reason"
+            # camelCase is what the published `cursor-hooks` types declare
+            # (HookPermissionResponse: permission/userMessage/agentMessage); the
+            # docs page prints snake_case for the same fields. Both spellings are
+            # emitted because an unknown key is ignored either way, whereas
+            # guessing wrong silently drops the explanation shown to the human.
+            # `permission` — the field that actually gates the call — is agreed.
+            printf '{"permission":"ask","userMessage":"%s","agentMessage":"%s","user_message":"%s","agent_message":"%s"}' \
+                "$reason" "$reason" "$reason" "$reason"
         else
             printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$reason"
         fi

@@ -100,8 +100,13 @@ cursor_run_case() {
         fi
         # The Cursor shape, asserted explicitly — a Claude-shaped reply here
         # would be silently useless to Cursor, so the needle must not be shared.
+        # camelCase is the authoritative spelling (cursor-hooks types'
+        # HookPermissionResponse); snake_case is what the docs page prints. Both
+        # are emitted, and both are asserted so neither can be dropped silently.
         [[ $status -eq 0 \
            && "$out" == *'"permission":"ask"'* \
+           && "$out" == *'"userMessage"'* \
+           && "$out" == *'"agentMessage"'* \
            && "$out" == *'"user_message"'* \
            && "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* ]] || ok=0
     fi
@@ -334,6 +339,43 @@ cursor_run_case "cursor: escaped op text inside content does not fool the gate" 
 cursor_run_case "cursor: PreToolUse payload without plugin root is silent" \
     '{"hook_event_name":"PreToolUse","tool_name":"mcp__bonez__memory","tool_input":{"op":"save"}}' \
     silent
+
+# Server identification is not settled across Cursor's own sources: the docs
+# document `mcp_server_name`, the published types carry `url`/`command` and no
+# server name at all. Both must work, or the gate silently never fires on one
+# of them — and a write gate that never fires is worse than no gate.
+
+cursor_run_case "cursor: identified by url when mcp_server_name is absent" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' \
+    prompt save
+
+cursor_run_case "cursor: identified by url — rules wording" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"rules","tool_input":"{\"op\":\"update\"}","url":"https://gateway.bonez.io/mcp"}' \
+    prompt rules:update
+
+cursor_run_case "cursor: a different server's url is ignored" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://other.example/mcp"}' \
+    silent
+
+cursor_run_case "cursor: no identifying field at all is silent" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}"}' \
+    silent
+
+# A flattened tool name identifies the server by itself, for a build that
+# namespaces the way Claude Code does.
+cursor_run_case "cursor: flattened tool name self-identifies" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__memory","tool_input":"{\"op\":\"save\"}"}' \
+    prompt save
+
+# The plugin ships the gate as a shim at cursor/hooks/gate-write.sh, because
+# Cursor resolves a plugin hook `command` from the PLUGIN root. If the shim
+# stops reaching the shared gate, the Cursor leg is unguarded.
+shim_out="$(cd "$HERE/../cursor" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}')"
+if [[ "$shim_out" == *'"permission":"ask"'* ]]; then
+    pass=$((pass + 1)); printf "  ok   cursor: plugin-root shim reaches the shared gate\n"
+else
+    fail=$((fail + 1)); printf "  FAIL cursor: plugin-root shim did not gate a write (stdout=%q)\n" "$shim_out"
+fi
 
 # --- summary ---
 

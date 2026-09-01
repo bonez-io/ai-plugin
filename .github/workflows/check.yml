@@ -18,7 +18,7 @@ jobs:
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks.json; do
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json; do
             jq empty "$f"
             echo "ok: $f"
           done
@@ -62,13 +62,19 @@ jobs:
       - name: Skills parity across harness legs
         run: |
           set -euo pipefail
-          # Every leg must expose the SAME SET of skills. Content is allowed to
-          # diverge, but only deliberately: Codex forks `remembering` and
-          # `reviewing-with-org-rules` because it has no write-gate hook and the
-          # Claude/Cursor wording ("expect the harness to ask") would be a lie
-          # there. Anything else differing is accidental drift and fails here.
-          diff <(ls skills) <(ls codex/skills) || {
-            echo "::error::skills/ and codex/skills/ expose different skill sets."; exit 1; }
+          # All three legs must expose the SAME SET of skills. Cursor's copy is
+          # byte-identical to the canonical one — its write gate works, so the
+          # Claude wording ("expect the harness to ask") is true there. Codex
+          # deliberately forks two files because it has NO write gate and that
+          # same wording would be a lie; anything beyond those two is drift.
+          for leg in codex cursor; do
+            diff <(ls skills) <(ls "$leg/skills") || {
+              echo "::error::skills/ and $leg/skills/ expose different skill sets."; exit 1; }
+          done
+          if ! diff -r skills cursor/skills; then
+            echo "::error::cursor/skills has drifted — re-copy it (rm -rf cursor/skills && cp -R skills cursor/skills)."
+            exit 1
+          fi
           expected="remembering reviewing-with-org-rules"
           actual="$(for d in $(ls skills); do
             cmp -s "skills/$d/SKILL.md" "codex/skills/$d/SKILL.md" || echo "$d"
@@ -77,26 +83,45 @@ jobs:
             echo "::error::codex/skills divergence changed."
             echo "  expected exactly: $expected"
             echo "  found:            $actual"
-            echo "  Codex-specific adaptations are allowed; anything else must be re-copied from skills/."
             exit 1
           fi
-          echo "ok: skill sets match; divergence is exactly the documented Codex pair"
+          echo "ok: skill sets match; cursor/skills identical; codex divergence is the documented pair"
 
-      - name: Cursor leg wiring
+      - name: Cursor plugin structure
         run: |
           set -euo pipefail
-          # The write gate must be reachable at the path cursor/hooks.json documents,
-          # and the installer must parse. A Cursor install is four files in places
-          # Cursor already reads; if any of them is missing the leg silently does nothing.
-          test -x hooks/gate-write.sh || { echo "::error::hooks/gate-write.sh not executable"; exit 1; }
-          test -f cursor/AGENTS.md    || { echo "::error::cursor/AGENTS.md missing"; exit 1; }
+          # Cursor discovers a plugin's parts at DEFAULT paths relative to the
+          # plugin root (docs: Plugins). If one is missing or misplaced the
+          # plugin still installs and simply does nothing — silent, which is the
+          # failure mode worth a CI gate.
+          test -f cursor/.cursor-plugin/plugin.json || { echo "::error::cursor manifest missing"; exit 1; }
+          test -f cursor/mcp.json                   || { echo "::error::cursor/mcp.json missing"; exit 1; }
+          test -f cursor/hooks/hooks.json           || { echo "::error::cursor/hooks/hooks.json missing"; exit 1; }
+          test -x cursor/hooks/gate-write.sh        || { echo "::error::cursor gate shim not executable"; exit 1; }
+          test -d cursor/skills                     || { echo "::error::cursor/skills missing"; exit 1; }
+          test -d cursor/commands                   || { echo "::error::cursor/commands missing"; exit 1; }
+
+          # The marketplace entry must point at a plugin that actually exists.
+          src="$(jq -r '.plugins[] | select(.name=="bonez") | .source' .cursor-plugin/marketplace.json)"
+          test -f "$src/.cursor-plugin/plugin.json" || { echo "::error::marketplace source $src has no manifest"; exit 1; }
+
+          # Version parity extends to the Cursor manifests.
+          v="$(jq -r '.version' .claude-plugin/plugin.json)"
+          [ "$(jq -r '.version' cursor/.cursor-plugin/plugin.json)" = "$v" ] \
+            || { echo "::error::cursor plugin.json version != $v"; exit 1; }
+          [ "$(jq -r '.metadata.version' .cursor-plugin/marketplace.json)" = "$v" ] \
+            || { echo "::error::cursor marketplace version != $v"; exit 1; }
+
+          # The hook command is resolved from the plugin root — prove it runs and
+          # that the shim reaches the shared gate.
+          out="$(cd cursor && printf '%s' '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' | ./hooks/gate-write.sh)"
+          echo "$out" | grep -q '"permission":"ask"' || { echo "::error::plugin-root hook path did not gate a write"; exit 1; }
+
           for f in cursor/commands/*.md; do
             head -1 "$f" | grep -qx -- '---' || { echo "::error::$f missing frontmatter"; exit 1; }
             grep -q '^description:' "$f" || { echo "::error::$f missing description"; exit 1; }
-            echo "ok: $f"
           done
-          node bin/bonez-cursor-install.mjs --dry-run --project "$(mktemp -d)" >/dev/null
-          echo "ok: bonez-cursor-install.mjs dry run"
+          echo "ok: cursor plugin structure, versions, and hook resolution"
 
       - name: Skill frontmatter sanity
         run: |
