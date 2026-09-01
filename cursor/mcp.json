@@ -4,6 +4,10 @@
       "url": "https://gateway.bonez.io/mcp",
       "headers": {
         "x-bonez-mcp-consumer": "cursor-plugin"
+      },
+      "auth": {
+        "CLIENT_ID": "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm",
+        "scopes": ["bonez:read", "bonez:memory", "bonez:write"]
       }
     }
   }

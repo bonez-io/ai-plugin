@@ -135,6 +135,26 @@ Two details the gate has to absorb, because Cursor's own sources disagree:
   an unknown key is ignored either way. `permission` — the field that actually
   gates the call — is agreed by both.
 
+**OAuth needs the client pinned.** `cursor/mcp.json` carries a static
+`auth.CLIENT_ID` rather than letting Cursor register one, because the bonez
+Auth0 tenant answers dynamic client registration with
+`dynamic client registration is disabled` — so a client that relies on DCR
+never reaches a sign-in screen, and the Authenticate button appears to do
+nothing. The id is the same public client the session-capture flow already
+ships; Cursor uses it with authorization_code + PKCE.
+
+That client must allow **both** of Cursor's fixed callback URLs, or `/authorize`
+returns `unauthorized_client — Callback URL mismatch`:
+
+```
+http://localhost:8787/callback                      (desktop app)
+https://www.cursor.com/agents/mcp/oauth/callback    (web / Cursor Agents)
+```
+
+Add them under **Allowed Callback URLs** on that Auth0 application. Enabling DCR
+on the tenant would work too and would cover every MCP client at once, but it is
+a broader change than allowlisting two URLs on one existing app.
+
 **Session-capture gap.** Cursor is not wired for session capture. Its transcripts
 are opt-in and this repo has no parser for their on-disk format; both
 `bin/bonez-session-sync.mjs` (format-specific parsers) and the gateway's wire

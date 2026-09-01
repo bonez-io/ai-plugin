@@ -163,6 +163,24 @@ jobs:
           cmp -s "$mlogo" "cursor/$mlogo" || { echo "::error::the two logo copies differ"; exit 1; }
           echo "ok: marketplace entry logo resolves from both roots"
 
+          # OAuth must be pinned to a known client: the tenant has dynamic client
+          # registration DISABLED, so a config without auth.CLIENT_ID leaves Cursor
+          # with no way to obtain one and the Authenticate button silently does
+          # nothing. Also assert the URL is literal — Cursor expands neither ${VAR}
+          # nor ~, and the Claude leg's .mcp.json deliberately uses ${BONEZ_MCP_URL:-...}
+          # which would arrive here as a nonexistent host.
+          jq -e '.mcpServers.bonez.auth.CLIENT_ID | type == "string" and length > 0' cursor/mcp.json >/dev/null \
+            || { echo "::error::cursor/mcp.json needs auth.CLIENT_ID (tenant has DCR disabled)"; exit 1; }
+          url="$(jq -r '.mcpServers.bonez.url' cursor/mcp.json)"
+          case "$url" in
+            https://*) ;;
+            *) echo "::error::cursor/mcp.json url must be a literal https URL, got: $url"; exit 1 ;;
+          esac
+          case "$url" in
+            *'${'*|*'~'*) echo "::error::cursor/mcp.json url contains shell/tilde syntax Cursor will not expand: $url"; exit 1 ;;
+          esac
+          echo "ok: cursor mcp url is literal and OAuth client is pinned"
+
           # The MCP registry takes icons by HTTPS URL, not a repo path, so the
           # only thing CI can assert is that they are well-formed and themed.
           jq -e '.icons | length >= 1' server.json >/dev/null || { echo "::error::server.json has no icons"; exit 1; }
