@@ -147,8 +147,10 @@ jobs:
             echo "::error::cursor/$logo pins width/height — ship viewBox only or the card renders it tiny."
             exit 1
           fi
-          grep -q 'viewBox="0 0 128 128"' "cursor/$logo" || {
-            echo "::error::cursor/$logo should use a 128x128 viewBox"; exit 1; }
+          vb="$(sed -n 's/.*viewBox="0 0 \([0-9.]*\) \([0-9.]*\)".*/\1 \2/p' "cursor/$logo" | head -1)"
+          test -n "$vb" || { echo "::error::cursor/$logo has no 0-origin viewBox"; exit 1; }
+          [ "${vb% *}" = "${vb#* }" ] || {
+            echo "::error::cursor/$logo viewBox is not square ($vb) — a marketplace card will letterbox it"; exit 1; }
 
           # The marketplace CARD reads its logo from the marketplace ENTRY, not from
           # the plugin manifest — declaring it only in plugin.json leaves a generic
