@@ -75,6 +75,89 @@ including harmless `recall`/`list`/`get`, not just writes. **Writes are
 unguarded by default on the Codex leg — there is no bundled equivalent of
 the Claude Code gate.**
 
+### Cursor
+
+Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
+install brings the MCP server, the 8 skills, both commands, and the write gate.
+
+**From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
+Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
+**Customize -> Install** to pick project or user scope.
+
+**Before it is listed**, install it as a team marketplace or locally:
+
+- **Team marketplace** — Dashboard -> Plugins -> **Team Marketplaces** ->
+  **Add Marketplace** -> *Import from Repo*, pointed at
+  `bonez-io/ai-plugin`. The repo root carries
+  [`.cursor-plugin/marketplace.json`](.cursor-plugin/marketplace.json), which is
+  what Cursor indexes. Set **Marketplace Access**, pick a distribution mode
+  (*Default Off* / *Default On* / *Required*), and optionally **Enable Auto
+  Refresh** — that needs the Cursor GitHub App on the repo and re-indexes at
+  most once every 10 minutes.
+- **Locally** — clone into `~/.cursor/plugins/local/` and reload Cursor.
+
+Then run `/bonez-context`. The first tool call opens the browser sign-in — no
+key to mint, same OAuth-by-default install as the Claude Code leg.
+
+The plugin lives in [`cursor/`](cursor/) and uses Cursor's default paths, so
+every part is discovered without configuration:
+
+| Part | Path | What it is |
+| --- | --- | --- |
+| Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
+| MCP server | `cursor/mcp.json` | OAuth by default |
+| Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
+| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
+| Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `./hooks/gate-write.sh` |
+| Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
+
+`cursor/hooks/gate-write.sh` is a byte copy of the root `hooks/gate-write.sh`,
+not a shim to it. A marketplace install copies the plugin directory **on its
+own** — there is no repo behind it — so a hook reaching `../../hooks/` fails to
+exec, and Cursor fails open, which means writes would go through unguarded. CI
+pins the copy and runs the gate from a standalone directory to prove it.
+
+**The write gate works here** — unlike the Codex leg. Cursor's
+`beforeMCPExecution` genuinely supports `permission: "ask"`, so `memory`/`rules`
+writes get the same approval prompt Claude Code gives them; reads pass through
+untouched.
+
+Two details the gate has to absorb, because Cursor's own sources disagree:
+
+- **Who identifies the server.** The [hooks
+  docs](https://cursor.com/docs/agent/hooks) document `mcp_server_name`; the
+  published `cursor-hooks` types carry `url`/`command` and no server name at
+  all. The gate accepts *any* of `mcp_server_name`, `url`, or a flattened
+  `mcp__bonez__…` tool name — requiring only the first would mean the gate
+  silently never fires on a build that omits it.
+- **Response casing.** The types declare `userMessage`/`agentMessage`; the docs
+  page prints `user_message`/`agent_message`. Both spellings are emitted, since
+  an unknown key is ignored either way. `permission` — the field that actually
+  gates the call — is agreed by both.
+
+**Session-capture gap.** Cursor is not wired for session capture. Its transcripts
+are opt-in and this repo has no parser for their on-disk format; both
+`bin/bonez-session-sync.mjs` (format-specific parsers) and the gateway's wire
+enum would need a Cursor case. Rather than ship a guess, the plugin carries **no**
+`sessionEnd` hook — Claude Code and Codex remain the two legs that capture
+sessions.
+
+### Branding
+
+The bonez mark ships wherever a manifest has somewhere to put it:
+
+- **Cursor** — `"logo": "assets/logo.svg"` in the plugin manifest. It is an
+  opaque tile (bonez paper ground, ink mark) rather than a bare glyph, because
+  marketplace cards render on light *and* dark and are often rasterised, so a
+  `prefers-color-scheme` trick inside the SVG cannot be relied on.
+- **MCP registry** — `icons[]` in [`server.json`](server.json), one entry per
+  `theme`, pointing at the light/dark marks already served from
+  `console.bonez.io`. The registry schema requires an **HTTPS URL**, so these
+  cannot be repo-relative paths.
+- **Claude Code** — nothing to wire: its `plugin.json` / `marketplace.json`
+  schemas document no icon, logo, or image field. `assets/` still carries the
+  bare `bonez-mark-{light,dark}.svg` for the day one appears.
+
 ### Headless / CI: API key instead
 
 OAuth needs a browser, so CI runners, remote boxes, and other headless contexts still use
@@ -150,7 +233,9 @@ Judgment for using the lake well — traps, defaults, when to stop:
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
 
-Plus two commands: `/bonez:context` and `/bonez:search <query>`.
+Plus two commands — `/bonez:context` and `/bonez:search <query>` on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
+
+The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
 ## Session capture
 
@@ -232,7 +317,17 @@ bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
+assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
+.cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Install → Cursor; write gate works, no session capture)
 ```
+
+One gate, three harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
+and Cursor's `beforeMCPExecution` from the same script, dispatching on the payload's
+`hook_event_name` and emitting each host's own response shape. Codex is excluded on
+purpose — it parses `"ask"` but leaves it unimplemented, so the hook exits early there
+rather than fighting its approval flow. Skills are shared from `skills/` (Cursor and
+Codex both read `SKILL.md` from `.agents/skills/`).
 
 ## Development
 
@@ -243,4 +338,4 @@ claude --plugin-dir .         # load the working tree for one session
 claude plugin validate .
 ```
 
-CI (`.github/workflows/check.yml`) enforces JSON validity, version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, and the gate tests.
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root.

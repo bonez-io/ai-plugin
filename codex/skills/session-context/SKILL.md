@@ -18,7 +18,7 @@ Call `bonez:context` at the START of a task — not mid-task after you have alre
 
 - **identity** — who the caller is in the graph: their user node, teams, and footprint. Ground any "me"/"my" question here instead of guessing from git config.
 - **knowledge** — distilled org and repo knowledge: decisions, gotchas, architecture notes. This is curated signal, not raw search results.
-- **rules** — the org's standing instructions (repo rules, review rules, commands). Follow them the way you follow AGENTS.md: they encode how THIS org works and outrank your generic defaults.
+- **rules** — the org's standing instructions (repo rules, review rules, commands). Follow them the way you follow your agent instructions file (CLAUDE.md / AGENTS.md): they encode how THIS org works and outrank your generic defaults.
 - **memories** — durable facts the org's agents have accumulated, personal and org layer, pre-filtered to the same set bonez's own agents mount. Treat them as established context, not hypotheses.
 
 ## Judgment

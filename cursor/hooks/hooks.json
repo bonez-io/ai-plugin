@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "beforeMCPExecution": [
+      {
+        "command": "./hooks/gate-write.sh"
+      }
+    ]
+  }
+}

@@ -76,6 +76,58 @@ rules_call() {
     printf '{"tool_name":"%s","tool_input":{"op":"%s","name":"no-force-push","content":"Never force-push shared branches."}}' "$tool_name" "$op"
 }
 
+# --- Cursor leg (beforeMCPExecution) -------------------------------------
+#
+# Cursor speaks a different protocol on both ends: it keeps `mcp_server_name`
+# separate from a BARE `tool_name`, documents `tool_input` as a JSON *string*
+# (so params arrive escaped), and expects a flat `{"permission":"ask"}` reply
+# rather than Claude Code's nested `hookSpecificOutput`. It also sets no
+# CLAUDE_PLUGIN_ROOT, so these cases deliberately run without one.
+cursor_run_case() {
+    local name="$1" payload="$2" expected="$3" expected_op="${4:-}"
+    local out status
+    out="$(env -i PATH="$PATH" bash "$HOOK" <<<"$payload")"
+    status=$?
+
+    local ok=1
+    if [[ "$expected" == "silent" ]]; then
+        [[ -z "$out" && $status -eq 0 ]] || ok=0
+    else
+        local tool_word="memory" op_word="$expected_op"
+        if [[ "$expected_op" == *:* ]]; then
+            tool_word="${expected_op%%:*}"
+            op_word="${expected_op##*:}"
+        fi
+        # The Cursor shape, asserted explicitly — a Claude-shaped reply here
+        # would be silently useless to Cursor, so the needle must not be shared.
+        # camelCase is the authoritative spelling (cursor-hooks types'
+        # HookPermissionResponse); snake_case is what the docs page prints. Both
+        # are emitted, and both are asserted so neither can be dropped silently.
+        [[ $status -eq 0 \
+           && "$out" == *'"permission":"ask"'* \
+           && "$out" == *'"userMessage"'* \
+           && "$out" == *'"agentMessage"'* \
+           && "$out" == *'"user_message"'* \
+           && "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* ]] || ok=0
+    fi
+
+    if (( ok )); then
+        pass=$((pass + 1))
+        printf "  ok   %s\n" "$name"
+    else
+        fail=$((fail + 1))
+        printf "  FAIL %s\n       expected=%s status=%d stdout=%q\n" \
+            "$name" "$expected" "$status" "$out"
+    fi
+}
+
+# Cursor payload: `tool_input` as the documented JSON STRING (escaped quotes).
+cursor_call() {
+    local tool="$1" op="$2" server="${3:-bonez}"
+    printf '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"%s","tool_name":"%s","tool_input":"{\\"op\\":\\"%s\\"}"}' \
+        "$server" "$tool" "$op"
+}
+
 echo "Running gate-write.sh tests..."
 
 # --- syntax check first: a parse-time error is the one failure the hook's ---
@@ -237,6 +289,106 @@ do
         fail=$((fail + 1)); printf "  FAIL exited 2 (would block) for: %q\n" "$_payload"
     fi
 done
+
+# --- Cursor: beforeMCPExecution ---
+
+cursor_run_case "cursor: memory save prompts" \
+    "$(cursor_call memory save)" prompt save
+
+cursor_run_case "cursor: memory update prompts" \
+    "$(cursor_call memory update)" prompt update
+
+cursor_run_case "cursor: memory delete prompts" \
+    "$(cursor_call memory delete)" prompt delete
+
+cursor_run_case "cursor: memory recall is silent" \
+    "$(cursor_call memory recall)" silent
+
+cursor_run_case "cursor: rules save prompts with rules wording" \
+    "$(cursor_call rules save)" prompt rules:save
+
+cursor_run_case "cursor: rules list is silent" \
+    "$(cursor_call rules list)" silent
+
+# The server identity is the ONLY filter on this leg (Cursor's hooks.json
+# carries no matcher), so a same-named tool on someone else's server must not
+# inherit our prompt.
+cursor_run_case "cursor: another server's memory tool is ignored" \
+    "$(cursor_call memory save othervendor)" silent
+
+cursor_run_case "cursor: a non-memory/rules bonez tool is ignored" \
+    "$(cursor_call search save)" silent
+
+# tool_input as a real object rather than the documented string — tolerated
+# either way, so a Cursor build that stops stringifying cannot silently disarm
+# the gate.
+cursor_run_case "cursor: object-valued tool_input still prompts" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"rules","tool_input":{"op":"save"}}' \
+    prompt rules:save
+
+# The Claude-leg content protection has to survive the Cursor unescape pass:
+# text INSIDE the stringified tool_input is double-escaped, so one pass leaves
+# it as \" and must still not match.
+cursor_run_case "cursor: escaped op text inside content does not fool the gate" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"memory","tool_input":"{\"op\":\"recall\",\"query\":\"note that {\\\"op\\\":\\\"delete\\\"} appears\"}"}' \
+    silent
+
+# Protocol is chosen by hook_event_name, never by luck: a Claude-shaped payload
+# reaching the Cursor helper (which sets no CLAUDE_PLUGIN_ROOT) stays silent
+# rather than being answered in the wrong shape.
+cursor_run_case "cursor: PreToolUse payload without plugin root is silent" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__bonez__memory","tool_input":{"op":"save"}}' \
+    silent
+
+# Server identification is not settled across Cursor's own sources: the docs
+# document `mcp_server_name`, the published types carry `url`/`command` and no
+# server name at all. Both must work, or the gate silently never fires on one
+# of them — and a write gate that never fires is worse than no gate.
+
+cursor_run_case "cursor: identified by url when mcp_server_name is absent" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' \
+    prompt save
+
+cursor_run_case "cursor: identified by url — rules wording" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"rules","tool_input":"{\"op\":\"update\"}","url":"https://gateway.bonez.io/mcp"}' \
+    prompt rules:update
+
+cursor_run_case "cursor: a different server's url is ignored" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://other.example/mcp"}' \
+    silent
+
+cursor_run_case "cursor: no identifying field at all is silent" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}"}' \
+    silent
+
+# A flattened tool name identifies the server by itself, for a build that
+# namespaces the way Claude Code does.
+cursor_run_case "cursor: flattened tool name self-identifies" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__memory","tool_input":"{\"op\":\"save\"}"}' \
+    prompt save
+
+# The plugin must be SELF-CONTAINED. Cursor resolves a plugin hook `command`
+# from the plugin root, and a marketplace install copies that directory on its
+# own — no repo behind it. Run the gate from a COPY placed elsewhere, because
+# testing in-tree would pass even for a plugin that only works in-tree, and a
+# gate that fails to exec lets writes through (Cursor fails open).
+_standalone="$(mktemp -d)/bonez"
+cp -R "$HERE/../cursor" "$_standalone"
+plugin_out="$(cd "$_standalone" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}')"
+rm -rf "$(dirname "$_standalone")"
+if [[ "$plugin_out" == *'"permission":"ask"'* ]]; then
+    pass=$((pass + 1)); printf "  ok   cursor: gate fires from a standalone plugin copy\n"
+else
+    fail=$((fail + 1)); printf "  FAIL cursor: plugin is not self-contained (stdout=%q)\n" "$plugin_out"
+fi
+
+# And the copy must not drift from the canonical gate, or the two protocols
+# diverge silently.
+if cmp -s "$HERE/../hooks/gate-write.sh" "$HERE/../cursor/hooks/gate-write.sh"; then
+    pass=$((pass + 1)); printf "  ok   cursor: plugin gate is byte-identical to the canonical one\n"
+else
+    fail=$((fail + 1)); printf "  FAIL cursor: cursor/hooks/gate-write.sh has drifted\n"
+fi
 
 # --- summary ---
 

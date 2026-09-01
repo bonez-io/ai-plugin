@@ -1,0 +1,18 @@
+{
+  "name": "bonez",
+  "owner": {
+    "name": "Bonez",
+    "url": "https://bonez.io"
+  },
+  "metadata": {
+    "description": "Official bonez plugin for Cursor. The org context lake — knowledge graph, search, rules, and memories — over MCP.",
+    "version": "0.6.0"
+  },
+  "plugins": [
+    {
+      "name": "bonez",
+      "source": "./cursor",
+      "description": "Bring your organization's context lake into Cursor — org search, graph queries, standing rules and durable memories over the bonez MCP, with an approval gate on memory/rules writes."
+    }
+  ]
+}

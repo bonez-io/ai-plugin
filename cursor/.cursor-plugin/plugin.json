@@ -1,7 +1,8 @@
 {
   "name": "bonez",
-  "description": "Bring your organization's context lake into your coding agent — fused org search across code, decisions, tickets, PRs, docs, and people; graph-powered code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
+  "displayName": "Bonez",
   "version": "0.6.0",
+  "description": "Bring your organization's context lake into Cursor — fused org search across code, decisions, tickets, PRs, docs, and people; graph-powered code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
   "author": {
     "name": "Bonez",
     "url": "https://bonez.io"
@@ -9,6 +10,7 @@
   "homepage": "https://bonez.io",
   "repository": "https://github.com/bonez-io/ai-plugin",
   "license": "MIT",
+  "logo": "assets/logo.svg",
   "keywords": [
     "context",
     "knowledge-graph",
