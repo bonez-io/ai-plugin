@@ -135,25 +135,16 @@ Two details the gate has to absorb, because Cursor's own sources disagree:
   an unknown key is ignored either way. `permission` — the field that actually
   gates the call — is agreed by both.
 
-**OAuth needs the client pinned.** `cursor/mcp.json` carries a static
-`auth.CLIENT_ID` rather than letting Cursor register one, because the bonez
-Auth0 tenant answers dynamic client registration with
-`dynamic client registration is disabled` — so a client that relies on DCR
-never reaches a sign-in screen, and the Authenticate button appears to do
-nothing. The id is the same public client the session-capture flow already
-ships; Cursor uses it with authorization_code + PKCE.
-
-That client must allow **both** of Cursor's fixed callback URLs, or `/authorize`
-returns `unauthorized_client — Callback URL mismatch`:
-
-```
-http://localhost:8787/callback                      (desktop app)
-https://www.cursor.com/agents/mcp/oauth/callback    (web / Cursor Agents)
-```
-
-Add them under **Allowed Callback URLs** on that Auth0 application. Enabling DCR
-on the tenant would work too and would cover every MCP client at once, but it is
-a broader change than allowlisting two URLs on one existing app.
+**OAuth.** Cursor obtains its client by dynamic registration, the same way the
+Codex leg did — nothing to configure here, and no key to mint. That requires
+**OIDC Dynamic Application Registration** to be enabled on the bonez Auth0
+tenant. It is worth knowing what a disabled tenant looks like, because the
+failure is silent: `POST /oidc/register` answers
+`dynamic client registration is disabled`, the client never obtains one, and the
+Authenticate button appears to do nothing at all — no browser, no error. Clients
+that registered while it was open keep working indefinitely off their refresh
+tokens, so "it works for me" from an existing install says nothing about whether
+a NEW install can connect.
 
 **Session-capture gap.** Cursor is not wired for session capture. Its transcripts
 are opt-in and this repo has no parser for their on-disk format; both
