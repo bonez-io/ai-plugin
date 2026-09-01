@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "bonez": {
+      "url": "https://gateway.bonez.io/mcp",
+      "headers": {
+        "x-bonez-mcp-consumer": "cursor-plugin"
+      }
+    }
+  }
+}

@@ -18,7 +18,7 @@ jobs:
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json; do
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks.json; do
             jq empty "$f"
             echo "ok: $f"
           done
@@ -58,6 +58,45 @@ jobs:
 
       - name: Session capture tests
         run: ./tests/test_session_sync.sh
+
+      - name: Skills parity across harness legs
+        run: |
+          set -euo pipefail
+          # Every leg must expose the SAME SET of skills. Content is allowed to
+          # diverge, but only deliberately: Codex forks `remembering` and
+          # `reviewing-with-org-rules` because it has no write-gate hook and the
+          # Claude/Cursor wording ("expect the harness to ask") would be a lie
+          # there. Anything else differing is accidental drift and fails here.
+          diff <(ls skills) <(ls codex/skills) || {
+            echo "::error::skills/ and codex/skills/ expose different skill sets."; exit 1; }
+          expected="remembering reviewing-with-org-rules"
+          actual="$(for d in $(ls skills); do
+            cmp -s "skills/$d/SKILL.md" "codex/skills/$d/SKILL.md" || echo "$d"
+          done | sort | tr '\n' ' ' | sed 's/ $//')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::codex/skills divergence changed."
+            echo "  expected exactly: $expected"
+            echo "  found:            $actual"
+            echo "  Codex-specific adaptations are allowed; anything else must be re-copied from skills/."
+            exit 1
+          fi
+          echo "ok: skill sets match; divergence is exactly the documented Codex pair"
+
+      - name: Cursor leg wiring
+        run: |
+          set -euo pipefail
+          # The write gate must be reachable at the path cursor/hooks.json documents,
+          # and the installer must parse. A Cursor install is four files in places
+          # Cursor already reads; if any of them is missing the leg silently does nothing.
+          test -x hooks/gate-write.sh || { echo "::error::hooks/gate-write.sh not executable"; exit 1; }
+          test -f cursor/AGENTS.md    || { echo "::error::cursor/AGENTS.md missing"; exit 1; }
+          for f in cursor/commands/*.md; do
+            head -1 "$f" | grep -qx -- '---' || { echo "::error::$f missing frontmatter"; exit 1; }
+            grep -q '^description:' "$f" || { echo "::error::$f missing description"; exit 1; }
+            echo "ok: $f"
+          done
+          node bin/bonez-cursor-install.mjs --dry-run --project "$(mktemp -d)" >/dev/null
+          echo "ok: bonez-cursor-install.mjs dry run"
 
       - name: Skill frontmatter sanity
         run: |

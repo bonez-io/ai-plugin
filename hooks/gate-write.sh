@@ -41,15 +41,17 @@ trap 'exit 0' EXIT
 
 set -u
 
-# Harness detection: this hook speaks Claude Code's PreToolUse JSON protocol.
-# Claude Code sets CLAUDE_PLUGIN_ROOT (and never PLUGIN_ROOT); Codex sets its
-# native PLUGIN_ROOT and rejects `permissionDecision: "ask"` while already
-# gating tools through its own approval flow. Exit early anywhere that isn't
-# Claude Code so the hook neither errors nor fights the host's prompt.
+# Harness detection. This hook speaks TWO protocols:
+#
+#   Claude Code  PreToolUse          -> {"hookSpecificOutput":{...,"permissionDecision":"ask"}}
+#   Cursor       beforeMCPExecution  -> {"permission":"ask",...}
+#
+# Codex is deliberately excluded: it sets its native PLUGIN_ROOT and rejects an
+# "ask" decision while already gating tools through its own approval flow, so
+# exiting early there means the hook neither errors nor fights the host prompt.
+# (Cursor sets CLAUDE_PROJECT_DIR as an alias for its project dir but never
+# CLAUDE_PLUGIN_ROOT, so the Claude branch below cannot be entered by mistake.)
 if [[ -n "${PLUGIN_ROOT:-}" ]]; then
-    exit 0
-fi
-if [[ -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
     exit 0
 fi
 
@@ -60,20 +62,62 @@ fi
 
 input="$(cat)"
 
+# Which protocol is this? The payload's own `hook_event_name` decides, not the
+# environment: it is the one field both hosts always send, and keying on it
+# means a host that sets a surprising env var cannot route us into the wrong
+# response shape. Anything we do not recognise falls through silently.
+protocol=""
+if [[ "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"beforeMCPExecution\" ]]; then
+    protocol="cursor"
+elif [[ "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"PreToolUse\" ]]; then
+    protocol="claude"
+elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+    # Older Claude Code builds that omit `hook_event_name` on input. The env var
+    # is Claude-Code-only (see the detection note above), so this stays narrow.
+    protocol="claude"
+fi
+[[ -n "$protocol" ]] || exit 0
+
+# The Claude leg additionally requires CLAUDE_PLUGIN_ROOT, unchanged: that is
+# how it has always distinguished "running as an installed plugin" from a bare
+# invocation, and tests/test_gate.sh pins it.
+if [[ "$protocol" == "claude" && -z "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
+    exit 0
+fi
+
 # Extract `tool_name` — simple identifier, no escaping inside the value.
 tool_name=""
 if [[ "$input" =~ \"tool_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
     tool_name="${BASH_REMATCH[1]}"
 fi
 
-# Only gate the bonez memory/rules tools. Covers every namespacing Claude
-# Code uses: `mcp__bonez__memory` (raw `claude mcp add`),
-# `mcp__plugin_bonez_bonez__memory` (plugin-installed), and renamed server
-# keys that still contain `bonez`. hooks.json matches broadly on
-# `__(memory|rules)$`; this is the narrow check, so a different product's
-# memory or rules tool never gets our prompt.
-[[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]] || exit 0
-tool="${BASH_REMATCH[1]}"
+# Only gate the bonez memory/rules tools.
+#
+# Claude Code flattens the server into the tool name — `mcp__bonez__memory`
+# (raw `claude mcp add`), `mcp__plugin_bonez_bonez__memory` (plugin-installed),
+# or a renamed server key that still contains `bonez`. hooks.json matches
+# broadly on `__(memory|rules)$`; this is the narrow check, so a different
+# product's memory or rules tool never gets our prompt.
+#
+# Cursor keeps them apart: `tool_name` is the BARE tool (`memory`), and the
+# server key arrives separately as `mcp_server_name`. So the server identity
+# has to be checked there instead — and Cursor's hooks.json carries no matcher
+# at all, making this the ONLY filter on that leg.
+tool=""
+if [[ "$protocol" == "cursor" ]]; then
+    server_name=""
+    if [[ "$input" =~ \"mcp_server_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+        server_name="${BASH_REMATCH[1]}"
+    fi
+    [[ "$server_name" == *bonez* ]] || exit 0
+    # Accept the bare name, and tolerate a namespaced one in case a future
+    # Cursor build flattens it the way Claude Code does.
+    [[ "$tool_name" =~ ^(mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__)?(memory|rules)$ ]] || exit 0
+    tool="${BASH_REMATCH[2]}"
+else
+    [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]] || exit 0
+    tool="${BASH_REMATCH[1]}"
+fi
 
 # Extract `op` by looking for a real (unescaped-quote) `"op":"<write-op>"`
 # ANYWHERE in the payload — one regex pass, no loop. The tool input's real op
@@ -86,8 +130,27 @@ tool="${BASH_REMATCH[1]}"
 # write-op name may prompt unnecessarily; that is the safe direction for a
 # write gate. Silence on a real write is the failure mode this hook exists
 # to prevent.
+#
+# Cursor adds one wrinkle: it documents `tool_input` as a JSON *string*, so its
+# params arrive escaped (`\"op\":\"save\"`) where Claude Code's arrive as a real
+# object. On that leg ONE level of escaping is structural, so unescape `\"` to
+# `"` before matching.
+#
+# This is deliberately NOT done for Claude Code. There, escaped quotes mean the
+# opposite thing — they are string CONTENT (`{"op":"recall","query":"note that
+# {\"op\":\"delete\"} appears in a doc"}`) — and unescaping would turn a quoted
+# mention of a write op into a false prompt, which
+# tests/test_gate.sh::"escaped op text inside content does not fool the gate"
+# pins. The same protection survives on the Cursor leg for free: content text
+# inside its stringified `tool_input` is DOUBLE-escaped, so one pass leaves it
+# as `\"` and it still cannot match.
+haystack="$input"
+if [[ "$protocol" == "cursor" ]]; then
+    haystack="${input//\\\"/\"}"
+fi
+
 op=""
-if [[ "$input" =~ \"op\"[[:space:]]*:[[:space:]]*\"(save|update|delete)\" ]]; then
+if [[ "$haystack" =~ \"op\"[[:space:]]*:[[:space:]]*\"(save|update|delete)\" ]]; then
     op="${BASH_REMATCH[1]}"
 fi
 
@@ -104,7 +167,16 @@ case "$op" in
         if [[ "$tool" == "rules" ]]; then
             target="the org's binding rules and commands"
         fi
-        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"bonez %s `%s` writes to %s — approve to run."}}' "$tool" "$op" "$target"
+        reason="bonez $tool \`$op\` writes to $target — approve to run."
+        if [[ "$protocol" == "cursor" ]]; then
+            # Cursor's beforeMCPExecution contract: a flat object with
+            # `permission`, plus the two message fields it renders. "ask" is
+            # genuinely supported here — unlike Codex, whose PreToolUse parses
+            # "ask" but leaves it unimplemented (see README).
+            printf '{"permission":"ask","user_message":"%s","agent_message":"%s"}' "$reason" "$reason"
+        else
+            printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$reason"
+        fi
         ;;
 esac
 

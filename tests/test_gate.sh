@@ -76,6 +76,53 @@ rules_call() {
     printf '{"tool_name":"%s","tool_input":{"op":"%s","name":"no-force-push","content":"Never force-push shared branches."}}' "$tool_name" "$op"
 }
 
+# --- Cursor leg (beforeMCPExecution) -------------------------------------
+#
+# Cursor speaks a different protocol on both ends: it keeps `mcp_server_name`
+# separate from a BARE `tool_name`, documents `tool_input` as a JSON *string*
+# (so params arrive escaped), and expects a flat `{"permission":"ask"}` reply
+# rather than Claude Code's nested `hookSpecificOutput`. It also sets no
+# CLAUDE_PLUGIN_ROOT, so these cases deliberately run without one.
+cursor_run_case() {
+    local name="$1" payload="$2" expected="$3" expected_op="${4:-}"
+    local out status
+    out="$(env -i PATH="$PATH" bash "$HOOK" <<<"$payload")"
+    status=$?
+
+    local ok=1
+    if [[ "$expected" == "silent" ]]; then
+        [[ -z "$out" && $status -eq 0 ]] || ok=0
+    else
+        local tool_word="memory" op_word="$expected_op"
+        if [[ "$expected_op" == *:* ]]; then
+            tool_word="${expected_op%%:*}"
+            op_word="${expected_op##*:}"
+        fi
+        # The Cursor shape, asserted explicitly — a Claude-shaped reply here
+        # would be silently useless to Cursor, so the needle must not be shared.
+        [[ $status -eq 0 \
+           && "$out" == *'"permission":"ask"'* \
+           && "$out" == *'"user_message"'* \
+           && "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* ]] || ok=0
+    fi
+
+    if (( ok )); then
+        pass=$((pass + 1))
+        printf "  ok   %s\n" "$name"
+    else
+        fail=$((fail + 1))
+        printf "  FAIL %s\n       expected=%s status=%d stdout=%q\n" \
+            "$name" "$expected" "$status" "$out"
+    fi
+}
+
+# Cursor payload: `tool_input` as the documented JSON STRING (escaped quotes).
+cursor_call() {
+    local tool="$1" op="$2" server="${3:-bonez}"
+    printf '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"%s","tool_name":"%s","tool_input":"{\\"op\\":\\"%s\\"}"}' \
+        "$server" "$tool" "$op"
+}
+
 echo "Running gate-write.sh tests..."
 
 # --- syntax check first: a parse-time error is the one failure the hook's ---
@@ -237,6 +284,56 @@ do
         fail=$((fail + 1)); printf "  FAIL exited 2 (would block) for: %q\n" "$_payload"
     fi
 done
+
+# --- Cursor: beforeMCPExecution ---
+
+cursor_run_case "cursor: memory save prompts" \
+    "$(cursor_call memory save)" prompt save
+
+cursor_run_case "cursor: memory update prompts" \
+    "$(cursor_call memory update)" prompt update
+
+cursor_run_case "cursor: memory delete prompts" \
+    "$(cursor_call memory delete)" prompt delete
+
+cursor_run_case "cursor: memory recall is silent" \
+    "$(cursor_call memory recall)" silent
+
+cursor_run_case "cursor: rules save prompts with rules wording" \
+    "$(cursor_call rules save)" prompt rules:save
+
+cursor_run_case "cursor: rules list is silent" \
+    "$(cursor_call rules list)" silent
+
+# The server identity is the ONLY filter on this leg (Cursor's hooks.json
+# carries no matcher), so a same-named tool on someone else's server must not
+# inherit our prompt.
+cursor_run_case "cursor: another server's memory tool is ignored" \
+    "$(cursor_call memory save othervendor)" silent
+
+cursor_run_case "cursor: a non-memory/rules bonez tool is ignored" \
+    "$(cursor_call search save)" silent
+
+# tool_input as a real object rather than the documented string — tolerated
+# either way, so a Cursor build that stops stringifying cannot silently disarm
+# the gate.
+cursor_run_case "cursor: object-valued tool_input still prompts" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"rules","tool_input":{"op":"save"}}' \
+    prompt rules:save
+
+# The Claude-leg content protection has to survive the Cursor unescape pass:
+# text INSIDE the stringified tool_input is double-escaped, so one pass leaves
+# it as \" and must still not match.
+cursor_run_case "cursor: escaped op text inside content does not fool the gate" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"memory","tool_input":"{\"op\":\"recall\",\"query\":\"note that {\\\"op\\\":\\\"delete\\\"} appears\"}"}' \
+    silent
+
+# Protocol is chosen by hook_event_name, never by luck: a Claude-shaped payload
+# reaching the Cursor helper (which sets no CLAUDE_PLUGIN_ROOT) stays silent
+# rather than being answered in the wrong shape.
+cursor_run_case "cursor: PreToolUse payload without plugin root is silent" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__bonez__memory","tool_input":{"op":"save"}}' \
+    silent
 
 # --- summary ---
 
