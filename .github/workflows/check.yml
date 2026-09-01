@@ -97,7 +97,14 @@ jobs:
           test -f cursor/.cursor-plugin/plugin.json || { echo "::error::cursor manifest missing"; exit 1; }
           test -f cursor/mcp.json                   || { echo "::error::cursor/mcp.json missing"; exit 1; }
           test -f cursor/hooks/hooks.json           || { echo "::error::cursor/hooks/hooks.json missing"; exit 1; }
-          test -x cursor/hooks/gate-write.sh        || { echo "::error::cursor gate shim not executable"; exit 1; }
+          test -x cursor/hooks/gate-write.sh        || { echo "::error::cursor gate not executable"; exit 1; }
+          # The plugin must be SELF-CONTAINED. A marketplace install copies the
+          # plugin directory on its own — there is no parent repo behind it — so
+          # the gate cannot be a shim reaching ../../hooks/. It is a byte copy,
+          # pinned here, because a gate that fails to exec is a gate that lets
+          # writes through (Cursor fails open by default).
+          cmp -s hooks/gate-write.sh cursor/hooks/gate-write.sh || {
+            echo "::error::cursor/hooks/gate-write.sh has drifted from hooks/gate-write.sh — re-copy it."; exit 1; }
           test -d cursor/skills                     || { echo "::error::cursor/skills missing"; exit 1; }
           test -d cursor/commands                   || { echo "::error::cursor/commands missing"; exit 1; }
 
@@ -114,8 +121,32 @@ jobs:
 
           # The hook command is resolved from the plugin root — prove it runs and
           # that the shim reaches the shared gate.
-          out="$(cd cursor && printf '%s' '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' | ./hooks/gate-write.sh)"
-          echo "$out" | grep -q '"permission":"ask"' || { echo "::error::plugin-root hook path did not gate a write"; exit 1; }
+          # Run it the way a real install runs it: the plugin directory COPIED
+          # somewhere else entirely, with no repo above it. Testing in-tree would
+          # pass even for a plugin that only works in-tree.
+          standalone="$(mktemp -d)/bonez"
+          cp -R cursor "$standalone"
+          out="$(cd "$standalone" && printf '%s' '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' | ./hooks/gate-write.sh)"
+          echo "$out" | grep -q '"permission":"ask"' || {
+            echo "::error::the plugin is not self-contained — the gate did not fire from a standalone copy"; exit 1; }
+          echo "ok: gate fires from a standalone plugin copy"
+
+          # Branding. The Cursor manifest's `logo` is plugin-relative, so the
+          # asset has to live INSIDE the plugin or the marketplace card renders
+          # blank — the same self-containment trap as the gate.
+          logo="$(jq -r '.logo // empty' cursor/.cursor-plugin/plugin.json)"
+          test -n "$logo" || { echo "::error::cursor plugin.json has no logo"; exit 1; }
+          test -f "cursor/$logo" || { echo "::error::cursor/$logo missing"; exit 1; }
+          cmp -s assets/logo.svg "cursor/$logo" || {
+            echo "::error::cursor/$logo has drifted from assets/logo.svg"; exit 1; }
+          python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse(sys.argv[1])" "cursor/$logo"
+
+          # The MCP registry takes icons by HTTPS URL, not a repo path, so the
+          # only thing CI can assert is that they are well-formed and themed.
+          jq -e '.icons | length >= 1' server.json >/dev/null || { echo "::error::server.json has no icons"; exit 1; }
+          jq -e '[.icons[] | select(.src | startswith("https://"))] | length == (.icons | length)' server.json >/dev/null \
+            || { echo "::error::server.json icons must all be https"; exit 1; }
+          echo "ok: logo present in plugin, icons declared for the registry"
 
           for f in cursor/commands/*.md; do
             head -1 "$f" | grep -qx -- '---' || { echo "::error::$f missing frontmatter"; exit 1; }

@@ -10,6 +10,7 @@
   "homepage": "https://bonez.io",
   "repository": "https://github.com/bonez-io/ai-plugin",
   "license": "MIT",
+  "logo": "assets/logo.svg",
   "keywords": [
     "context",
     "knowledge-graph",

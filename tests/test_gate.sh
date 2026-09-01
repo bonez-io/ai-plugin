@@ -367,14 +367,27 @@ cursor_run_case "cursor: flattened tool name self-identifies" \
     '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__memory","tool_input":"{\"op\":\"save\"}"}' \
     prompt save
 
-# The plugin ships the gate as a shim at cursor/hooks/gate-write.sh, because
-# Cursor resolves a plugin hook `command` from the PLUGIN root. If the shim
-# stops reaching the shared gate, the Cursor leg is unguarded.
-shim_out="$(cd "$HERE/../cursor" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}')"
-if [[ "$shim_out" == *'"permission":"ask"'* ]]; then
-    pass=$((pass + 1)); printf "  ok   cursor: plugin-root shim reaches the shared gate\n"
+# The plugin must be SELF-CONTAINED. Cursor resolves a plugin hook `command`
+# from the plugin root, and a marketplace install copies that directory on its
+# own — no repo behind it. Run the gate from a COPY placed elsewhere, because
+# testing in-tree would pass even for a plugin that only works in-tree, and a
+# gate that fails to exec lets writes through (Cursor fails open).
+_standalone="$(mktemp -d)/bonez"
+cp -R "$HERE/../cursor" "$_standalone"
+plugin_out="$(cd "$_standalone" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}')"
+rm -rf "$(dirname "$_standalone")"
+if [[ "$plugin_out" == *'"permission":"ask"'* ]]; then
+    pass=$((pass + 1)); printf "  ok   cursor: gate fires from a standalone plugin copy\n"
 else
-    fail=$((fail + 1)); printf "  FAIL cursor: plugin-root shim did not gate a write (stdout=%q)\n" "$shim_out"
+    fail=$((fail + 1)); printf "  FAIL cursor: plugin is not self-contained (stdout=%q)\n" "$plugin_out"
+fi
+
+# And the copy must not drift from the canonical gate, or the two protocols
+# diverge silently.
+if cmp -s "$HERE/../hooks/gate-write.sh" "$HERE/../cursor/hooks/gate-write.sh"; then
+    pass=$((pass + 1)); printf "  ok   cursor: plugin gate is byte-identical to the canonical one\n"
+else
+    fail=$((fail + 1)); printf "  FAIL cursor: cursor/hooks/gate-write.sh has drifted\n"
 fi
 
 # --- summary ---

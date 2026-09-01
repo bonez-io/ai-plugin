@@ -109,11 +109,13 @@ every part is discovered without configuration:
 | Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
 | Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `./hooks/gate-write.sh` |
+| Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
 
-`cursor/hooks/gate-write.sh` is a two-line shim: Cursor resolves a plugin's hook
-`command` from the *plugin* root, but the gate is shared with the Claude Code leg
-and lives at the repo root, so the shim `exec`s the real one rather than keeping
-a second copy that could drift.
+`cursor/hooks/gate-write.sh` is a byte copy of the root `hooks/gate-write.sh`,
+not a shim to it. A marketplace install copies the plugin directory **on its
+own** — there is no repo behind it — so a hook reaching `../../hooks/` fails to
+exec, and Cursor fails open, which means writes would go through unguarded. CI
+pins the copy and runs the gate from a standalone directory to prove it.
 
 **The write gate works here** — unlike the Codex leg. Cursor's
 `beforeMCPExecution` genuinely supports `permission: "ask"`, so `memory`/`rules`
@@ -139,6 +141,22 @@ are opt-in and this repo has no parser for their on-disk format; both
 enum would need a Cursor case. Rather than ship a guess, the plugin carries **no**
 `sessionEnd` hook — Claude Code and Codex remain the two legs that capture
 sessions.
+
+### Branding
+
+The bonez mark ships wherever a manifest has somewhere to put it:
+
+- **Cursor** — `"logo": "assets/logo.svg"` in the plugin manifest. It is an
+  opaque tile (bonez paper ground, ink mark) rather than a bare glyph, because
+  marketplace cards render on light *and* dark and are often rasterised, so a
+  `prefers-color-scheme` trick inside the SVG cannot be relied on.
+- **MCP registry** — `icons[]` in [`server.json`](server.json), one entry per
+  `theme`, pointing at the light/dark marks already served from
+  `console.bonez.io`. The registry schema requires an **HTTPS URL**, so these
+  cannot be repo-relative paths.
+- **Claude Code** — nothing to wire: its `plugin.json` / `marketplace.json`
+  schemas document no icon, logo, or image field. `assets/` still carries the
+  bare `bonez-mark-{light,dark}.svg` for the day one appears.
 
 ### Headless / CI: API key instead
 
@@ -299,6 +317,7 @@ bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
+assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
 cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Install → Cursor; write gate works, no session capture)
 ```
