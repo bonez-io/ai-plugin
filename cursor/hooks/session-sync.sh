@@ -1,29 +1,42 @@
 #!/usr/bin/env bash
-# Cursor `sessionEnd` hook — hands the conversation transcript to bonez-session-sync.mjs.
+# Cursor session-capture hook — hands the conversation transcript to bonez-session-sync.mjs.
 #
-# This wrapper exists for one reason: path resolution. Cursor documents how a PROJECT hook's
-# relative command resolves (against the project root) and how a USER hook's does (against
-# ~/.cursor/), but says nothing about a hook shipped inside a plugin. So the command in
-# hooks.json stays the same shape the gate already relies on (`./hooks/<script>`), and the
-# script itself — which always knows where it lives — resolves the interpreter and the .mjs
-# absolutely from there. Whatever working directory Cursor picks, the node invocation is exact.
+# One script for every lifecycle event; hooks.json passes which one as $1. There were three
+# near-identical copies of this before, plus a CI check to stop them drifting — all of that
+# was machinery guarding a difference of one word.
 #
-# Everything downstream is the SAME bin/bonez-session-sync.mjs the Claude Code and Codex legs
-# use, so consent, credentials, scoping and debounce behave identically across all three
-# clients. It is a silent no-op until `login` (or, headless, `install`) has been run — see the
-# README's "Session capture" section.
+#   stop         -> turn-end       the PRIMARY trigger. Fires after every agent turn, while
+#                                  the window is alive, independently per conversation, so
+#                                  concurrent chats each capture themselves.
+#   sessionEnd   -> session-end    captures the tail immediately when a chat tab is closed.
+#                                  Does NOT run when you quit the app: on `window_close`
+#                                  Cursor tears down shell-exec before running sessionEnd
+#                                  hooks, so every command hook in the batch dies with
+#                                  "MainThreadShellExec not initialized" (Cursor 3.18.25).
+#                                  That is why `stop` carries the load, not this.
+#   sessionStart -> session-start  flushes anything the two above missed — a crash, a kill,
+#                                  or a final turn that landed inside the debounce window.
+#
+# The uploader debounces (BONEZ_SESSION_SYNC_DEBOUNCE_MS, default 120s) and skips unchanged
+# transcripts, so a burst of quick turns collapses into one upload rather than one per turn.
+#
+# Path resolution is why this is a shell wrapper at all: Cursor documents how a PROJECT hook's
+# relative command resolves and how a USER hook's does, but says nothing about a hook shipped
+# inside a plugin. The script always knows where it lives, so it resolves the interpreter and
+# the .mjs absolutely from there whatever working directory Cursor picks.
 #
 # Env knobs:
 #
 #   BONEZ_SESSION_SYNC=0 — disable capture without uninstalling (honoured inside the .mjs).
+#   BONEZ_NODE           — path to node, if it is not on PATH (see the probe below).
 #
-# Cursor treats sessionEnd as fire-and-forget: "The response is logged but not used." Nothing
-# this script prints or returns can affect the session. It still exits 0 on every path — a
-# non-zero exit from a hook is the kind of thing that shows up in a log and erodes trust in the
-# plugin, and there is no failure here worth reporting to someone who has already closed the
-# conversation.
+# Exits 0 with no output on every path. That is correctness, not tidiness: a `stop` hook may
+# return a followup_message which Cursor AUTO-SUBMITS as a new user turn, so anything printed
+# here would be injected into the user's conversation.
 trap 'exit 0' EXIT
 set -u
+
+EVENT="${1:-session-end}"
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SYNC="$HERE/../bin/bonez-session-sync.mjs"
@@ -45,7 +58,6 @@ if [ -z "$NODE_BIN" ]; then
 fi
 [ -n "$NODE_BIN" ] || exit 0
 
-# stdin (the hook payload JSON) passes straight through. stdout is discarded rather than
-# forwarded: the .mjs is written never to print, and this guarantees it even if that changes.
-"$NODE_BIN" "$SYNC" hook cursor session-end >/dev/null 2>&1
+# stdin (the hook payload JSON) passes straight through.
+"$NODE_BIN" "$SYNC" hook cursor "$EVENT" >/dev/null 2>&1
 exit 0

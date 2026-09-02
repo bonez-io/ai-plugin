@@ -6,21 +6,21 @@
         "command": "./hooks/gate-write.sh"
       }
     ],
+    "stop": [
+      {
+        "command": "./hooks/session-sync.sh turn-end",
+        "timeout": 10
+      }
+    ],
     "sessionEnd": [
       {
-        "command": "./hooks/session-sync.sh",
+        "command": "./hooks/session-sync.sh session-end",
         "timeout": 10
       }
     ],
     "sessionStart": [
       {
-        "command": "./hooks/session-sync-catchup.sh",
-        "timeout": 10
-      }
-    ],
-    "stop": [
-      {
-        "command": "./hooks/session-sync-turn.sh",
+        "command": "./hooks/session-sync.sh session-start",
         "timeout": 10
       }
     ]

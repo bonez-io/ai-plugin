@@ -137,6 +137,13 @@ jobs:
           # vendored bundle it imports) — a marketplace install has no parent repo
           # to reach into.
           test -x cursor/hooks/session-sync.sh || { echo "::error::cursor session-sync hook not executable"; exit 1; }
+          # One wrapper serves every lifecycle event, with the event as its argument — so
+          # every registered command must actually point at it.
+          for ev in stop sessionEnd sessionStart; do
+            jq -e --arg ev "$ev" '.hooks[$ev][0].command | startswith("./hooks/session-sync.sh ")' \
+              cursor/hooks/hooks.json >/dev/null \
+              || { echo "::error::cursor hooks.$ev must call ./hooks/session-sync.sh <event>"; exit 1; }
+          done
           for f in bonez-session-sync.mjs vendor/agent-import.bundle.mjs; do
             test -f "cursor/bin/$f" || { echo "::error::cursor/bin/$f missing"; exit 1; }
             cmp -s "bin/$f" "cursor/bin/$f" || {
@@ -156,19 +163,6 @@ jobs:
           # through one catch-up. Losing this silently reverts capture to batch-with-lag.
           jq -e '.hooks.stop | length >= 1' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json does not register a stop hook — capture loses per-turn and per-conversation coverage"; exit 1; }
-          for h in session-sync-catchup session-sync-turn; do
-            test -x "cursor/hooks/$h.sh" || { echo "::error::cursor/hooks/$h.sh not executable"; exit 1; }
-          done
-          # All three wrappers must stay identical apart from the event they pass.
-          for pair in "session-sync-catchup:session-start" "session-sync-turn:turn-end"; do
-            f="${pair%%:*}"; ev="${pair##*:}"
-            diff <(grep -v "^#" cursor/hooks/session-sync.sh | sed "s/session-end/EVENT/") \
-                 <(grep -v "^#" "cursor/hooks/$f.sh" | sed "s/$ev/EVENT/") >/dev/null \
-              || { echo "::error::cursor/hooks/$f.sh has drifted from session-sync.sh beyond its event argument"; exit 1; }
-          done
-          jq -e '.version' cursor/hooks/hooks.json >/dev/null \
-            || { echo "::error::cursor/hooks/hooks.json needs a top-level version (Cursor hooks schema)"; exit 1; }
-
           # Prove the wrapper resolves the .mjs from ITS OWN directory rather than
           # the checkout it was authored in. BONEZ_NODE stands in for node and just
           # records the path it was handed; the wrapper discards stdout, so the
