@@ -6,12 +6,6 @@
         "command": "./hooks/gate-write.sh"
       }
     ],
-    "stop": [
-      {
-        "command": "\"${HOME}/.bonez/cursor-hook.sh\" turn-end",
-        "timeout": 10
-      }
-    ],
     "sessionEnd": [
       {
         "command": "./hooks/session-sync.sh session-end",

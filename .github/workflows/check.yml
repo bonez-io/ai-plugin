@@ -144,37 +144,6 @@ jobs:
               cursor/hooks/hooks.json >/dev/null \
               || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
           done
-          # `stop` is the one hook Cursor runs from the WORKSPACE root rather than the plugin
-          # root (observed: exit code 127, "Running script in directory: <workspace>"), so a
-          # bare relative command cannot find the script. It needs a plugin-root-anchored
-          # form; the relative one stays alongside as the fallback for the case where the
-          # cwd IS the plugin root. Losing the anchored entry silently disables per-turn
-          # capture — the exact regression this check exists to catch.
-          # Cursor runs `stop` from the WORKSPACE root, not the plugin root, and exports
-          # NEITHER CLAUDE_PLUGIN_ROOT nor PLUGIN_ROOT to a plugin hook (both tried against
-          # 3.18.25, both empty, exit 127). So `stop` cannot name the plugin directory at all
-          # — the hooks that DO run from the plugin root bootstrap a shim at a fixed path and
-          # `stop` goes through that. Lose either half and per-turn capture dies silently.
-          jq -e '[.hooks.stop[].command] | any(contains(".bonez/cursor-hook.sh"))' cursor/hooks/hooks.json >/dev/null \
-            || { echo "::error::cursor hooks.stop must go through the bootstrapped shim — it runs from the workspace and cannot find the plugin"; exit 1; }
-          grep -q 'cursor-hook.sh' cursor/hooks/session-sync.sh \
-            || { echo "::error::session-sync.sh no longer writes the shim that hooks.stop depends on"; exit 1; }
-          # Exactly one stop entry. A relative fallback beside it is proven to fail (exit 127)
-          # and would write a hook failure into Cursor's log on every single turn.
-          [ "$(jq '.hooks.stop | length' cursor/hooks/hooks.json)" = "1" ] \
-            || { echo "::error::hooks.stop should have exactly one entry — the shim"; exit 1; }
-
-          # Prove the whole path end to end, from a standalone copy: a plugin-root hook
-          # bootstraps the shim, and the shim then works from an unrelated directory — which
-          # is exactly the 127 that broke per-turn capture in the field.
-          shimhome="$(mktemp -d)"
-          fakenode="$(mktemp -d)/n"; printf '#!/usr/bin/env bash\nexit 0\n' > "$fakenode"; chmod +x "$fakenode"
-          ( cd "$standalone" && printf '%s' '{}' | HOME="$shimhome" BONEZ_NODE="$fakenode" ./hooks/session-sync.sh session-start )
-          test -x "$shimhome/.bonez/cursor-hook.sh" \
-            || { echo "::error::a plugin-root hook did not bootstrap the stop shim"; exit 1; }
-          ( cd / && printf '%s' '{}' | HOME="$shimhome" BONEZ_NODE="$fakenode" "$shimhome/.bonez/cursor-hook.sh" turn-end ) \
-            || { echo "::error::the stop shim does not work from outside the plugin directory"; exit 1; }
-          echo "ok: stop reaches the plugin from an arbitrary working directory"
           for f in bonez-session-sync.mjs vendor/agent-import.bundle.mjs; do
             test -f "cursor/bin/$f" || { echo "::error::cursor/bin/$f missing"; exit 1; }
             cmp -s "bin/$f" "cursor/bin/$f" || {
@@ -188,12 +157,12 @@ jobs:
           # is what makes capture survive that — losing it silently halves the feature.
           jq -e '.hooks.sessionStart | length >= 1' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json does not register a sessionStart hook — capture will not survive window_close"; exit 1; }
-          # `stop` is the PRIMARY capture trigger on Cursor — it is the only one that fires
-          # while the window is alive, once per turn, independently per conversation.
-          # sessionEnd cannot run on window_close and sessionStart serialises everything
-          # through one catch-up. Losing this silently reverts capture to batch-with-lag.
-          jq -e '.hooks.stop | length >= 1' cursor/hooks/hooks.json >/dev/null \
-            || { echo "::error::cursor/hooks/hooks.json does not register a stop hook — capture loses per-turn and per-conversation coverage"; exit 1; }
+          for ev in sessionEnd sessionStart; do
+            jq -e --arg ev "$ev" '[.hooks[$ev][].command] | any(contains("hooks/session-sync.sh"))' \
+              cursor/hooks/hooks.json >/dev/null \
+              || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
+          done
+
           # Prove the wrapper resolves the .mjs from ITS OWN directory rather than
           # the checkout it was authored in. BONEZ_NODE stands in for node and just
           # records the path it was handed; the wrapper discards stdout, so the
