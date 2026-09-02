@@ -29,7 +29,7 @@
 // (packages/agent-import/bundle/agent-import.bundle.mjs, commit b07910990c4ba2e70e13c9656f61
 // 198fa2cba90c) at bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install
 // needed. Do not hand-edit that file; re-vendor it verbatim when harness-ui's source changes.
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { hostname, homedir, platform } from "node:os"
 import { join } from "node:path"
@@ -100,8 +100,113 @@ function credentialProtection() {
     : "mode 600 — this machine only"
 }
 
+// WHERE THE CREDENTIAL LIVES.
+//
+// This used to be `CLAUDE_PLUGIN_DATA || ~/.claude/plugins/data/bonez-bonez`, which was fine
+// while Claude Code was the only client: Claude Code sets that variable, so the fallback was
+// nearly dead code. Adding the Cursor leg broke both halves of that assumption.
+//
+//   - Cursor sets CLAUDE_PROJECT_DIR (for Claude Code compat) but NOT CLAUDE_PLUGIN_DATA, so
+//     it always takes the fallback — a literal, hardcoded path.
+//   - Claude Code derives its data dir as `<plugin>-<marketplace>`. Install this plugin from a
+//     marketplace named anything other than `bonez` and the credential lands in, say,
+//     `bonez-acme` — which Cursor's fallback will never look at. `login` in Claude Code, then
+//     capture nothing in Cursor, with no error anywhere. (Observed locally: two stores,
+//     `bonez/` and `bonez-bonez/`, holding two different credentials.)
+//   - A Cursor-only user has no Claude Code at all, and `login` would create ~/.claude/ on
+//     their machine for a product they do not use.
+//
+// So the store is now agent-neutral, and resolution prefers wherever a config ALREADY is —
+// an existing install must never lose its credential to a path change. Fresh installs land in
+// the neutral location, and legacy stores are migrated on first write (see migrateLegacyData).
+const CANONICAL_DATA_DIR = join(homedir(), ".bonez", "session-sync")
+
+// The legacy locations, most-specific first. CLAUDE_PLUGIN_DATA is what Claude Code hands us
+// and is authoritative when set; the hardcoded path below it is where every install before
+// this change landed.
+function legacyDataDirs() {
+  const dirs = [process.env.CLAUDE_PLUGIN_DATA].filter(Boolean)
+  // Claude Code names its per-plugin data dir `<plugin>-<marketplace>`, so the marketplace the
+  // user happened to add this from is baked into the path: `bonez-bonez`, `bonez-acme`, ...
+  // Guessing one name is what caused the split in the first place — enumerate instead, newest
+  // config first (the most likely current credential when a machine has several).
+  const claudeData = join(homedir(), ".claude", "plugins", "data")
+  try {
+    const found = readdirSync(claudeData)
+      .filter((n) => n === "bonez" || n.startsWith("bonez-"))
+      .map((n) => join(claudeData, n))
+      .filter((d) => existsSync(join(d, "config.json")))
+      .map((d) => ({ d, mtime: statSync(join(d, "config.json")).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .map((x) => x.d)
+    dirs.push(...found)
+  } catch {
+    /* no ~/.claude at all — the common case for a Cursor-only user */
+  }
+  return dirs
+}
+
+// Resolved once per process: `dataDir()` is called repeatedly on the hook fast path and there
+// is no reason to re-stat for each one.
+let _dataDir
 function dataDir() {
-  return process.env.CLAUDE_PLUGIN_DATA || join(homedir(), ".claude", "plugins", "data", "bonez-bonez")
+  if (_dataDir) return _dataDir
+  // An explicit override always wins — tests rely on this, and it is the escape hatch for
+  // anyone with an unusual layout.
+  const explicit = process.env.BONEZ_SESSION_SYNC_DATA || process.env.CLAUDE_PLUGIN_DATA
+  if (explicit) {
+    _dataDir = explicit
+    return _dataDir
+  }
+  if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) {
+    _dataDir = CANONICAL_DATA_DIR
+    return _dataDir
+  }
+  for (const d of legacyDataDirs()) {
+    if (existsSync(join(d, "config.json"))) {
+      _dataDir = d
+      return _dataDir
+    }
+  }
+  _dataDir = CANONICAL_DATA_DIR
+  return _dataDir
+}
+
+// Prints ONLY when something actually moved. Silent otherwise — `status` output gets pasted
+// into issues and does not need a line about a migration that never happened.
+function reportMigration() {
+  const from = migrateLegacyData()
+  if (from) {
+    console.log(`Moved your session-capture credential to ${CANONICAL_DATA_DIR}`)
+    console.log(`  (was ${from} — left in place, in case an older install still reads it)`)
+    console.log("  This is why Cursor and Claude Code now share one sign-in.")
+    console.log("")
+  }
+}
+
+// Called from the human-facing commands only (never the hook path): if the credential still
+// lives in a legacy directory, copy it to the neutral one so every client converges on a
+// single store. The legacy copy is deliberately LEFT IN PLACE — an older build of this script,
+// or another agent's plugin install, may still be reading it, and orphaning their credential
+// to tidy up a directory would be a poor trade.
+function migrateLegacyData() {
+  // An explicit override is a deliberate choice by the caller — never migrate out from under
+  // it. (Without this, `install` with CLAUDE_PLUGIN_DATA set would write there and the very
+  // next `status` would move it to the canonical path and report THAT instead.)
+  if (process.env.BONEZ_SESSION_SYNC_DATA || process.env.CLAUDE_PLUGIN_DATA) return null
+  if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) return null
+  const from = legacyDataDirs().find((d) => existsSync(join(d, "config.json")))
+  if (!from || from === CANONICAL_DATA_DIR) return null
+  try {
+    mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+    for (const f of ["config.json", "sync-state.json"]) {
+      if (existsSync(join(from, f))) writeFileSync(join(CANONICAL_DATA_DIR, f), readFileSync(join(from, f)), { mode: 0o600 })
+    }
+    _dataDir = CANONICAL_DATA_DIR
+    return from
+  } catch {
+    return null // migration is best-effort; the legacy path still resolves and still works
+  }
 }
 
 function ensureDataDir() {
@@ -939,6 +1044,7 @@ function consentText(cfg) {
 }
 
 function cmdInstall(key, rest) {
+  reportMigration()
   if (!key || !key.startsWith("bnz_")) {
     console.error("usage: bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
     console.error("  Mint a sessions-scoped key in console.bonez.io under API keys, scope = sessions.")
@@ -954,6 +1060,7 @@ function cmdInstall(key, rest) {
 }
 
 async function cmdLogin(rest) {
+  reportMigration()
   const { repos: explicitRepos, global } = parseInstallArgs(rest)
   const scope = global ? "global" : "repo"
   const repos = global ? [] : normalizeRepos(explicitRepos.length ? explicitRepos : [process.cwd()])
@@ -1006,6 +1113,7 @@ function cmdLogout() {
 }
 
 function cmdStatus() {
+  reportMigration()
   const cfg = loadConfig()
   if (!cfg) {
     console.log("bonez session capture: not installed.")
@@ -1027,6 +1135,7 @@ function cmdStatus() {
   }
   lines.push(
     `  gateway:  ${gatewayBaseUrl()}`,
+    `  clients:  Claude Code, Codex, Cursor (one sign-in, shared store)`,
     `  sessions synced: ${Object.keys(state).length}`,
     `  installed:${cfg.installedAt ?? "unknown"}`,
     `  data dir: ${dataDir()}`,
@@ -1141,6 +1250,7 @@ export {
   cmdUpload,
   contentHashOf,
   dataDir,
+  migrateLegacyData,
   findCodexCatchupTarget,
   gatewayBaseUrl,
   parseCursorFile,

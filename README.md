@@ -324,6 +324,15 @@ bonez-session-sync.mjs install bnz_... --global
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
 config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.
 
+**Where the credential lives:** `~/.bonez/session-sync/` — agent-neutral, so **one `login`
+covers all three clients**. It used to be `~/.claude/plugins/data/<plugin>-<marketplace>/`,
+which only worked while Claude Code was the only leg: Cursor doesn't set `CLAUDE_PLUGIN_DATA`,
+so it could never find a credential Claude Code had written under a marketplace named anything
+but `bonez` — and a Cursor-only user got a `~/.claude/` directory for a product they don't use.
+An existing install is found and moved on the next `login`/`install`/`status`; the old copy is
+left in place in case an older build still reads it. `BONEZ_SESSION_SYNC_DATA` overrides the
+location outright.
+
 **Cursor leg:** nothing extra to enable — the plugin registers the `sessionEnd` hook itself
 (`cursor/hooks/hooks.json`), so a `login` is the only step. Two differences worth knowing:
 

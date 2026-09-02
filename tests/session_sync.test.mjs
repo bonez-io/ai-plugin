@@ -40,12 +40,22 @@ function freshDir(prefix) {
 // process it blocks on returns immediately without ever making an HTTP call itself — the actual
 // upload happens in a further-detached grandchild this process was never watching — but async
 // spawn here removes the trap for every case uniformly instead of relying on that distinction.
+// Every spawned CLI gets a SANDBOX HOME unless the test names its own.
+//
+// This is not belt-and-braces. The credential store resolves against ~ — it prefers
+// ~/.bonez/session-sync and falls back to scanning ~/.claude/plugins/data/bonez* — so a child
+// inheriting the real HOME can read, and WRITE, the developer's actual credential. That is not
+// hypothetical: an earlier revision of the store migration did exactly that during a test run
+// on this machine, copying a real store to the canonical path and then overwriting its config
+// with the test key. Pinning HOME here makes the whole class impossible.
+const SANDBOX_HOME = mkdtempSync(join(tmpdir(), "bonez-session-sync-home-"))
+
 function runCli(args, { env = {}, input = "" } = {}) {
   return new Promise((resolve, reject) => {
     const t0 = performance.now()
     const child = spawn(process.execPath, [SCRIPT, ...args], {
       cwd: REPO_ROOT,
-      env: { ...process.env, ...env },
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -662,6 +672,78 @@ describe("_upload — Codex leg against the stub gateway", () => {
 
     rmSync(fakeHome, { recursive: true, force: true })
     rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
+// ------------------------------------------------------------------- credential store location
+
+describe("credential store: one sign-in shared by all three clients", () => {
+  // The bug this guards: the store used to be `CLAUDE_PLUGIN_DATA || <hardcoded ~/.claude
+  // path>`. Cursor sets CLAUDE_PROJECT_DIR but NOT CLAUDE_PLUGIN_DATA, so it always took the
+  // hardcoded branch — while Claude Code writes to `<plugin>-<marketplace>`, which is only
+  // that same path when the marketplace happens to be named "bonez". Any other name and
+  // Cursor silently found no credential and captured nothing, with no error anywhere.
+  const statusDataDir = (out) => (/data dir:\s*(.+)/.exec(out)?.[1] ?? "").trim()
+
+  test("a fresh install with no legacy store lands in the agent-neutral location", async () => {
+    const home = freshDir("store-fresh")
+    const res = await runCli(["install", TEST_KEY, "--global"], {
+      env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    const st = await runCli(["status"], {
+      env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" },
+    })
+    assert.match(statusDataDir(st.stdout), /\.bonez[\\/]session-sync$/)
+    assert.doesNotMatch(st.stdout, /\.claude/, "a Cursor-only user must not get a ~/.claude directory")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("an existing legacy store keeps working — a path change must never orphan a credential", async () => {
+    const home = freshDir("store-legacy")
+    const legacy = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(
+      join(legacy, "config.json"),
+      JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-25T00:00:00Z" }),
+    )
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" }
+
+    // `status` migrates, then reports the NEW location — but the credential survives either way.
+    const st = await runCli(["status"], { env })
+    assert.match(st.stdout, /enabled/, "the legacy credential must still be found")
+    assert.match(st.stdout, /Moved your session-capture credential/)
+    assert.match(statusDataDir(st.stdout), /\.bonez[\\/]session-sync$/)
+
+    // The legacy copy stays put: an older build of this script may still be reading it.
+    assert.ok(existsSync(join(legacy, "config.json")), "legacy config must not be deleted")
+    assert.ok(existsSync(join(home, ".bonez", "session-sync", "config.json")), "migrated copy must exist")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("the actual bug: Claude Code writes under a non-'bonez' marketplace, Cursor still finds it", async () => {
+    const home = freshDir("store-split")
+    // Claude Code's data dir is <plugin>-<marketplace>; here the marketplace is "acme".
+    const claudeDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+    mkdirSync(claudeDir, { recursive: true })
+    const claudeEnv = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: claudeDir, BONEZ_SESSION_SYNC_DATA: "" }
+    assert.equal((await runCli(["install", TEST_KEY, "--global"], { env: claudeEnv })).status, 0)
+
+    // Cursor's environment: no CLAUDE_PLUGIN_DATA at all.
+    const cursorEnv = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" }
+    const st = await runCli(["status"], { env: cursorEnv })
+    assert.match(st.stdout, /enabled/, "Cursor must find the credential Claude Code wrote — this is the regression")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("CLAUDE_PLUGIN_DATA still wins when set, so existing Claude Code installs are untouched", async () => {
+    const home = freshDir("store-override")
+    const explicit = join(home, "explicit-store")
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: explicit, BONEZ_SESSION_SYNC_DATA: "" }
+    assert.equal((await runCli(["install", TEST_KEY, "--global"], { env })).status, 0)
+    const st = await runCli(["status"], { env })
+    assert.equal(statusDataDir(st.stdout), explicit)
+    rmSync(home, { recursive: true, force: true })
   })
 })
 
