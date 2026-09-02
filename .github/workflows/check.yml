@@ -150,8 +150,27 @@ jobs:
           # form; the relative one stays alongside as the fallback for the case where the
           # cwd IS the plugin root. Losing the anchored entry silently disables per-turn
           # capture — the exact regression this check exists to catch.
-          jq -e '[.hooks.stop[].command] | any(contains("PLUGIN_ROOT"))' cursor/hooks/hooks.json >/dev/null \
-            || { echo "::error::cursor hooks.stop needs a \${CLAUDE_PLUGIN_ROOT}-anchored command — Cursor runs stop from the workspace, not the plugin root"; exit 1; }
+          # Cursor runs `stop` from the WORKSPACE root, not the plugin root, and exports
+          # NEITHER CLAUDE_PLUGIN_ROOT nor PLUGIN_ROOT to a plugin hook (both tried against
+          # 3.18.25, both empty, exit 127). So `stop` cannot name the plugin directory at all
+          # — the hooks that DO run from the plugin root bootstrap a shim at a fixed path and
+          # `stop` goes through that. Lose either half and per-turn capture dies silently.
+          jq -e '[.hooks.stop[].command] | any(contains(".bonez/cursor-hook.sh"))' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor hooks.stop must go through the bootstrapped shim — it runs from the workspace and cannot find the plugin"; exit 1; }
+          grep -q 'cursor-hook.sh' cursor/hooks/session-sync.sh \
+            || { echo "::error::session-sync.sh no longer writes the shim that hooks.stop depends on"; exit 1; }
+
+          # Prove the whole path end to end, from a standalone copy: a plugin-root hook
+          # bootstraps the shim, and the shim then works from an unrelated directory — which
+          # is exactly the 127 that broke per-turn capture in the field.
+          shimhome="$(mktemp -d)"
+          fakenode="$(mktemp -d)/n"; printf '#!/usr/bin/env bash\nexit 0\n' > "$fakenode"; chmod +x "$fakenode"
+          ( cd "$standalone" && printf '%s' '{}' | HOME="$shimhome" BONEZ_NODE="$fakenode" ./hooks/session-sync.sh session-start )
+          test -x "$shimhome/.bonez/cursor-hook.sh" \
+            || { echo "::error::a plugin-root hook did not bootstrap the stop shim"; exit 1; }
+          ( cd / && printf '%s' '{}' | HOME="$shimhome" BONEZ_NODE="$fakenode" "$shimhome/.bonez/cursor-hook.sh" turn-end ) \
+            || { echo "::error::the stop shim does not work from outside the plugin directory"; exit 1; }
+          echo "ok: stop reaches the plugin from an arbitrary working directory"
           for f in bonez-session-sync.mjs vendor/agent-import.bundle.mjs; do
             test -f "cursor/bin/$f" || { echo "::error::cursor/bin/$f missing"; exit 1; }
             cmp -s "bin/$f" "cursor/bin/$f" || {

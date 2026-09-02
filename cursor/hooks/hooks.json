@@ -8,7 +8,7 @@
     ],
     "stop": [
       {
-        "command": "\"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-.}}/hooks/session-sync.sh\" turn-end",
+        "command": "\"${HOME}/.bonez/cursor-hook.sh\" turn-end",
         "timeout": 10
       },
       {
