@@ -140,10 +140,18 @@ jobs:
           # One wrapper serves every lifecycle event, with the event as its argument — so
           # every registered command must actually point at it.
           for ev in stop sessionEnd sessionStart; do
-            jq -e --arg ev "$ev" '.hooks[$ev][0].command | startswith("./hooks/session-sync.sh ")' \
+            jq -e --arg ev "$ev" '[.hooks[$ev][].command] | any(contains("hooks/session-sync.sh"))' \
               cursor/hooks/hooks.json >/dev/null \
-              || { echo "::error::cursor hooks.$ev must call ./hooks/session-sync.sh <event>"; exit 1; }
+              || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
           done
+          # `stop` is the one hook Cursor runs from the WORKSPACE root rather than the plugin
+          # root (observed: exit code 127, "Running script in directory: <workspace>"), so a
+          # bare relative command cannot find the script. It needs a plugin-root-anchored
+          # form; the relative one stays alongside as the fallback for the case where the
+          # cwd IS the plugin root. Losing the anchored entry silently disables per-turn
+          # capture — the exact regression this check exists to catch.
+          jq -e '[.hooks.stop[].command] | any(contains("PLUGIN_ROOT"))' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor hooks.stop needs a \${CLAUDE_PLUGIN_ROOT}-anchored command — Cursor runs stop from the workspace, not the plugin root"; exit 1; }
           for f in bonez-session-sync.mjs vendor/agent-import.bundle.mjs; do
             test -f "cursor/bin/$f" || { echo "::error::cursor/bin/$f missing"; exit 1; }
             cmp -s "bin/$f" "cursor/bin/$f" || {
