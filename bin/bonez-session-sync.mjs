@@ -59,6 +59,16 @@ const SELF_PATH = fileURLToPath(import.meta.url)
 const _parsedDebounceMs = Number.parseInt(process.env.BONEZ_SESSION_SYNC_DEBOUNCE_MS ?? "", 10)
 const DEBOUNCE_MS = Number.isFinite(_parsedDebounceMs) && _parsedDebounceMs >= 0 ? _parsedDebounceMs : 120_000
 
+// How many stale Cursor conversations one sessionStart may flush. Concurrency is the reason
+// this is not 1: close a window with five chats open and all five sessionEnd hooks die
+// together (see findCursorCatchupTargets), so a one-per-start rule would need five more
+// sessions to drain — and with steady use the backlog grows faster than it clears.
+// It is not unbounded either: every upload is a separate S3 archive, and the pipeline's
+// agent-convos adapter still re-reads every archive under imports/{org}/ on each run (the
+// `upload_key` filter in SPEC-mcp-session-capture §3.5 has not landed), so upload count is
+// not free. Twenty covers any realistic window; the rest drain on later starts.
+const CURSOR_CATCHUP_MAX = 20
+
 // The public OAuth client this plugin authenticates as (see the credential section below).
 // PUBLIC by design and safe to ship in a distributed CLI: it is an identifier, not a secret
 // (RFC 8252 §8.5), and it grants nothing on its own — every token still requires the user's
@@ -413,28 +423,40 @@ function cursorProjectSlug(workspaceRoot) {
   return workspaceRoot.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
 }
 
-function findCursorCatchupTarget(currentConversationId, workspaceRoot, state) {
+function findCursorCatchupTargets(currentConversationId, workspaceRoot, state) {
   const slug = cursorProjectSlug(workspaceRoot)
-  if (!slug) return null
+  if (!slug) return []
   const root = join(HOME, ".cursor", "projects", slug, "agent-transcripts")
-  if (!existsSync(root)) return null
+  if (!existsSync(root)) return []
   const files = walkFiles(root, (p) => p.endsWith(".jsonl")).filter(
     (p) => !p.endsWith(`${currentConversationId}.jsonl`),
   )
   const candidates = files
     .map((p) => {
       const id = p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
-      if (state[id]) return null // already uploaded — the common case once this is working
+      let mtime
       try {
-        return { p, id, mtime: statSync(p).mtimeMs }
+        mtime = statSync(p).mtimeMs
       } catch {
         return null
       }
+      const prev = state[id]
+      // STALENESS, not "have we ever seen it". Keying on `state[id]` alone — which is what the
+      // first cut of this did — permanently blacklists any conversation the moment it is
+      // uploaded once. A chat flushed early at 6 messages and then continued to 300 would never
+      // be picked up again, because the only thing that could re-upload it is this scan and the
+      // scan had already crossed it off. Comparing against the last upload lets a conversation
+      // come back as often as it actually changes; uploadOne's own content-hash check then
+      // drops the ones where the mtime moved but the content did not.
+      if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      return { transcriptPath: p, sessionId: id, mtime }
     })
     .filter((x) => x !== null)
-  candidates.sort((a, b) => b.mtime - a.mtime)
-  const newest = candidates[0]
-  return newest ? { sessionId: newest.id, transcriptPath: newest.p } : null
+  // Oldest first: a finished conversation should not lose its slot to one that is merely more
+  // recently touched. The cap is a runaway guard, not a policy — a workspace with more than
+  // this many stale conversations drains over the next few starts.
+  candidates.sort((a, b) => a.mtime - b.mtime)
+  return candidates.slice(0, CURSOR_CATCHUP_MAX)
 }
 
 // ------------------------------------------------------------------- credential (key or OAuth)
@@ -968,12 +990,19 @@ async function cmdUpload(agent, event, payloadFile) {
 
   if (agent === "cursor" && event === "session-start") {
     const root = workspaceRootFrom(payload)
-    const target = findCursorCatchupTarget(payload.conversation_id ?? payload.session_id ?? "", root, loadState())
-    if (!target) {
-      await log("upload: cursor session-start — nothing unsynced in this workspace")
+    // loadState() is re-read inside uploadOne per conversation, so the list is computed once
+    // here against a consistent snapshot and each upload then re-checks under its own read.
+    const targets = findCursorCatchupTargets(payload.conversation_id ?? payload.session_id ?? "", root, loadState())
+    if (!targets.length) {
+      await log("upload: cursor session-start — nothing stale in this workspace")
       return
     }
-    await uploadOne({ agent, cfg, sessionId: target.sessionId, transcriptPath: target.transcriptPath, cwd: root })
+    await log(`upload: cursor session-start — ${targets.length} stale conversation(s) to flush`)
+    for (const t of targets) {
+      // Sequential, not Promise.all: these share the presign/PUT/complete path and sync-state
+      // on disk, and a start hook has no deadline worth racing for.
+      await uploadOne({ agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath, cwd: root })
+    }
     return
   }
 
@@ -1315,7 +1344,7 @@ export {
   dataDir,
   migrateLegacyData,
   findCodexCatchupTarget,
-  findCursorCatchupTarget,
+  findCursorCatchupTargets,
   cursorProjectSlug,
   gatewayBaseUrl,
   parseCursorFile,

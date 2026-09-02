@@ -348,9 +348,20 @@ location outright.
   in the batch dies with `MainThreadShellExec not initialized` — ours and any third-party one
   beside it (verified in Cursor 3.18.25's own hook log). Nothing plugin-side can fix that, so
   the Cursor leg also registers a **`sessionStart`** hook that flushes the previous
-  conversation from disk on the next start. That is the path that actually carries most
-  captures; it covers crashes and SIGKILL for free, uploads at most one conversation per start,
-  and never uploads the session just beginning.
+  conversations from disk on the next start. That is the path that actually carries most
+  captures, and it covers crashes and SIGKILL for free. It flushes **every** stale conversation
+  in the workspace (up to 20 per start), not just the last one — close a window with five chats
+  open and all five sessionEnd hooks die together, so a one-per-start rule would never drain.
+  A conversation counts as stale when it has never been uploaded *or* has been written to since
+  its last upload, so a chat that keeps growing is re-captured rather than blacklisted. It
+  never uploads the session just beginning.
+
+  Consequence worth knowing: on Cursor, a conversation is captured on the *next* start in that
+  workspace, not the moment it ends. Cursor's `stop` hook (fires per agent turn, while the
+  window is alive) would remove that lag entirely and is the natural upgrade — it is not wired
+  yet because every upload is a separate S3 archive and the pipeline still re-reads all of them
+  on each ingest run (SPEC-mcp-session-capture §3.5's `upload_key` filter has not landed), so
+  per-turn uploads are not free yet.
 - `sessionEnd` is an IDE-lifetime event. Cursor's docs are explicit that "Cloud agents have no
   editor-lifetime session boundary. `sessionEnd` is tied to the IDE session, not a cloud agent
   chat" — so background/cloud agent conversations are **not** captured by this leg.

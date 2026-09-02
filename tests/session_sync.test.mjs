@@ -689,6 +689,68 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     }
   }
 
+  test("flushes EVERY stale conversation, not just one — concurrent chats all die together on window_close", async () => {
+    const home = freshDir("cursor-concurrent")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["chat-a", "chat-b", "chat-c", "chat-d"])
+    const dataDir = freshDir("cursor-concurrent-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "the-new-one", workspace_roots: [root] }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: home,
+        USERPROFILE: home,
+        BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+      },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 4, "all four stranded conversations must flush, not one")
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    for (const id of ["chat-a", "chat-b", "chat-c", "chat-d"]) assert.ok(state[id], `${id} should have flushed`)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("a conversation that GREW since its last upload is picked up again", async () => {
+    const home = freshDir("cursor-grew")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["grown"])
+    const f = join(home, ".cursor", "projects", slug, "agent-transcripts", "grown", "grown.jsonl")
+
+    const dataDir = freshDir("cursor-grew-data")
+    await install(dataDir, ["--global"])
+    // Already uploaded an hour ago...
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({ grown: { agent: "cursor", messageCount: 2, contentHash: "stale", lastUploadedAt: Date.now() - 3_600_000 } }),
+    )
+    // ...and the user kept chatting in it since.
+    const now = new Date()
+    utimesSync(f, now, now)
+
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "another", workspace_roots: [root] }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(
+      gateway.calls.presign.length,
+      before + 1,
+      "keying on 'have we ever uploaded this' would blacklist a growing conversation forever",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
   test("flushes the PREVIOUS conversation, never the one just starting", async () => {
     const home = freshDir("cursor-catchup")
     const root = "/tmp/bonez-session-sync-fixture-repo"
@@ -727,7 +789,9 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     await install(dataDir, ["--global"])
     writeFileSync(
       join(dataDir, "sync-state.json"),
-      JSON.stringify({ "only-convo": { agent: "cursor", messageCount: 6, contentHash: "x", lastUploadedAt: 1 } }),
+      JSON.stringify({
+        "only-convo": { agent: "cursor", messageCount: 6, contentHash: "x", lastUploadedAt: Date.now() + 60_000 },
+      }),
     )
     const payloadFile = join(dataDir, "payload.json")
     writeFileSync(payloadFile, JSON.stringify({ conversation_id: "brand-new", workspace_roots: [root] }))
