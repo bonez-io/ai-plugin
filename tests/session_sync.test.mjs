@@ -675,6 +675,197 @@ describe("_upload — Codex leg against the stub gateway", () => {
   })
 })
 
+// ------------------------------------------------------------- cursor stop / concurrent chats
+
+describe("Cursor `stop`: concurrent conversations each capture themselves", () => {
+  // The reason `stop` is the primary trigger: it fires while the window is alive, once per
+  // agent loop, INDEPENDENTLY PER CONVERSATION. sessionEnd cannot run at all on window_close,
+  // and a start-side catch-up serialises everything through one slot. This is the behaviour
+  // that has to hold, so it is asserted rather than assumed.
+  function writeTranscript(dir, id, turns) {
+    mkdirSync(dir, { recursive: true })
+    const lines = []
+    for (let i = 0; i < turns; i++) {
+      lines.push(JSON.stringify({ role: "user", message: { content: [{ type: "text", text: `<user_query>${id} q${i}</user_query>` }] } }))
+      lines.push(JSON.stringify({ role: "assistant", message: { content: [{ type: "text", text: `${id} a${i}` }] } }))
+    }
+    const f = join(dir, `${id}.jsonl`)
+    writeFileSync(f, `${lines.join("\n")}\n`)
+    return f
+  }
+
+  test("three chats open at once: each turn uploads its OWN conversation, none bleed", async () => {
+    const home = freshDir("cursor-stop-concurrent")
+    const dataDir = freshDir("cursor-stop-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", slug, "agent-transcripts")
+
+    const chats = ["chat-alpha", "chat-beta", "chat-gamma"]
+    const paths = {}
+    for (const id of chats) paths[id] = writeTranscript(join(base, id), id, 2)
+
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      BONEZ_GATEWAY_URL: gateway.url,
+      HOME: home,
+      USERPROFILE: home,
+      BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+    }
+
+    // Interleave turns the way three open chats actually behave.
+    for (const id of [...chats, ...chats]) {
+      const payloadFile = join(dataDir, `p-${id}.json`)
+      writeFileSync(
+        payloadFile,
+        JSON.stringify({
+          hook_event_name: "stop",
+          status: "completed",
+          loop_count: 0,
+          conversation_id: id,
+          workspace_roots: [root],
+          transcript_path: paths[id],
+        }),
+      )
+      // grow the transcript between rounds so the content hash actually changes
+      writeTranscript(join(base, id), id, 4)
+      const res = await runCli(["_upload", "cursor", "turn-end", payloadFile], { env })
+      assert.equal(res.status, 0)
+    }
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    for (const id of chats) {
+      assert.ok(state[id], `${id} must have its own sync-state entry`)
+      assert.equal(state[id].agent, "cursor")
+    }
+
+    // Every upload carried the right conversation — an id landing under another chat's
+    // unit_key would silently merge two people's work into one :Convo node.
+    //
+    // Select by sessionId rather than by position: the stub gateway is shared with every
+    // other test in this file and node:test runs suites concurrently, so "the last N PUTs"
+    // is not this test's N PUTs.
+    const uploaded = gateway.calls.put
+      .map((c) => ndjsonLinesFromGzip(c.body)[1])
+      .filter((conv) => chats.includes(conv.sessionId))
+    assert.deepEqual(new Set(uploaded.map((c) => c.sessionId)), new Set(chats), "each chat must upload under its own id")
+    for (const conv of uploaded) {
+      for (const m of conv.messages) {
+        if (m.text) assert.ok(m.text.includes(conv.sessionId), "a message from another conversation leaked in")
+      }
+    }
+
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("simultaneous uploaders do not clobber each other's sync-state", async () => {
+    // The race this closes: three chats -> three detached uploaders -> each loads
+    // sync-state, adds its entry, writes it back. Without a lock the last writer wins and
+    // the others vanish, so those conversations look never-uploaded and get re-uploaded on
+    // the next turn — defeating the debounce that makes per-turn `stop` affordable.
+    // Measured before the fix: 3 concurrent uploads, 1 surviving entry.
+    const home = freshDir("cursor-state-race")
+    const dataDir = freshDir("cursor-state-race-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", "tmp-bonez-session-sync-fixture-repo", "agent-transcripts")
+
+    const ids = ["race-1", "race-2", "race-3", "race-4", "race-5"]
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      BONEZ_GATEWAY_URL: gateway.url,
+      HOME: home,
+      USERPROFILE: home,
+      BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+    }
+
+    // Launch all five AT ONCE — sequential runs would never exhibit the bug.
+    await Promise.all(
+      ids.map((id) => {
+        writeTranscript(join(base, id), id, 2)
+        const payloadFile = join(dataDir, `race-${id}.json`)
+        writeFileSync(
+          payloadFile,
+          JSON.stringify({
+            hook_event_name: "stop",
+            conversation_id: id,
+            workspace_roots: [root],
+            transcript_path: join(base, id, `${id}.jsonl`),
+          }),
+        )
+        return runCli(["_upload", "cursor", "turn-end", payloadFile], { env })
+      }),
+    )
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    const missing = ids.filter((id) => !state[id])
+    assert.deepEqual(missing, [], `sync-state lost ${missing.length}/${ids.length} entries to a write race`)
+
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("rapid turns in one chat collapse to a single upload — `stop` fires per turn, we don't", async () => {
+    const home = freshDir("cursor-stop-debounce")
+    const dataDir = freshDir("cursor-stop-debounce-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", "tmp-bonez-session-sync-fixture-repo", "agent-transcripts", "chatty")
+    const f = writeTranscript(base, "chatty", 1)
+    const payloadFile = join(dataDir, "p.json")
+    // Default debounce (120s) — the point of this test.
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home }
+
+    const before = gateway.calls.presign.length
+    for (let turn = 1; turn <= 5; turn++) {
+      writeTranscript(base, "chatty", turn + 1) // genuinely different content each turn
+      writeFileSync(
+        payloadFile,
+        JSON.stringify({ hook_event_name: "stop", conversation_id: "chatty", workspace_roots: [root], transcript_path: f }),
+      )
+      assert.equal((await runCli(["_upload", "cursor", "turn-end", payloadFile], { env })).status, 0)
+    }
+    assert.equal(
+      gateway.calls.presign.length,
+      before + 1,
+      "five turns inside the debounce window must produce ONE upload, not five archives",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the hook path itself accepts turn-end: fast, silent, exit 0", async () => {
+    const dataDir = freshDir("cursor-stop-hook")
+    await install(dataDir, ["--global"])
+    const res = await runCli(["hook", "cursor", "turn-end"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url },
+      input: JSON.stringify({
+        hook_event_name: "stop",
+        conversation_id: "cursor-transcript",
+        workspace_roots: ["/tmp/bonez-session-sync-fixture-repo"],
+        transcript_path: join(FIXTURES, "cursor-transcript.jsonl"),
+      }),
+    })
+    assert.equal(res.status, 0)
+    // `stop` can return a followup_message that Cursor AUTO-SUBMITS as a user turn, so
+    // anything printed here would be injected into the conversation.
+    assert.equal(res.stdout, "", "a stop hook that prints would inject text into the chat")
+    assert.equal(res.stderr, "")
+    assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    await waitFor(() => {
+      if (!existsSync(join(dataDir, "sync-state.json"))) return false
+      try {
+        return JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["cursor-transcript"]
+      } catch {
+        return false
+      }
+    })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
 // ------------------------------------------------------------------- cursor sessionStart catch-up
 
 describe("Cursor sessionStart catch-up (the path that survives window_close)", () => {

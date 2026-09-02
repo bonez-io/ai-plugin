@@ -356,12 +356,13 @@ location outright.
   its last upload, so a chat that keeps growing is re-captured rather than blacklisted. It
   never uploads the session just beginning.
 
-  Consequence worth knowing: on Cursor, a conversation is captured on the *next* start in that
-  workspace, not the moment it ends. Cursor's `stop` hook (fires per agent turn, while the
-  window is alive) would remove that lag entirely and is the natural upgrade — it is not wired
-  yet because every upload is a separate S3 archive and the pipeline still re-reads all of them
-  on each ingest run (SPEC-mcp-session-capture §3.5's `upload_key` filter has not landed), so
-  per-turn uploads are not free yet.
+  The **primary** trigger, though, is Cursor's `stop` hook: it fires after every agent turn,
+  while the window is alive, independently per conversation — so three chats open at once each
+  capture themselves instead of queueing behind one catch-up slot, and quitting the app loses
+  nothing because the work is already uploaded. Uploading after every turn would be wasteful,
+  so the uploader debounces (`BONEZ_SESSION_SYNC_DEBOUNCE_MS`, default 120s) and skips
+  unchanged transcripts; a burst of quick turns collapses into one upload. `sessionEnd` and
+  `sessionStart` remain as the safety net for whatever `stop` misses.
 - `sessionEnd` is an IDE-lifetime event. Cursor's docs are explicit that "Cloud agents have no
   editor-lifetime session boundary. `sessionEnd` is tied to the IDE session, not a cloud agent
   chat" — so background/cloud agent conversations are **not** captured by this leg.

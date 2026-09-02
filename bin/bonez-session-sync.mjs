@@ -29,7 +29,18 @@
 // (packages/agent-import/bundle/agent-import.bundle.mjs, commit b07910990c4ba2e70e13c9656f61
 // 198fa2cba90c) at bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install
 // needed. Do not hand-edit that file; re-vendor it verbatim when harness-ui's source changes.
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { hostname, homedir, platform } from "node:os"
 import { join } from "node:path"
@@ -266,6 +277,83 @@ function saveState(state) {
   writeJsonAtomic(statePath(), state, 0o600)
 }
 
+// Concurrent chats mean concurrent UPLOADERS. Cursor's `stop` fires per conversation, so
+// three open chats produce three detached processes that each load sync-state, add their own
+// entry, and write it back. writeJsonAtomic makes each individual write atomic — no torn
+// file — but the read-modify-write ACROSS processes is not, so the last writer silently drops
+// the other two entries. (Measured: three interleaved uploads, one entry survived.)
+//
+// The damage is not lost conversations — unit_key MERGEs server-side, so the graph is
+// unaffected — but a dropped entry means the next trigger sees the conversation as never
+// uploaded and uploads it again. That defeats the debounce, which exists specifically to keep
+// upload count down, which is the whole reason `stop` is affordable.
+//
+// A lockfile rather than one-file-per-conversation: `status`, the debounce and the catch-up
+// scan all read the whole map, and keeping one file keeps those simple.
+const STATE_LOCK_TIMEOUT_MS = 5_000
+const STATE_LOCK_STALE_MS = 30_000
+
+function sleepSync(ms) {
+  // The uploader is a detached background process with no event loop obligations, so
+  // blocking is fine here — and Atomics.wait is the only way to sleep synchronously without
+  // a busy loop that would burn CPU while the other uploader finishes.
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      /* SharedArrayBuffer unavailable — spin, briefly */
+    }
+  }
+}
+
+function withStateLock(fn) {
+  const lock = `${statePath()}.lock`
+  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS
+  let held = false
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx")) // 'wx' fails if it exists — the atomic bit
+      held = true
+      break
+    } catch {
+      // A crashed uploader must never deadlock every future one.
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > STATE_LOCK_STALE_MS) {
+          unlinkSync(lock)
+          continue
+        }
+      } catch {
+        continue // vanished between our open and our stat — try again immediately
+      }
+      if (Date.now() > deadline) break // proceed unlocked: a stale entry beats never recording
+      sleepSync(25)
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    if (held) {
+      try {
+        unlinkSync(lock)
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+// Record one conversation's result without clobbering entries another uploader wrote while
+// this one was busy. The re-read INSIDE the lock is the point — reusing the snapshot taken
+// before the upload would reintroduce exactly the race the lock closes.
+function recordUpload(sessionId, entry) {
+  withStateLock(() => {
+    const fresh = loadState()
+    fresh[sessionId] = entry
+    saveState(fresh)
+  })
+}
+
 // Append-only local log — the only visible trace of what this tool does, since stdout is off
 // limits. Never throws: a logging failure must not be the thing that breaks a hook.
 async function log(line) {
@@ -305,7 +393,7 @@ function readStdinSync() {
 async function cmdHook(agent, event) {
   if (disabledByEnv()) return
   if (agent !== "claude" && agent !== "codex" && agent !== "cursor") return
-  if (event !== "session-end" && event !== "session-start") return
+  if (event !== "session-end" && event !== "session-start" && event !== "turn-end") return
 
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) return // never installed, or explicitly disabled
@@ -956,8 +1044,13 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     return
   }
 
-  state[dedupKey] = { agent, messageCount, contentHash, lastUploadedAt: Date.now(), uploadId: pre.json.upload_id }
-  saveState(state)
+  recordUpload(dedupKey, {
+    agent,
+    messageCount,
+    contentHash,
+    lastUploadedAt: Date.now(),
+    uploadId: pre.json.upload_id,
+  })
   await log(
     `upload: session=${dedupKey} agent=${agent} messages=${messageCount} redactions=${scrubReport.total} bytes=${gz.length} upload_id=${pre.json.upload_id} OK`,
   )
@@ -1016,6 +1109,13 @@ async function cmdUpload(agent, event, payloadFile) {
     return
   }
 
+  // `turn-end` (Cursor's `stop`, fired after every agent turn while the window is still
+  // alive) takes the same path as `session-end`: flush THIS conversation. It needs no branch
+  // of its own — shouldSkip's debounce plus the content hash already collapse a chatty
+  // sequence of turns into at most one upload per DEBOUNCE_MS, and an unchanged transcript
+  // into none. It exists because Cursor cannot run a hook at all on window_close, so a
+  // conversation that is only captured at the end is a conversation that is usually lost.
+  //
   // Claude Code and Codex both key on `session_id`. Cursor sends that too, but its transcript
   // is filed under `conversation_id` — "Stable ID of the conversation across many turns" — and
   // the two are not documented to be equal, so the conversation id leads on that leg. It is
@@ -1347,6 +1447,8 @@ export {
   findCursorCatchupTargets,
   cursorProjectSlug,
   gatewayBaseUrl,
+  recordUpload,
+  withStateLock,
   parseCursorFile,
   resolveTranscriptPath,
   wireAgentFor,

@@ -150,11 +150,22 @@ jobs:
           # is what makes capture survive that — losing it silently halves the feature.
           jq -e '.hooks.sessionStart | length >= 1' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json does not register a sessionStart hook — capture will not survive window_close"; exit 1; }
-          test -x cursor/hooks/session-sync-catchup.sh || { echo "::error::cursor catch-up hook not executable"; exit 1; }
-          # The two wrappers must stay identical apart from the event they pass.
-          diff <(grep -v "^#" cursor/hooks/session-sync.sh | sed "s/session-end/EVENT/") \
-               <(grep -v "^#" cursor/hooks/session-sync-catchup.sh | sed "s/session-start/EVENT/") >/dev/null \
-            || { echo "::error::the two cursor session-sync wrappers have drifted beyond their event argument"; exit 1; }
+          # `stop` is the PRIMARY capture trigger on Cursor — it is the only one that fires
+          # while the window is alive, once per turn, independently per conversation.
+          # sessionEnd cannot run on window_close and sessionStart serialises everything
+          # through one catch-up. Losing this silently reverts capture to batch-with-lag.
+          jq -e '.hooks.stop | length >= 1' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor/hooks/hooks.json does not register a stop hook — capture loses per-turn and per-conversation coverage"; exit 1; }
+          for h in session-sync-catchup session-sync-turn; do
+            test -x "cursor/hooks/$h.sh" || { echo "::error::cursor/hooks/$h.sh not executable"; exit 1; }
+          done
+          # All three wrappers must stay identical apart from the event they pass.
+          for pair in "session-sync-catchup:session-start" "session-sync-turn:turn-end"; do
+            f="${pair%%:*}"; ev="${pair##*:}"
+            diff <(grep -v "^#" cursor/hooks/session-sync.sh | sed "s/session-end/EVENT/") \
+                 <(grep -v "^#" "cursor/hooks/$f.sh" | sed "s/$ev/EVENT/") >/dev/null \
+              || { echo "::error::cursor/hooks/$f.sh has drifted from session-sync.sh beyond its event argument"; exit 1; }
+          done
           jq -e '.version' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json needs a top-level version (Cursor hooks schema)"; exit 1; }
 
