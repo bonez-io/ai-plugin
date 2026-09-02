@@ -1,8 +1,15 @@
 {
+  "version": 1,
   "hooks": {
     "beforeMCPExecution": [
       {
         "command": "./hooks/gate-write.sh"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "./hooks/session-sync.sh",
+        "timeout": 10
       }
     ]
   }
