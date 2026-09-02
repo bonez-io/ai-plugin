@@ -10,10 +10,6 @@
       {
         "command": "\"${HOME}/.bonez/cursor-hook.sh\" turn-end",
         "timeout": 10
-      },
-      {
-        "command": "./hooks/session-sync.sh turn-end",
-        "timeout": 10
       }
     ],
     "sessionEnd": [

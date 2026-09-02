@@ -139,7 +139,7 @@ jobs:
           test -x cursor/hooks/session-sync.sh || { echo "::error::cursor session-sync hook not executable"; exit 1; }
           # One wrapper serves every lifecycle event, with the event as its argument — so
           # every registered command must actually point at it.
-          for ev in stop sessionEnd sessionStart; do
+          for ev in sessionEnd sessionStart; do
             jq -e --arg ev "$ev" '[.hooks[$ev][].command] | any(contains("hooks/session-sync.sh"))' \
               cursor/hooks/hooks.json >/dev/null \
               || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
@@ -159,6 +159,10 @@ jobs:
             || { echo "::error::cursor hooks.stop must go through the bootstrapped shim — it runs from the workspace and cannot find the plugin"; exit 1; }
           grep -q 'cursor-hook.sh' cursor/hooks/session-sync.sh \
             || { echo "::error::session-sync.sh no longer writes the shim that hooks.stop depends on"; exit 1; }
+          # Exactly one stop entry. A relative fallback beside it is proven to fail (exit 127)
+          # and would write a hook failure into Cursor's log on every single turn.
+          [ "$(jq '.hooks.stop | length' cursor/hooks/hooks.json)" = "1" ] \
+            || { echo "::error::hooks.stop should have exactly one entry — the shim"; exit 1; }
 
           # Prove the whole path end to end, from a standalone copy: a plugin-root hook
           # bootstraps the shim, and the shim then works from an unrelated directory — which
