@@ -11,6 +11,12 @@
         "command": "./hooks/session-sync.sh",
         "timeout": 10
       }
+    ],
+    "sessionStart": [
+      {
+        "command": "./hooks/session-sync-catchup.sh",
+        "timeout": 10
+      }
     ]
   }
 }

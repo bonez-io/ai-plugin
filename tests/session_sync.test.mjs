@@ -675,6 +675,86 @@ describe("_upload — Codex leg against the stub gateway", () => {
   })
 })
 
+// ------------------------------------------------------------------- cursor sessionStart catch-up
+
+describe("Cursor sessionStart catch-up (the path that survives window_close)", () => {
+  // Cursor 3.18.25 tears down shell-exec before running sessionEnd hooks on window_close, so
+  // every command hook in that batch fails with "MainThreadShellExec not initialized". Capture
+  // therefore cannot depend on sessionEnd; it flushes from disk on the next start instead.
+  function seedWorkspace(home, slug, ids) {
+    for (const id of ids) {
+      const dir = join(home, ".cursor", "projects", slug, "agent-transcripts", id)
+      mkdirSync(dir, { recursive: true })
+      cpSync(join(FIXTURES, "cursor-transcript.jsonl"), join(dir, `${id}.jsonl`))
+    }
+  }
+
+  test("flushes the PREVIOUS conversation, never the one just starting", async () => {
+    const home = freshDir("cursor-catchup")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo" // workspace path with "/" -> "-"
+    seedWorkspace(home, slug, ["old-convo", "new-convo"])
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(join(home, ".cursor", "projects", slug, "agent-transcripts", "old-convo", "old-convo.jsonl"), past, past)
+
+    const dataDir = freshDir("cursor-catchup-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(
+      payloadFile,
+      JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "new-convo", workspace_roots: [root] }),
+    )
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 1)
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    assert.ok(state["old-convo"], "the previous conversation should have been flushed")
+    assert.ok(!state["new-convo"], "the just-starting conversation must never be uploaded from its own start")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("already-synced conversations are skipped, so a start is a silent no-op once caught up", async () => {
+    const home = freshDir("cursor-caughtup")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    seedWorkspace(home, "tmp-bonez-session-sync-fixture-repo", ["only-convo"])
+    const dataDir = freshDir("cursor-caughtup-data")
+    await install(dataDir, ["--global"])
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({ "only-convo": { agent: "cursor", messageCount: 6, contentHash: "x", lastUploadedAt: 1 } }),
+    )
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "brand-new", workspace_roots: [root] }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before, "nothing left to catch up — must not re-upload")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the workspace slug is Cursor's own directory naming, not a guess", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    assert.equal(
+      mod.cursorProjectSlug("/Users/shay/Projects/easycoach/pl-football-web"),
+      "Users-shay-Projects-easycoach-pl-football-web",
+      "must match the real directory Cursor wrote (observed in ~/.cursor/projects)",
+    )
+    assert.equal(mod.cursorProjectSlug("/tmp/repo/"), "tmp-repo")
+    assert.equal(mod.cursorProjectSlug(""), null)
+    assert.equal(mod.cursorProjectSlug(undefined), null)
+  })
+})
+
 // ------------------------------------------------------------------- credential store location
 
 describe("credential store: one sign-in shared by all three clients", () => {

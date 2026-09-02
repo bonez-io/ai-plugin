@@ -144,6 +144,17 @@ jobs:
           done
           jq -e '.hooks.sessionEnd | length >= 1' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json does not register a sessionEnd hook — no session capture"; exit 1; }
+          # sessionStart is NOT optional on the Cursor leg. Cursor 3.18.25 tears down
+          # shell-exec before running sessionEnd hooks on window_close ("MainThreadShellExec
+          # not initialized"), so quitting the app captures nothing. The start-side catch-up
+          # is what makes capture survive that — losing it silently halves the feature.
+          jq -e '.hooks.sessionStart | length >= 1' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor/hooks/hooks.json does not register a sessionStart hook — capture will not survive window_close"; exit 1; }
+          test -x cursor/hooks/session-sync-catchup.sh || { echo "::error::cursor catch-up hook not executable"; exit 1; }
+          # The two wrappers must stay identical apart from the event they pass.
+          diff <(grep -v "^#" cursor/hooks/session-sync.sh | sed "s/session-end/EVENT/") \
+               <(grep -v "^#" cursor/hooks/session-sync-catchup.sh | sed "s/session-start/EVENT/") >/dev/null \
+            || { echo "::error::the two cursor session-sync wrappers have drifted beyond their event argument"; exit 1; }
           jq -e '.version' cursor/hooks/hooks.json >/dev/null \
             || { echo "::error::cursor/hooks/hooks.json needs a top-level version (Cursor hooks schema)"; exit 1; }
 

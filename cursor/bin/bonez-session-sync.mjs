@@ -385,6 +385,58 @@ function findCodexCatchupTarget(currentSessionId) {
   return { sessionId, transcriptPath: newest.p }
 }
 
+// Cursor's own SessionStart catch-up — and unlike Codex's, this one is not defensive
+// programming against a rare crash. It is the PRIMARY path, because Cursor's sessionEnd
+// provably cannot run a command hook in the most common case. Observed in Cursor 3.18.25's
+// own hook log:
+//
+//     Hook step requested: sessionEnd
+//     Found 2 hook(s) to execute for step: sessionEnd
+//     Running script in directory: /Users/shay/.cursor/plugins/local/bonez
+//     STDERR: Error: MainThreadShellExec not initialized
+//     ERROR: Error executing hook 2
+//
+// `reason: "window_close"`: Cursor tears down the shell-exec service before it runs the
+// sessionEnd hooks, so EVERY command hook fails — ours and the unrelated PostHog one in the
+// same batch. Nothing on our side is wrong (the payload arrives complete, with a populated
+// transcript_path and workspace_roots), and nothing on our side can fix it. Closing only the
+// chat tab, where the window survives, should still execute — but a capture mechanism that
+// silently drops everything whenever someone quits the app is not a mechanism.
+//
+// So: flush on the NEXT sessionStart instead, from disk. Scoped to the current workspace's
+// transcript directory, because that is the one case where the new session's workspace_roots
+// is also the right workspace for the old conversation — Cursor's project directories are the
+// workspace path with "/" swapped for "-", so the mapping is exact rather than guessed. One
+// conversation per start, newest first, skipping anything sync-state already has.
+function cursorProjectSlug(workspaceRoot) {
+  if (!workspaceRoot) return null
+  return workspaceRoot.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
+}
+
+function findCursorCatchupTarget(currentConversationId, workspaceRoot, state) {
+  const slug = cursorProjectSlug(workspaceRoot)
+  if (!slug) return null
+  const root = join(HOME, ".cursor", "projects", slug, "agent-transcripts")
+  if (!existsSync(root)) return null
+  const files = walkFiles(root, (p) => p.endsWith(".jsonl")).filter(
+    (p) => !p.endsWith(`${currentConversationId}.jsonl`),
+  )
+  const candidates = files
+    .map((p) => {
+      const id = p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
+      if (state[id]) return null // already uploaded — the common case once this is working
+      try {
+        return { p, id, mtime: statSync(p).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter((x) => x !== null)
+  candidates.sort((a, b) => b.mtime - a.mtime)
+  const newest = candidates[0]
+  return newest ? { sessionId: newest.id, transcriptPath: newest.p } : null
+}
+
 // ------------------------------------------------------------------- credential (key or OAuth)
 
 // The uploader is a separate OS process from the MCP client, so it cannot borrow the OAuth
@@ -914,6 +966,17 @@ async function cmdUpload(agent, event, payloadFile) {
     return
   }
 
+  if (agent === "cursor" && event === "session-start") {
+    const root = workspaceRootFrom(payload)
+    const target = findCursorCatchupTarget(payload.conversation_id ?? payload.session_id ?? "", root, loadState())
+    if (!target) {
+      await log("upload: cursor session-start — nothing unsynced in this workspace")
+      return
+    }
+    await uploadOne({ agent, cfg, sessionId: target.sessionId, transcriptPath: target.transcriptPath, cwd: root })
+    return
+  }
+
   if (agent === "codex" && event === "session-start") {
     const target = findCodexCatchupTarget(payload.session_id ?? "")
     if (!target) {
@@ -1252,6 +1315,8 @@ export {
   dataDir,
   migrateLegacyData,
   findCodexCatchupTarget,
+  findCursorCatchupTarget,
+  cursorProjectSlug,
   gatewayBaseUrl,
   parseCursorFile,
   resolveTranscriptPath,

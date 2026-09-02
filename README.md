@@ -343,6 +343,14 @@ location outright.
   scoping work — and the conversation's timestamps stand in from the transcript file's own
   birthtime and mtime. Expect slightly coarser provenance on Cursor conversations than on
   Claude Code ones.
+- **Cursor cannot run a command hook when you quit the app.** On `reason: window_close` it
+  tears down its shell-exec service *before* running `sessionEnd` hooks, so every command hook
+  in the batch dies with `MainThreadShellExec not initialized` — ours and any third-party one
+  beside it (verified in Cursor 3.18.25's own hook log). Nothing plugin-side can fix that, so
+  the Cursor leg also registers a **`sessionStart`** hook that flushes the previous
+  conversation from disk on the next start. That is the path that actually carries most
+  captures; it covers crashes and SIGKILL for free, uploads at most one conversation per start,
+  and never uploads the session just beginning.
 - `sessionEnd` is an IDE-lifetime event. Cursor's docs are explicit that "Cloud agents have no
   editor-lifetime session boundary. `sessionEnd` is tied to the IDE session, not a cloud agent
   chat" — so background/cloud agent conversations are **not** captured by this leg.
