@@ -23,6 +23,17 @@ jobs:
             echo "ok: $f"
           done
 
+      - name: Cursor hooks.json carries the schema version
+        run: |
+          set -euo pipefail
+          # Cursor's hooks.json REQUIRES "version": 1 at the top level. Without it the
+          # file parses as JSON and is silently ignored: no beforeMCPExecution step is
+          # ever requested, so the write gate never runs and memory/rules writes go
+          # through unguarded. Verified on Cursor 3.18.25 (2026-09-03) against the
+          # marketplace-installed plugin; adding the field made the gate fire.
+          jq -e '.version == 1' cursor/hooks/hooks.json >/dev/null
+          echo "ok: cursor/hooks/hooks.json version 1"
+
       - name: Version parity across manifests
         run: |
           set -euo pipefail
