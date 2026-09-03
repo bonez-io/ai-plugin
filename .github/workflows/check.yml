@@ -51,7 +51,7 @@ jobs:
       - name: Hook scripts parse (bash -n)
         run: |
           set -euo pipefail
-          for f in hooks/*.sh tests/*.sh; do
+          for f in hooks/*.sh tests/*.sh cursor/hooks/*.sh; do
             bash -n "$f"
             echo "ok: $f"
           done
@@ -62,7 +62,7 @@ jobs:
       - name: bonez-session-sync.mjs syntax + vendored bundle
         run: |
           set -euo pipefail
-          for f in bin/*.mjs bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
+          for f in bin/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
             node --check "$f"
             echo "ok: $f"
           done
@@ -141,6 +141,55 @@ jobs:
           echo "$out" | grep -q '"permission":"ask"' || {
             echo "::error::the plugin is not self-contained — the gate did not fire from a standalone copy"; exit 1; }
           echo "ok: gate fires from a standalone plugin copy"
+
+          # Session capture, same self-containment trap as the gate. The Cursor leg
+          # runs the SAME bin/bonez-session-sync.mjs as the Claude Code and Codex
+          # legs, so the plugin must carry its own byte copy of it (and of the
+          # vendored bundle it imports) — a marketplace install has no parent repo
+          # to reach into.
+          test -x cursor/hooks/session-sync.sh || { echo "::error::cursor session-sync hook not executable"; exit 1; }
+          # One wrapper serves every lifecycle event, with the event as its argument — so
+          # every registered command must actually point at it.
+          for ev in sessionEnd sessionStart; do
+            jq -e --arg ev "$ev" '[.hooks[$ev][].command] | any(contains("hooks/session-sync.sh"))' \
+              cursor/hooks/hooks.json >/dev/null \
+              || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
+          done
+          for f in bonez-session-sync.mjs vendor/agent-import.bundle.mjs; do
+            test -f "cursor/bin/$f" || { echo "::error::cursor/bin/$f missing"; exit 1; }
+            cmp -s "bin/$f" "cursor/bin/$f" || {
+              echo "::error::cursor/bin/$f has drifted from bin/$f — re-copy it (cp bin/$f cursor/bin/$f)."; exit 1; }
+          done
+          jq -e '.hooks.sessionEnd | length >= 1' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor/hooks/hooks.json does not register a sessionEnd hook — no session capture"; exit 1; }
+          # sessionStart is NOT optional on the Cursor leg. Cursor 3.18.25 tears down
+          # shell-exec before running sessionEnd hooks on window_close ("MainThreadShellExec
+          # not initialized"), so quitting the app captures nothing. The start-side catch-up
+          # is what makes capture survive that — losing it silently halves the feature.
+          jq -e '.hooks.sessionStart | length >= 1' cursor/hooks/hooks.json >/dev/null \
+            || { echo "::error::cursor/hooks/hooks.json does not register a sessionStart hook — capture will not survive window_close"; exit 1; }
+          for ev in sessionEnd sessionStart; do
+            jq -e --arg ev "$ev" '[.hooks[$ev][].command] | any(contains("hooks/session-sync.sh"))' \
+              cursor/hooks/hooks.json >/dev/null \
+              || { echo "::error::cursor hooks.$ev must call hooks/session-sync.sh"; exit 1; }
+          done
+
+          # Prove the wrapper resolves the .mjs from ITS OWN directory rather than
+          # the checkout it was authored in. BONEZ_NODE stands in for node and just
+          # records the path it was handed; the wrapper discards stdout, so the
+          # stub writes to a file instead of printing.
+          probe="$(mktemp -d)"
+          printf '#!/usr/bin/env bash\necho "$1" > %s/resolved\n' "$probe" > "$probe/fake-node"
+          chmod +x "$probe/fake-node"
+          ( cd "$standalone" && printf '%s' '{"hook_event_name":"sessionEnd","conversation_id":"x"}' \
+              | BONEZ_NODE="$probe/fake-node" ./hooks/session-sync.sh )
+          resolved="$(cat "$probe/resolved" 2>/dev/null || true)"
+          case "$resolved" in
+            "$standalone"/*/bonez-session-sync.mjs|"$standalone"/bin/bonez-session-sync.mjs) ;;
+            *) echo "::error::session-sync hook resolved to '$resolved', not the standalone copy at $standalone/bin/"; exit 1 ;;
+          esac
+          test -f "$resolved" || { echo "::error::session-sync hook pointed at a nonexistent file: $resolved"; exit 1; }
+          echo "ok: session capture is self-contained in a standalone plugin copy"
 
           # Branding. The Cursor manifest's `logo` is plugin-relative, so the
           # asset has to live INSIDE the plugin or the marketplace card renders

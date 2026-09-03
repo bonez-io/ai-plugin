@@ -263,14 +263,15 @@ The skills are shared, with one deliberate exception: `codex/skills/` forks `rem
 
 ## Session capture
 
-Your Claude Code and Codex conversations already hold everything the harness itself learns from
-— what you tried, what broke, what you decided. This plugin can capture them into the same
+Your Claude Code, Codex and Cursor conversations already hold everything the harness itself
+learns from — what you tried, what broke, what you decided. This plugin can capture them into the same
 `bonez` knowledge graph the desktop app's manual "Import history" feature feeds, so the org
 learns from them too. It is **off by default** and stays off until you explicitly install it.
 
 **What it does:** at the end of a matching session (Claude Code's `SessionEnd`; Codex's
 `SessionEnd`, plus its `SessionStart` as a durable fallback for sessions that crashed or hit
-Codex's tight `SessionEnd` timeout before it could fire), a hook hands the transcript to
+Codex's tight `SessionEnd` timeout before it could fire; Cursor's `sessionEnd`), a hook hands
+the transcript to
 `bin/bonez-session-sync.mjs`, which detaches to a background process immediately — the hook
 itself never makes a network call and is invisible either way: it never prints anything and
 never fails the harness's hook check. The background process parses and scrubs the transcript
@@ -323,6 +324,53 @@ bonez-session-sync.mjs install bnz_... --global
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
 config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.
 
+**Where the credential lives:** `~/.bonez/session-sync/` — agent-neutral, so **one `login`
+covers all three clients**. It used to be `~/.claude/plugins/data/<plugin>-<marketplace>/`,
+which only worked while Claude Code was the only leg: Cursor doesn't set `CLAUDE_PLUGIN_DATA`,
+so it could never find a credential Claude Code had written under a marketplace named anything
+but `bonez` — and a Cursor-only user got a `~/.claude/` directory for a product they don't use.
+An existing install is found and moved on the next `login`/`install`/`status`; the old copy is
+left in place in case an older build still reads it. `BONEZ_SESSION_SYNC_DATA` overrides the
+location outright.
+
+**Cursor leg:** nothing extra to enable — the plugin registers the `sessionEnd` hook itself
+(`cursor/hooks/hooks.json`), so a `login` is the only step. Two differences worth knowing:
+
+- Cursor's transcripts are thinner than the other two agents'. Records carry the role and the
+  message content (including which tools were called) but **no timestamps, no working
+  directory, and no git branch**. The workspace root is recovered from the hook payload
+  (`workspace_roots`, falling back to `CURSOR_PROJECT_DIR`) — which is what makes `--repo`
+  scoping work — and the conversation's timestamps stand in from the transcript file's own
+  birthtime and mtime. Expect slightly coarser provenance on Cursor conversations than on
+  Claude Code ones.
+- **Cursor cannot run a command hook when you quit the app.** On `reason: window_close` it
+  tears down its shell-exec service *before* running `sessionEnd` hooks, so every command hook
+  in the batch dies with `MainThreadShellExec not initialized` — ours and any third-party one
+  beside it (verified in Cursor 3.18.25's own hook log). Nothing plugin-side can fix that, so
+  the Cursor leg also registers a **`sessionStart`** hook that flushes the previous
+  conversations from disk on the next start. That is the path that actually carries most
+  captures, and it covers crashes and SIGKILL for free. It flushes **every** stale conversation
+  in the workspace (up to 20 per start), not just the last one — close a window with five chats
+  open and all five sessionEnd hooks die together, so a one-per-start rule would never drain.
+  A conversation counts as stale when it has never been uploaded *or* has been written to since
+  its last upload, so a chat that keeps growing is re-captured rather than blacklisted. It
+  never uploads the session just beginning.
+
+  The **primary** trigger, though, is Cursor's `stop` hook: it fires after every agent turn,
+  while the window is alive, independently per conversation — so three chats open at once each
+  capture themselves instead of queueing behind one catch-up slot, and quitting the app loses
+  nothing because the work is already uploaded. Uploading after every turn would be wasteful,
+  so the uploader debounces (`BONEZ_SESSION_SYNC_DEBOUNCE_MS`, default 120s) and skips
+  unchanged transcripts; a burst of quick turns collapses into one upload. `sessionEnd` and
+  `sessionStart` remain as the safety net for whatever `stop` misses.
+- `sessionEnd` is an IDE-lifetime event. Cursor's docs are explicit that "Cloud agents have no
+  editor-lifetime session boundary. `sessionEnd` is tied to the IDE session, not a cloud agent
+  chat" — so background/cloud agent conversations are **not** captured by this leg.
+- Capture depends on Cursor writing transcripts at all. `transcript_path` is documented as
+  nullable ("null if transcripts disabled"); when it is absent the uploader falls back to
+  `CURSOR_TRANSCRIPT_PATH` and then to a walk of `~/.cursor/projects/*/agent-transcripts/`, but
+  if Cursor has written nothing there is nothing to capture and the hook is a silent no-op.
+
 **Codex leg:** hooks are opt-in per Codex install (`[features] hooks = true` in `config.toml`,
 off by default) on top of this plugin's own `install` gate — see the commented-out block in
 [`codex/config.toml`](codex/config.toml), which needs its `command` path edited to point at
@@ -338,6 +386,7 @@ skills/           8 skills
 commands/         /bonez:context, /bonez:search
 hooks/            PreToolUse write gate + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
+                  cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)

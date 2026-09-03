@@ -40,12 +40,22 @@ function freshDir(prefix) {
 // process it blocks on returns immediately without ever making an HTTP call itself — the actual
 // upload happens in a further-detached grandchild this process was never watching — but async
 // spawn here removes the trap for every case uniformly instead of relying on that distinction.
+// Every spawned CLI gets a SANDBOX HOME unless the test names its own.
+//
+// This is not belt-and-braces. The credential store resolves against ~ — it prefers
+// ~/.bonez/session-sync and falls back to scanning ~/.claude/plugins/data/bonez* — so a child
+// inheriting the real HOME can read, and WRITE, the developer's actual credential. That is not
+// hypothetical: an earlier revision of the store migration did exactly that during a test run
+// on this machine, copying a real store to the canonical path and then overwriting its config
+// with the test key. Pinning HOME here makes the whole class impossible.
+const SANDBOX_HOME = mkdtempSync(join(tmpdir(), "bonez-session-sync-home-"))
+
 function runCli(args, { env = {}, input = "" } = {}) {
   return new Promise((resolve, reject) => {
     const t0 = performance.now()
     const child = spawn(process.execPath, [SCRIPT, ...args], {
       cwd: REPO_ROOT,
-      env: { ...process.env, ...env },
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -665,7 +675,575 @@ describe("_upload — Codex leg against the stub gateway", () => {
   })
 })
 
+// ------------------------------------------------------------- cursor stop / concurrent chats
+
+describe("Cursor `stop`: concurrent conversations each capture themselves", () => {
+  // The reason `stop` is the primary trigger: it fires while the window is alive, once per
+  // agent loop, INDEPENDENTLY PER CONVERSATION. sessionEnd cannot run at all on window_close,
+  // and a start-side catch-up serialises everything through one slot. This is the behaviour
+  // that has to hold, so it is asserted rather than assumed.
+  function writeTranscript(dir, id, turns) {
+    mkdirSync(dir, { recursive: true })
+    const lines = []
+    for (let i = 0; i < turns; i++) {
+      lines.push(JSON.stringify({ role: "user", message: { content: [{ type: "text", text: `<user_query>${id} q${i}</user_query>` }] } }))
+      lines.push(JSON.stringify({ role: "assistant", message: { content: [{ type: "text", text: `${id} a${i}` }] } }))
+    }
+    const f = join(dir, `${id}.jsonl`)
+    writeFileSync(f, `${lines.join("\n")}\n`)
+    return f
+  }
+
+  test("three chats open at once: each turn uploads its OWN conversation, none bleed", async () => {
+    const home = freshDir("cursor-stop-concurrent")
+    const dataDir = freshDir("cursor-stop-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", slug, "agent-transcripts")
+
+    const chats = ["chat-alpha", "chat-beta", "chat-gamma"]
+    const paths = {}
+    for (const id of chats) paths[id] = writeTranscript(join(base, id), id, 2)
+
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      BONEZ_GATEWAY_URL: gateway.url,
+      HOME: home,
+      USERPROFILE: home,
+      BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+    }
+
+    // Interleave turns the way three open chats actually behave.
+    for (const id of [...chats, ...chats]) {
+      const payloadFile = join(dataDir, `p-${id}.json`)
+      writeFileSync(
+        payloadFile,
+        JSON.stringify({
+          hook_event_name: "stop",
+          status: "completed",
+          loop_count: 0,
+          conversation_id: id,
+          workspace_roots: [root],
+          transcript_path: paths[id],
+        }),
+      )
+      // grow the transcript between rounds so the content hash actually changes
+      writeTranscript(join(base, id), id, 4)
+      const res = await runCli(["_upload", "cursor", "turn-end", payloadFile], { env })
+      assert.equal(res.status, 0)
+    }
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    for (const id of chats) {
+      assert.ok(state[id], `${id} must have its own sync-state entry`)
+      assert.equal(state[id].agent, "cursor")
+    }
+
+    // Every upload carried the right conversation — an id landing under another chat's
+    // unit_key would silently merge two people's work into one :Convo node.
+    //
+    // Select by sessionId rather than by position: the stub gateway is shared with every
+    // other test in this file and node:test runs suites concurrently, so "the last N PUTs"
+    // is not this test's N PUTs.
+    const uploaded = gateway.calls.put
+      .map((c) => ndjsonLinesFromGzip(c.body)[1])
+      .filter((conv) => chats.includes(conv.sessionId))
+    assert.deepEqual(new Set(uploaded.map((c) => c.sessionId)), new Set(chats), "each chat must upload under its own id")
+    for (const conv of uploaded) {
+      for (const m of conv.messages) {
+        if (m.text) assert.ok(m.text.includes(conv.sessionId), "a message from another conversation leaked in")
+      }
+    }
+
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("simultaneous uploaders do not clobber each other's sync-state", async () => {
+    // The race this closes: three chats -> three detached uploaders -> each loads
+    // sync-state, adds its entry, writes it back. Without a lock the last writer wins and
+    // the others vanish, so those conversations look never-uploaded and get re-uploaded on
+    // the next turn — defeating the debounce that makes per-turn `stop` affordable.
+    // Measured before the fix: 3 concurrent uploads, 1 surviving entry.
+    const home = freshDir("cursor-state-race")
+    const dataDir = freshDir("cursor-state-race-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", "tmp-bonez-session-sync-fixture-repo", "agent-transcripts")
+
+    const ids = ["race-1", "race-2", "race-3", "race-4", "race-5"]
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      BONEZ_GATEWAY_URL: gateway.url,
+      HOME: home,
+      USERPROFILE: home,
+      BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+    }
+
+    // Launch all five AT ONCE — sequential runs would never exhibit the bug.
+    await Promise.all(
+      ids.map((id) => {
+        writeTranscript(join(base, id), id, 2)
+        const payloadFile = join(dataDir, `race-${id}.json`)
+        writeFileSync(
+          payloadFile,
+          JSON.stringify({
+            hook_event_name: "stop",
+            conversation_id: id,
+            workspace_roots: [root],
+            transcript_path: join(base, id, `${id}.jsonl`),
+          }),
+        )
+        return runCli(["_upload", "cursor", "turn-end", payloadFile], { env })
+      }),
+    )
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    const missing = ids.filter((id) => !state[id])
+    assert.deepEqual(missing, [], `sync-state lost ${missing.length}/${ids.length} entries to a write race`)
+
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("rapid turns in one chat collapse to a single upload — `stop` fires per turn, we don't", async () => {
+    const home = freshDir("cursor-stop-debounce")
+    const dataDir = freshDir("cursor-stop-debounce-data")
+    await install(dataDir, ["--global"])
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const base = join(home, ".cursor", "projects", "tmp-bonez-session-sync-fixture-repo", "agent-transcripts", "chatty")
+    const f = writeTranscript(base, "chatty", 1)
+    const payloadFile = join(dataDir, "p.json")
+    // Default debounce (120s) — the point of this test.
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home }
+
+    const before = gateway.calls.presign.length
+    for (let turn = 1; turn <= 5; turn++) {
+      writeTranscript(base, "chatty", turn + 1) // genuinely different content each turn
+      writeFileSync(
+        payloadFile,
+        JSON.stringify({ hook_event_name: "stop", conversation_id: "chatty", workspace_roots: [root], transcript_path: f }),
+      )
+      assert.equal((await runCli(["_upload", "cursor", "turn-end", payloadFile], { env })).status, 0)
+    }
+    assert.equal(
+      gateway.calls.presign.length,
+      before + 1,
+      "five turns inside the debounce window must produce ONE upload, not five archives",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the hook path itself accepts turn-end: fast, silent, exit 0", async () => {
+    const dataDir = freshDir("cursor-stop-hook")
+    await install(dataDir, ["--global"])
+    const res = await runCli(["hook", "cursor", "turn-end"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url },
+      input: JSON.stringify({
+        hook_event_name: "stop",
+        conversation_id: "cursor-transcript",
+        workspace_roots: ["/tmp/bonez-session-sync-fixture-repo"],
+        transcript_path: join(FIXTURES, "cursor-transcript.jsonl"),
+      }),
+    })
+    assert.equal(res.status, 0)
+    // `stop` can return a followup_message that Cursor AUTO-SUBMITS as a user turn, so
+    // anything printed here would be injected into the conversation.
+    assert.equal(res.stdout, "", "a stop hook that prints would inject text into the chat")
+    assert.equal(res.stderr, "")
+    assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    await waitFor(() => {
+      if (!existsSync(join(dataDir, "sync-state.json"))) return false
+      try {
+        return JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["cursor-transcript"]
+      } catch {
+        return false
+      }
+    })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
+// ------------------------------------------------------------------- cursor sessionStart catch-up
+
+describe("Cursor sessionStart catch-up (the path that survives window_close)", () => {
+  // Cursor 3.18.25 tears down shell-exec before running sessionEnd hooks on window_close, so
+  // every command hook in that batch fails with "MainThreadShellExec not initialized". Capture
+  // therefore cannot depend on sessionEnd; it flushes from disk on the next start instead.
+  function seedWorkspace(home, slug, ids) {
+    for (const id of ids) {
+      const dir = join(home, ".cursor", "projects", slug, "agent-transcripts", id)
+      mkdirSync(dir, { recursive: true })
+      cpSync(join(FIXTURES, "cursor-transcript.jsonl"), join(dir, `${id}.jsonl`))
+    }
+  }
+
+  test("flushes EVERY stale conversation, not just one — concurrent chats all die together on window_close", async () => {
+    const home = freshDir("cursor-concurrent")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["chat-a", "chat-b", "chat-c", "chat-d"])
+    const dataDir = freshDir("cursor-concurrent-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "the-new-one", workspace_roots: [root] }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: home,
+        USERPROFILE: home,
+        BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+      },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 4, "all four stranded conversations must flush, not one")
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    for (const id of ["chat-a", "chat-b", "chat-c", "chat-d"]) assert.ok(state[id], `${id} should have flushed`)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("a conversation that GREW since its last upload is picked up again", async () => {
+    const home = freshDir("cursor-grew")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["grown"])
+    const f = join(home, ".cursor", "projects", slug, "agent-transcripts", "grown", "grown.jsonl")
+
+    const dataDir = freshDir("cursor-grew-data")
+    await install(dataDir, ["--global"])
+    // Already uploaded an hour ago...
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({ grown: { agent: "cursor", messageCount: 2, contentHash: "stale", lastUploadedAt: Date.now() - 3_600_000 } }),
+    )
+    // ...and the user kept chatting in it since.
+    const now = new Date()
+    utimesSync(f, now, now)
+
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "another", workspace_roots: [root] }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(
+      gateway.calls.presign.length,
+      before + 1,
+      "keying on 'have we ever uploaded this' would blacklist a growing conversation forever",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("flushes the PREVIOUS conversation, never the one just starting", async () => {
+    const home = freshDir("cursor-catchup")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo" // workspace path with "/" -> "-"
+    seedWorkspace(home, slug, ["old-convo", "new-convo"])
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(join(home, ".cursor", "projects", slug, "agent-transcripts", "old-convo", "old-convo.jsonl"), past, past)
+
+    const dataDir = freshDir("cursor-catchup-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(
+      payloadFile,
+      JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "new-convo", workspace_roots: [root] }),
+    )
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 1)
+
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    assert.ok(state["old-convo"], "the previous conversation should have been flushed")
+    assert.ok(!state["new-convo"], "the just-starting conversation must never be uploaded from its own start")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("already-synced conversations are skipped, so a start is a silent no-op once caught up", async () => {
+    const home = freshDir("cursor-caughtup")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    seedWorkspace(home, "tmp-bonez-session-sync-fixture-repo", ["only-convo"])
+    const dataDir = freshDir("cursor-caughtup-data")
+    await install(dataDir, ["--global"])
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({
+        "only-convo": { agent: "cursor", messageCount: 6, contentHash: "x", lastUploadedAt: Date.now() + 60_000 },
+      }),
+    )
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ conversation_id: "brand-new", workspace_roots: [root] }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before, "nothing left to catch up — must not re-upload")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the workspace slug is Cursor's own directory naming, not a guess", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    assert.equal(
+      mod.cursorProjectSlug("/Users/shay/Projects/easycoach/pl-football-web"),
+      "Users-shay-Projects-easycoach-pl-football-web",
+      "must match the real directory Cursor wrote (observed in ~/.cursor/projects)",
+    )
+    assert.equal(mod.cursorProjectSlug("/tmp/repo/"), "tmp-repo")
+    assert.equal(mod.cursorProjectSlug(""), null)
+    assert.equal(mod.cursorProjectSlug(undefined), null)
+  })
+})
+
+// ------------------------------------------------------------------- credential store location
+
+describe("credential store: one sign-in shared by all three clients", () => {
+  // The bug this guards: the store used to be `CLAUDE_PLUGIN_DATA || <hardcoded ~/.claude
+  // path>`. Cursor sets CLAUDE_PROJECT_DIR but NOT CLAUDE_PLUGIN_DATA, so it always took the
+  // hardcoded branch — while Claude Code writes to `<plugin>-<marketplace>`, which is only
+  // that same path when the marketplace happens to be named "bonez". Any other name and
+  // Cursor silently found no credential and captured nothing, with no error anywhere.
+  const statusDataDir = (out) => (/data dir:\s*(.+)/.exec(out)?.[1] ?? "").trim()
+
+  test("a fresh install with no legacy store lands in the agent-neutral location", async () => {
+    const home = freshDir("store-fresh")
+    const res = await runCli(["install", TEST_KEY, "--global"], {
+      env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    const st = await runCli(["status"], {
+      env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" },
+    })
+    assert.match(statusDataDir(st.stdout), /\.bonez[\\/]session-sync$/)
+    assert.doesNotMatch(st.stdout, /\.claude/, "a Cursor-only user must not get a ~/.claude directory")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("an existing legacy store keeps working — a path change must never orphan a credential", async () => {
+    const home = freshDir("store-legacy")
+    const legacy = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(
+      join(legacy, "config.json"),
+      JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-25T00:00:00Z" }),
+    )
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" }
+
+    // `status` migrates, then reports the NEW location — but the credential survives either way.
+    const st = await runCli(["status"], { env })
+    assert.match(st.stdout, /enabled/, "the legacy credential must still be found")
+    assert.match(st.stdout, /Moved your session-capture credential/)
+    assert.match(statusDataDir(st.stdout), /\.bonez[\\/]session-sync$/)
+
+    // The legacy copy stays put: an older build of this script may still be reading it.
+    assert.ok(existsSync(join(legacy, "config.json")), "legacy config must not be deleted")
+    assert.ok(existsSync(join(home, ".bonez", "session-sync", "config.json")), "migrated copy must exist")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("the actual bug: Claude Code writes under a non-'bonez' marketplace, Cursor still finds it", async () => {
+    const home = freshDir("store-split")
+    // Claude Code's data dir is <plugin>-<marketplace>; here the marketplace is "acme".
+    const claudeDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+    mkdirSync(claudeDir, { recursive: true })
+    const claudeEnv = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: claudeDir, BONEZ_SESSION_SYNC_DATA: "" }
+    assert.equal((await runCli(["install", TEST_KEY, "--global"], { env: claudeEnv })).status, 0)
+
+    // Cursor's environment: no CLAUDE_PLUGIN_DATA at all.
+    const cursorEnv = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "" }
+    const st = await runCli(["status"], { env: cursorEnv })
+    assert.match(st.stdout, /enabled/, "Cursor must find the credential Claude Code wrote — this is the regression")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("CLAUDE_PLUGIN_DATA still wins when set, so existing Claude Code installs are untouched", async () => {
+    const home = freshDir("store-override")
+    const explicit = join(home, "explicit-store")
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: explicit, BONEZ_SESSION_SYNC_DATA: "" }
+    assert.equal((await runCli(["install", TEST_KEY, "--global"], { env })).status, 0)
+    const st = await runCli(["status"], { env })
+    assert.equal(statusDataDir(st.stdout), explicit)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+// ---------------------------------------------------------------------------- cursor leg
+
+describe("_upload — Cursor leg against the stub gateway", () => {
+  test("sessionEnd: agent=cursor in the manifest, roles read off the OUTER record, secret redacted", async () => {
+    const dataDir = freshDir("cursor-upload")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(
+      payloadFile,
+      JSON.stringify({
+        hook_event_name: "sessionEnd",
+        conversation_id: "cursor-transcript",
+        session_id: "some-other-session-id",
+        reason: "completed",
+        workspace_roots: ["/tmp/bonez-session-sync-fixture-repo"],
+        transcript_path: join(FIXTURES, "cursor-transcript.jsonl"),
+      }),
+    )
+    const res = await runCli(["_upload", "cursor", "session-end", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url },
+    })
+    assert.equal(res.status, 0)
+
+    const putCall = gateway.calls.put.at(-1)
+    const [manifest, conversation] = ndjsonLinesFromGzip(putCall.body)
+    assert.deepEqual(manifest.agents, ["cursor"])
+    assert.equal(conversation.agent, "cursor")
+
+    // The presign call must declare the same agent — the gateway validates it against its own
+    // allow-list (_AGENTS in control/import_presign.py), so a mismatch here 400s in prod.
+    assert.equal(gateway.calls.presign.at(-1).body.agent, "cursor")
+
+    // The whole reason parseClaudeFile can't be reused: Cursor puts `role` on the outer record,
+    // so a Claude-shaped read labels EVERY message "user". Assert the real split.
+    const roles = conversation.messages.map((m) => m.role)
+    assert.ok(roles.includes("user"), "user turns preserved")
+    assert.ok(roles.includes("assistant"), "assistant turns must NOT collapse into 'user'")
+    assert.ok(roles.includes("tool"), "tool_use blocks become tool messages")
+
+    // tool_use and tool_result both land, and the result is linked to its call.
+    const call = conversation.messages.find((m) => m.tool === "Grep")
+    assert.ok(call, "the tool_use block became a tool message")
+    assert.equal(call.toolCallId, "toolu_01")
+    const result = conversation.messages.find((m) => m.tool === "result")
+    assert.ok(result, "the tool_result block became a result message")
+    assert.equal(result.toolResultFor, "toolu_01")
+
+    // Envelope fields Cursor's records omit, recovered from the payload and the file.
+    assert.equal(conversation.workspacePath, "/tmp/bonez-session-sync-fixture-repo")
+    assert.equal(conversation.title, "Why does the checkout retry twice?")
+    assert.ok(conversation.createdAt, "createdAt stands in from the file's birthtime")
+    assert.ok(conversation.updatedAt, "updatedAt stands in from the file's mtime")
+
+    // unit_key: the CONVERSATION id, not sessionEnd's session_id — that's what the transcript
+    // is filed under and what survives a resume.
+    assert.equal(conversation.sessionId, "cursor-transcript")
+
+    const raw = JSON.stringify(conversation)
+    assert.doesNotMatch(raw, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/)
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("no transcript_path in the payload: falls back to CURSOR_TRANSCRIPT_PATH, then to a walk of ~/.cursor/projects", async () => {
+    const fakeHome = freshDir("cursor-home")
+    const convoId = "cursor-transcript"
+    const dir = join(fakeHome, ".cursor", "projects", "Users-someone-repo", "agent-transcripts", convoId)
+    mkdirSync(dir, { recursive: true })
+    cpSync(join(FIXTURES, "cursor-transcript.jsonl"), join(dir, `${convoId}.jsonl`))
+
+    const dataDir = freshDir("cursor-walk")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    // transcript_path deliberately absent — Cursor documents it as nullable.
+    writeFileSync(payloadFile, JSON.stringify({ hook_event_name: "sessionEnd", conversation_id: convoId }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-end", payloadFile], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: fakeHome,
+        CURSOR_PROJECT_DIR: "/tmp/bonez-session-sync-fixture-repo",
+      },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 1, "resolved the transcript from disk and uploaded")
+
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    // CURSOR_PROJECT_DIR is the documented always-present fallback for the workspace root.
+    assert.equal(conversation.workspacePath, "/tmp/bonez-session-sync-fixture-repo")
+
+    rmSync(fakeHome, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("repo scope: a Cursor conversation outside the allow-listed repos is not uploaded", async () => {
+    const dataDir = freshDir("cursor-scope")
+    // Scope to a repo the payload's workspace root is NOT under.
+    await install(dataDir, ["--repo", "/tmp/some-other-repo"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(
+      payloadFile,
+      JSON.stringify({
+        hook_event_name: "sessionEnd",
+        conversation_id: "cursor-transcript",
+        workspace_roots: ["/tmp/not-the-allow-listed-one"],
+        transcript_path: join(FIXTURES, "cursor-transcript.jsonl"),
+      }),
+    )
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-end", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before, "out-of-scope conversation must not upload")
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
 // ---------------------------------------------------------------------------- real transcript
+
+describe("real transcript from ~/.cursor/projects/", () => {
+  test("a genuine Cursor transcript parses with a real role split and a non-empty title", async () => {
+    const projects = join(process.env.HOME, ".cursor", "projects")
+    let found
+    try {
+      for (const d of readdirSync(projects, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue
+        const at = join(projects, d.name, "agent-transcripts")
+        if (!existsSync(at)) continue
+        for (const c of readdirSync(at, { withFileTypes: true })) {
+          if (!c.isDirectory()) continue
+          const f = join(at, c.name, `${c.name}.jsonl`)
+          // Skip the degenerate giants: Cursor inlines whole websearch payloads into a single
+          // record, and some transcripts run to tens of MB. Nothing here needs a big one.
+          if (existsSync(f) && statSync(f).size > 2_000 && statSync(f).size < 2_000_000) {
+            found = f
+            break
+          }
+        }
+        if (found) break
+      }
+    } catch {
+      /* no ~/.cursor at all on this machine */
+    }
+    if (!found) {
+      // Not a failure: CI runners have no Cursor history. The fixture-based tests above are the
+      // real contract; this one is an extra check against the format actually on disk today.
+      return
+    }
+
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const { Scrubber } = await import("../bin/vendor/agent-import.bundle.mjs")
+    const conv = mod.parseCursorFile(found, new Scrubber(), [], "global", "/tmp/whatever")
+    assert.ok(conv, `parseCursorFile returned null for a real transcript: ${found}`)
+    assert.equal(conv.agent, "cursor")
+    assert.ok(conv.messages.length > 0)
+    const roles = new Set(conv.messages.map((m) => m.role))
+    assert.ok(roles.has("assistant"), `every role collapsed to ${[...roles]} — the outer-record role read regressed`)
+    assert.ok(conv.sessionId && conv.sessionId !== found, "sessionId is the conversation id, not the path")
+  })
+})
 
 describe("real transcript from ~/.claude/projects/", () => {
   test("a genuine transcript, copied and salted with a planted secret, uploads with the secret redacted", async () => {
@@ -753,6 +1331,37 @@ describe("hook — wall time and invisibility", () => {
       if (!existsSync(join(dataDir, "sync-state.json"))) return false
       try {
         return JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["claude-transcript"]
+      } catch {
+        return false
+      }
+    })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("hook cursor session-end: fast, silent, exit 0, and really spawns the background upload", async () => {
+    const dataDir = freshDir("hook-cursor")
+    await install(dataDir, ["--global"])
+    const res = await runCli(["hook", "cursor", "session-end"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url },
+      input: JSON.stringify({
+        hook_event_name: "sessionEnd",
+        conversation_id: "cursor-transcript",
+        session_id: "cursor-session-id",
+        reason: "completed",
+        duration_ms: 45000,
+        workspace_roots: ["/tmp/bonez-session-sync-fixture-repo"],
+        transcript_path: join(FIXTURES, "cursor-transcript.jsonl"),
+      }),
+    })
+    assert.equal(res.status, 0)
+    assert.equal(res.stdout, "")
+    assert.equal(res.stderr, "")
+    assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+
+    await waitFor(() => {
+      if (!existsSync(join(dataDir, "sync-state.json"))) return false
+      try {
+        return JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["cursor-transcript"]
       } catch {
         return false
       }

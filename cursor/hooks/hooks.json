@@ -5,6 +5,18 @@
       {
         "command": "./hooks/gate-write.sh"
       }
+    ],
+    "sessionEnd": [
+      {
+        "command": "./hooks/session-sync.sh session-end",
+        "timeout": 10
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "./hooks/session-sync.sh session-start",
+        "timeout": 10
+      }
     ]
   }
 }
