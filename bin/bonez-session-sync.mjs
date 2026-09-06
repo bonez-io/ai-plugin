@@ -80,6 +80,17 @@ const DEBOUNCE_MS = Number.isFinite(_parsedDebounceMs) && _parsedDebounceMs >= 0
 // not free. Twenty covers any realistic window; the rest drain on later starts.
 const CURSOR_CATCHUP_MAX = 20
 
+// Same reasoning for the Claude leg, but smaller: SessionStart runs on a hook budget while
+// someone is waiting to type, and unlike Cursor's window_close problem a missed Claude
+// SessionEnd is the exception rather than the rule. Five drains a crash or two without making
+// the start of a session feel like it stalled; `backfill` exists for real volume.
+const CLAUDE_CATCHUP_MAX = 5
+
+// `backfill` is a human sweeping YEARS of local history, not a hook. It still runs in bounded
+// batches so it can be interrupted and resumed rather than becoming one unkillable upload
+// storm — each batch leaves sync-state consistent, so re-running continues where it stopped.
+const CLAUDE_BACKFILL_BATCH = 25
+
 // The public OAuth client this plugin authenticates as (see the credential section below).
 // PUBLIC by design and safe to ship in a distributed CLI: it is an identifier, not a secret
 // (RFC 8252 §8.5), and it grants nothing on its own — every token still requires the user's
@@ -511,13 +522,12 @@ function cursorProjectSlug(workspaceRoot) {
   return workspaceRoot.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
 }
 
-function findCursorCatchupTargets(currentConversationId, workspaceRoot, state) {
-  const slug = cursorProjectSlug(workspaceRoot)
-  if (!slug) return []
-  const root = join(HOME, ".cursor", "projects", slug, "agent-transcripts")
-  if (!existsSync(root)) return []
+// The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
+// this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
+function staleTranscriptTargets(root, { excludeId, state, cap }) {
+  if (!root || !existsSync(root)) return []
   const files = walkFiles(root, (p) => p.endsWith(".jsonl")).filter(
-    (p) => !p.endsWith(`${currentConversationId}.jsonl`),
+    (p) => !excludeId || !p.endsWith(`${excludeId}.jsonl`),
   )
   const candidates = files
     .map((p) => {
@@ -544,7 +554,53 @@ function findCursorCatchupTargets(currentConversationId, workspaceRoot, state) {
   // recently touched. The cap is a runaway guard, not a policy — a workspace with more than
   // this many stale conversations drains over the next few starts.
   candidates.sort((a, b) => a.mtime - b.mtime)
-  return candidates.slice(0, CURSOR_CATCHUP_MAX)
+  return cap ? candidates.slice(0, cap) : candidates
+}
+
+function findCursorCatchupTargets(currentConversationId, workspaceRoot, state) {
+  const slug = cursorProjectSlug(workspaceRoot)
+  if (!slug) return []
+  return staleTranscriptTargets(join(HOME, ".cursor", "projects", slug, "agent-transcripts"), {
+    excludeId: currentConversationId,
+    state,
+    cap: CURSOR_CATCHUP_MAX,
+  })
+}
+
+// Claude Code files transcripts under ~/.claude/projects/<slug>/<sessionId>.jsonl, where the
+// slug is the cwd with "/", "." and "_" all flattened to "-". That last one is not a guess:
+// derived against all 162 project directories on a real machine, where `/` and `.` alone
+// matched only 93 of them — `/Users/x/Projects/re_gent_headless` files under
+// `-Users-x-Projects-re-gent-headless`. Getting it wrong silently finds nothing, which is the
+// same shape as the bug this whole ticket is about, so it is pinned by a test.
+//
+// The flattening is lossy — "a.b", "a_b" and "a/b" all produce the same slug — so this maps
+// cwd → directory and never the reverse. Every consumer here has the cwd in hand.
+function claudeProjectSlug(workspaceRoot) {
+  if (!workspaceRoot) return null
+  return workspaceRoot.replace(/\/+$/, "").replace(/[/._]/g, "-")
+}
+
+// Claude Code's SessionEnd is the ONLY capture point on that leg, so a crash, a SIGKILL, the
+// hook's own timeout — or the plugin sitting disabled for a week — loses the conversation with
+// nothing to notice it. Codex and Cursor both self-heal on their next start; this gives Claude
+// the same net. Scoped to the current workspace's project directory, because that is the one
+// place where the new session's cwd is also the right cwd for the older conversations.
+function findClaudeCatchupTargets(currentSessionId, workspaceRoot, state) {
+  const slug = claudeProjectSlug(workspaceRoot)
+  if (!slug) return []
+  return staleTranscriptTargets(join(HOME, ".claude", "projects", slug), {
+    excludeId: currentSessionId,
+    state,
+    cap: CLAUDE_CATCHUP_MAX,
+  })
+}
+
+// `backfill` sweeps EVERY project directory, not just the current workspace — the whole point
+// is the history a per-workspace drip can never reach. Same staleness rule, no cap here (the
+// caller batches), and no current session to exclude.
+function findClaudeBackfillTargets(state) {
+  return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0 })
 }
 
 // ------------------------------------------------------------------- credential (key or OAuth)
@@ -1109,6 +1165,24 @@ async function cmdUpload(agent, event, payloadFile) {
     return
   }
 
+  if (agent === "claude" && event === "session-start") {
+    // Claude Code's SessionStart payload carries `cwd`; workspaceRootFrom reads Cursor's
+    // `workspace_roots` shape, so it is the fallback here rather than the other way round.
+    const root = typeof payload.cwd === "string" && payload.cwd ? payload.cwd : workspaceRootFrom(payload)
+    const targets = findClaudeCatchupTargets(payload.session_id ?? "", root, loadState())
+    if (!targets.length) {
+      await log("upload: claude session-start — nothing stale in this workspace")
+      return
+    }
+    await log(`upload: claude session-start — ${targets.length} stale session(s) to flush`)
+    for (const t of targets) {
+      // Sequential for the same reason as the Cursor leg: these share the presign/PUT/complete
+      // path and sync-state on disk, and a start hook has no deadline worth racing for.
+      await uploadOne({ agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
+    }
+    return
+  }
+
   // `turn-end` (Cursor's `stop`, fired after every agent turn while the window is still
   // alive) takes the same path as `session-end`: flush THIS conversation. It needs no branch
   // of its own — shouldSkip's debounce plus the content hash already collapse a chatty
@@ -1304,6 +1378,70 @@ function cmdLogout() {
   console.log("bonez session capture: credential removed and capture disabled. Run `login` to set it up again.")
 }
 
+// A deliberate, human-run sweep of local Claude Code history. Deliberately NOT reachable from
+// any hook: it publishes a large volume of past conversation to the org lake in one go, and
+// that is a decision someone makes on purpose, once, not a side effect of opening a terminal.
+//
+// `--dry-run` first is the point of the default output — you should be able to see the size of
+// what you are about to publish before any of it leaves the machine.
+async function cmdBackfill(rest) {
+  const args = rest ?? []
+  const dryRun = args.includes("--dry-run")
+  const limitArg = args.find((a) => a.startsWith("--limit="))
+  const parsedLimit = limitArg ? Number.parseInt(limitArg.slice("--limit=".length), 10) : Number.NaN
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : CLAUDE_BACKFILL_BATCH
+
+  if (disabledByEnv()) {
+    console.error("BONEZ_SESSION_SYNC=0 is set — unset it before running a backfill.")
+    process.exitCode = 1
+    return
+  }
+  const cfg = loadConfig()
+  if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
+    console.error("Session capture is not installed or is disabled. Run `login` (or `install`) first.")
+    process.exitCode = 1
+    return
+  }
+
+  const targets = findClaudeBackfillTargets(loadState())
+  if (!targets.length) {
+    console.log("Nothing to backfill — every Claude Code transcript on this machine is already current.")
+    return
+  }
+
+  const batch = targets.slice(0, limit)
+  console.log(`Claude Code transcripts not yet uploaded at their current content: ${targets.length}`)
+  console.log(`This run would upload ${batch.length} of them (oldest first).`)
+  if (targets.length > batch.length) {
+    console.log(`Re-run to continue; each run picks up where the last one stopped.`)
+  }
+  if (dryRun) {
+    console.log("")
+    console.log("--dry-run: nothing was uploaded. Drop the flag to publish these to your org's lake.")
+    return
+  }
+
+  console.log("")
+  let uploaded = 0
+  for (const [i, t] of batch.entries()) {
+    process.stdout.write(`  [${i + 1}/${batch.length}] ${t.sessionId} … `)
+    try {
+      // Sequential and one-at-a-time on purpose: every upload writes sync-state, so an
+      // interrupt (Ctrl-C, a dropped network) leaves everything already done recorded as done
+      // and the rest simply not started. That is what makes re-running safe.
+      await uploadOne({ agent: "claude", cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
+      uploaded++
+      console.log("ok")
+    } catch (err) {
+      // One unreadable or rejected transcript must not end the sweep — the whole value here is
+      // draining a backlog unattended. sync.log carries the detail.
+      console.log(`failed (${err instanceof Error ? err.message : String(err)})`)
+    }
+  }
+  console.log("")
+  console.log(`Done: ${uploaded}/${batch.length} uploaded. See ${logFilePath()} for per-session detail.`)
+}
+
 function cmdStatus() {
   reportMigration()
   const cfg = loadConfig()
@@ -1405,6 +1543,9 @@ async function main() {
     case "enable":
       cmdEnable()
       return
+    case "backfill":
+      await cmdBackfill(rest)
+      return
     default:
       console.log("bonez-session-sync — capture Claude Code / Codex sessions into bonez")
       console.log("")
@@ -1416,6 +1557,10 @@ async function main() {
       console.log("  bonez-session-sync.mjs status")
       console.log("  bonez-session-sync.mjs disable")
       console.log("  bonez-session-sync.mjs enable")
+      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N]")
+      console.log("                                                                  upload past")
+      console.log("                                                                  Claude Code")
+      console.log("                                                                  history")
       process.exitCode = cmd ? 1 : 0
   }
 }
@@ -1445,7 +1590,12 @@ export {
   migrateLegacyData,
   findCodexCatchupTarget,
   findCursorCatchupTargets,
+  findClaudeCatchupTargets,
+  findClaudeBackfillTargets,
+  staleTranscriptTargets,
   cursorProjectSlug,
+  claudeProjectSlug,
+  cmdBackfill,
   gatewayBaseUrl,
   recordUpload,
   withStateLock,
