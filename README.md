@@ -320,6 +320,25 @@ bonez-session-sync.mjs install bnz_... --global
 | `install <bnz_...key> [--repo <path>]... [--global]` | The headless lane: store a sessions-scoped key (mode 600) and turn capture on. Same scope options. |
 | `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far. Never prints a key or token. |
 | `disable` / `enable` | Turn capture off/on without discarding the credential. |
+| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Oldest first, in bounded batches; re-run to continue. Start with `--dry-run` to see the volume first. |
+
+**Catching up on what was missed.** Capture normally happens at `SessionEnd`. When that never
+fires — a crash, a kill, or the plugin having been disabled for a while — the next session
+started in the same directory flushes what was stranded there, so an ordinary gap heals on its
+own. That per-workspace catch-up is deliberately capped, so it drains a session or two at a
+time rather than stalling the start of your work.
+
+It is not a way to import a year of history. For that, `backfill` sweeps every project
+directory on the machine and uploads everything not already current:
+
+```bash
+bonez-session-sync.mjs backfill --dry-run   # how much would this publish?
+bonez-session-sync.mjs backfill             # publish the first batch
+```
+
+It is a deliberate command and no hook ever triggers it, because it publishes a large volume of
+past conversation to your organization's lake in one go. Each upload is recorded as it lands,
+so interrupting it is safe and re-running continues where it stopped.
 
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
 config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.

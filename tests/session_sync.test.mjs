@@ -1010,6 +1010,258 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
   })
 })
 
+// ------------------------------------------------------------------- Claude catch-up + backfill
+
+describe("Claude SessionStart catch-up (1SI-1102)", () => {
+  // SessionEnd was the ONLY capture point on the Claude leg, so a crash, a kill, the hook's own
+  // timeout — or the plugin sitting disabled for a week — lost the conversation with nothing to
+  // notice it. Codex and Cursor both self-heal on their next start; these pin that Claude now
+  // does too, and that it does so without re-uploading what is already current.
+  function seedProjects(home, slug, ids) {
+    const dir = join(home, ".claude", "projects", slug)
+    mkdirSync(dir, { recursive: true })
+    for (const id of ids) cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(dir, `${id}.jsonl`))
+    return dir
+  }
+
+  test("flushes a session whose SessionEnd never fired, and never the one just starting", async () => {
+    const home = freshDir("claude-catchup")
+    const cwd = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "-tmp-bonez-session-sync-fixture-repo"
+    const dir = seedProjects(home, slug, ["crashed-session", "the-new-one"])
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(join(dir, "crashed-session.jsonl"), past, past)
+
+    const dataDir = freshDir("claude-catchup-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ hook_event_name: "SessionStart", session_id: "the-new-one", cwd }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "claude", "session-start", payloadFile], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: home,
+        USERPROFILE: home,
+        BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+      },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before + 1, "exactly the stranded session should flush")
+    const state = JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+    assert.ok(state["crashed-session"], "the session that never got a SessionEnd must be recovered")
+    assert.ok(!state["the-new-one"], "the session just starting is still being written — leave it alone")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("a session that GREW since its last upload is picked up again", async () => {
+    const home = freshDir("claude-grew")
+    const cwd = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "-tmp-bonez-session-sync-fixture-repo"
+    const dir = seedProjects(home, slug, ["grown"])
+
+    const dataDir = freshDir("claude-grew-data")
+    await install(dataDir, ["--global"])
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({
+        grown: { agent: "claude", messageCount: 2, contentHash: "stale", lastUploadedAt: Date.now() - 3_600_000 },
+      }),
+    )
+    const now = new Date()
+    utimesSync(join(dir, "grown.jsonl"), now, now)
+
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "another", cwd }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "claude", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(
+      gateway.calls.presign.length,
+      before + 1,
+      "keying on 'have we ever uploaded this' would blacklist a growing session forever",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("already-synced sessions are skipped, so a start is a silent no-op once caught up", async () => {
+    const home = freshDir("claude-caughtup")
+    const cwd = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "-tmp-bonez-session-sync-fixture-repo"
+    const dir = seedProjects(home, slug, ["already-done"])
+
+    const dataDir = freshDir("claude-caughtup-data")
+    await install(dataDir, ["--global"])
+    writeFileSync(
+      join(dataDir, "sync-state.json"),
+      JSON.stringify({
+        "already-done": { agent: "claude", messageCount: 4, contentHash: "x", lastUploadedAt: Date.now() + 60_000 },
+      }),
+    )
+    utimesSync(join(dir, "already-done.jsonl"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "fresh", cwd }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "claude", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.presign.length, before, "nothing stale — a start must not re-upload")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the catch-up is capped, so a long backlog drains over several starts", async () => {
+    const home = freshDir("claude-cap")
+    const cwd = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "-tmp-bonez-session-sync-fixture-repo"
+    seedProjects(home, slug, Array.from({ length: 9 }, (_, i) => `stale-${i}`))
+
+    const dataDir = freshDir("claude-cap-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "current", cwd }))
+
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "claude", "session-start", payloadFile], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: home,
+        USERPROFILE: home,
+        BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+      },
+    })
+    assert.equal(res.status, 0)
+    assert.equal(
+      gateway.calls.presign.length - before,
+      5,
+      "CLAUDE_CATCHUP_MAX bounds one start; the rest drain on later starts",
+    )
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the project-directory slug is Claude Code's own naming, not a guess", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    // Derived against all 162 project directories on a real machine. "/" and "." alone matched
+    // only 93 of them — "_" flattens to "-" as well, and missing that finds nothing silently.
+    assert.equal(mod.claudeProjectSlug("/Users/shay/Projects/bonez"), "-Users-shay-Projects-bonez")
+    assert.equal(
+      mod.claudeProjectSlug("/Users/shay/Projects/re_gent_headless"),
+      "-Users-shay-Projects-re-gent-headless",
+      "underscores flatten to dashes too — observed in ~/.claude/projects",
+    )
+    assert.equal(
+      mod.claudeProjectSlug("/Users/shay/Projects/bonez/harness-ui/.claude-worktrees/x"),
+      "-Users-shay-Projects-bonez-harness-ui--claude-worktrees-x",
+      "a dot-directory yields the doubled dash the real tree shows",
+    )
+    assert.equal(mod.claudeProjectSlug("/tmp/repo/"), "-tmp-repo")
+    assert.equal(mod.claudeProjectSlug(""), null)
+    assert.equal(mod.claudeProjectSlug(undefined), null)
+  })
+})
+
+describe("backfill: the accumulated history a per-start drip can never reach", () => {
+  test("sweeps every project directory, not just one workspace", async () => {
+    const home = freshDir("claude-backfill")
+    for (const [slug, id] of [
+      ["-tmp-repo-one", "one-a"],
+      ["-tmp-repo-two", "two-a"],
+      ["-tmp-repo-three", "three-a"],
+    ]) {
+      const dir = join(home, ".claude", "projects", slug)
+      mkdirSync(dir, { recursive: true })
+      cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(dir, `${id}.jsonl`))
+    }
+
+    const dataDir = freshDir("claude-backfill-data")
+    await install(dataDir, ["--global"])
+    const before = gateway.calls.presign.length
+    const res = await runCli(["backfill"], {
+      env: {
+        CLAUDE_PLUGIN_DATA: dataDir,
+        BONEZ_GATEWAY_URL: gateway.url,
+        HOME: home,
+        USERPROFILE: home,
+        BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+      },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gateway.calls.presign.length - before, 3, "all three workspaces' history must be swept")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("--dry-run reports the volume and uploads nothing", async () => {
+    const home = freshDir("claude-backfill-dry")
+    const dir = join(home, ".claude", "projects", "-tmp-repo")
+    mkdirSync(dir, { recursive: true })
+    for (const id of ["a", "b"]) cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(dir, `${id}.jsonl`))
+
+    const dataDir = freshDir("claude-backfill-dry-data")
+    await install(dataDir, ["--global"])
+    const before = gateway.calls.presign.length
+    const res = await runCli(["backfill", "--dry-run"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    assert.match(res.stdout, /2/, "must report how much it is about to publish")
+    assert.equal(gateway.calls.presign.length, before, "--dry-run must not publish anything")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("--limit bounds a run, and re-running continues where it stopped", async () => {
+    const home = freshDir("claude-backfill-resume")
+    const dir = join(home, ".claude", "projects", "-tmp-repo")
+    mkdirSync(dir, { recursive: true })
+    for (const id of ["r1", "r2", "r3"]) cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(dir, `${id}.jsonl`))
+
+    const dataDir = freshDir("claude-backfill-resume-data")
+    await install(dataDir, ["--global"])
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir,
+      BONEZ_GATEWAY_URL: gateway.url,
+      HOME: home,
+      USERPROFILE: home,
+      BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0",
+    }
+
+    const before = gateway.calls.presign.length
+    assert.equal((await runCli(["backfill", "--limit=2"], { env })).status, 0)
+    assert.equal(gateway.calls.presign.length - before, 2, "--limit must bound the batch")
+
+    // The interrupt-safety property: what already uploaded is recorded, so a second run picks
+    // up only the remainder rather than starting over.
+    assert.equal((await runCli(["backfill"], { env })).status, 0)
+    assert.equal(gateway.calls.presign.length - before, 3, "the resumed run uploads only what was left")
+
+    assert.equal((await runCli(["backfill"], { env })).status, 0)
+    assert.equal(gateway.calls.presign.length - before, 3, "a third run has nothing left to do")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("backfill refuses to run when capture is not installed", async () => {
+    const home = freshDir("claude-backfill-noinstall")
+    const dataDir = freshDir("claude-backfill-noinstall-data")
+    const res = await runCli(["backfill"], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 1, "must not silently do nothing — publishing needs a credential")
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
 // ------------------------------------------------------------------- credential store location
 
 describe("credential store: one sign-in shared by all three clients", () => {
