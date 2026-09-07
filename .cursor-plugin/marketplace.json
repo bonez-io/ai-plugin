@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Official bonez plugin for Cursor. The org context lake — knowledge graph, search, rules, and memories — over MCP.",
-    "version": "0.7.0"
+    "version": "0.7.1"
   },
   "plugins": [
     {
       "name": "bonez",
       "source": "./cursor",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "logo": "assets/logo.svg",
       "category": "productivity",
       "license": "MIT",

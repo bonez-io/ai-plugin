@@ -108,7 +108,7 @@ every part is discovered without configuration:
 | MCP server | `cursor/mcp.json` | OAuth by default |
 | Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
 | Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
-| Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `./hooks/gate-write.sh` |
+| Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
 | Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
 
 `cursor/hooks/gate-write.sh` is a byte copy of the root `hooks/gate-write.sh`,
@@ -116,6 +116,17 @@ not a shim to it. A marketplace install copies the plugin directory **on its
 own** — there is no repo behind it — so a hook reaching `../../hooks/` fails to
 exec, and Cursor fails open, which means writes would go through unguarded. CI
 pins the copy and runs the gate from a standalone directory to prove it.
+
+Every hook command is spelled `bash ./hooks/<script>`, never the bare script path.
+On Windows, Cursor hands a bare `.sh` path to the shell, and Windows opens it
+through the Git Bash *file association* — a visible mintty window running
+`bash --login -i <script>`, whose stdin is the terminal rather than Cursor's
+pipe. The gate's `cat` then waits on the keyboard forever, the window never
+closes, and (holding files open inside the plugin directory) blocks every
+later uninstall or update. The `timeout` cannot reach that detached window.
+Naming the interpreter runs the script in-process over stdio on every OS; where
+`bash` is not on PATH the spawn fails and Cursor fails open (no gate, no
+window), which is the right side to fail on.
 
 **The write gate works here** — unlike the Codex leg. Cursor's
 `beforeMCPExecution` genuinely supports `permission: "ask"`, so `memory`/`rules`
