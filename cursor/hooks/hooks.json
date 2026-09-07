@@ -3,19 +3,19 @@
   "hooks": {
     "beforeMCPExecution": [
       {
-        "command": "./hooks/gate-write.sh",
+        "command": "bash ./hooks/gate-write.sh",
         "timeout": 5
       }
     ],
     "sessionEnd": [
       {
-        "command": "./hooks/session-sync.sh session-end",
+        "command": "bash ./hooks/session-sync.sh session-end",
         "timeout": 10
       }
     ],
     "sessionStart": [
       {
-        "command": "./hooks/session-sync.sh session-start",
+        "command": "bash ./hooks/session-sync.sh session-start",
         "timeout": 10
       }
     ]
