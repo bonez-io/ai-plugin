@@ -3,7 +3,8 @@
   "hooks": {
     "beforeMCPExecution": [
       {
-        "command": "./hooks/gate-write.sh"
+        "command": "./hooks/gate-write.sh",
+        "timeout": 5
       }
     ],
     "sessionEnd": [
