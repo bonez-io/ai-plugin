@@ -18,5 +18,14 @@
     "prior-art",
     "blast-radius",
     "mcp"
-  ]
+  ],
+  "userConfig": {
+    "bonez_url": {
+      "type": "string",
+      "title": "Bonez server URL",
+      "description": "Your Bonez server, e.g. https://rainguard.bonez.io (no trailing slash, no /mcp)",
+      "default": "https://gateway.bonez.io",
+      "required": true
+    }
+  }
 }
