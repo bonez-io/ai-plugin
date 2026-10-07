@@ -34,8 +34,8 @@ A Bonez plugin is a TypeScript module whose default export calls `pi.registerToo
 
 ## Installing: be exact about status
 
-- **Today:** the plugin is compiled into Bonez. The user sends Bonez the folder (source today, plus env var names, apt packages and directories to mount).
-- **Planned, in build, not released** (Bonez branch `shay/1si-2286-folder-packages`): the folder from `bun run build:package` is copied to the box and verified against the sha256 from `bin/bonez-package-hash.mjs`. Never say it works today, never promise a date, and do not invent options beyond the steps in the command.
+- **Folder install** (a Bonez computer, or a server on a release with folder plugins): the folder from `bun run build:package` is copied to `/var/lib/bonez/packages/<package name with "/" as "__">/` on the machine that runs the agent, pinned by the sha256 from `bin/bonez-package-hash.mjs` in `BONEZ_PI_PACKAGES_SHA256`, named in `BONEZ_PI_PACKAGES`, and the runner is restarted (`sudo bonez-computer restart` on a computer). A wrong or missing sha256 makes the runner refuse the plugin and log the hash it saw. Do not invent options beyond the steps in the command.
+- **Older servers:** the plugin is compiled into Bonez. The user sends Bonez the source folder, plus env var names, apt packages and directories to mount.
 - `BONEZ_PI_PACKAGES` is the one switch. An agent spec's `metadata.packages` does not reach the harness.
 
 ## Files

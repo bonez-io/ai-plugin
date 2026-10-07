@@ -73,16 +73,16 @@ Directories to mount:  <paths, or none>
 then the install instruction, exactly with these statuses:
 
 ```
-TODAY: send Bonez the folder. The plugin is compiled into Bonez today from its TypeScript source,
-so send the source folder <abs path>/<name>/ (not node_modules, not out/) with the env var names,
-apt packages and directories above.
+FOLDER INSTALL (a Bonez computer, or a server on a release with folder plugins): an operator
+  1. copies the folder out/<name>/ to /var/lib/bonez/packages/<package name with "/" replaced by "__">/ on the machine that runs the agent,
+  2. adds <package name> to BONEZ_PI_PACKAGES and <package name>=<sha256> to BONEZ_PI_PACKAGES_SHA256 in the runner's env file,
+  3. adds every env var above to BONEZ_RUNNER_CHILD_ENV_PASSTHROUGH,
+  4. restarts the runner (sudo bonez-computer restart on a computer).
+A wrong or missing sha256 makes the runner refuse the plugin and log the hash it saw.
 
-PLANNED, IN BUILD (Bonez branch shay/1si-2286-folder-packages), NOT YET RELEASED: an admin
-  1. copies the folder out/<name>/ to /var/lib/bonez/packages/<package name with "/" replaced by "__">/ on the box,
-  2. adds <package name>=<sha256> to BONEZ_PI_PACKAGES_SHA256,
-  3. adds <package name> to BONEZ_PI_PACKAGES,
-  4. forwards every env var above through BONEZ_RUNNER_CHILD_ENV_PASSTHROUGH,
-  5. restarts the runner.
+OLDER SERVERS: if the server predates folder plugins, send Bonez the source folder
+<abs path>/<name>/ (not node_modules, not out/) with the env var names, apt packages and
+directories above. Bonez compiles it in from the TypeScript source.
 ```
 
 End with these notes, short:
