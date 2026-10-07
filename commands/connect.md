@@ -15,7 +15,7 @@ The plugin asks for the **Bonez server URL** (option `bonez_url`) when it is ena
 To see or change it later: open `/config` and edit the Bonez plugin's `bonez_url` row, or from a shell:
 
 ```bash
-echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez --values-stdin
+echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez@bonez --values-stdin
 ```
 
 Then restart Claude Code so the server connects to the new address. The server also serves its own copy-paste install page at `<server URL>/mcp/install`.

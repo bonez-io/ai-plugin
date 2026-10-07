@@ -23,7 +23,7 @@ Claude Code. Five steps:
 3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://rainguard.bonez.io`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
 
    ```bash
-   echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez --values-stdin
+   echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez@bonez --values-stdin
    ```
 
    then restart Claude Code.
