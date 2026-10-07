@@ -265,7 +265,7 @@ MCP-scoped key never reaches the import routes. Mint the smallest one that cover
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 
-**`vendor_operation` ignores the key's scope today** (Linear 1SI-2292): the server checks scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake until that is fixed server-side. See [Vendor operations](#vendor-operations).
+**On servers released before Linear 1SI-2292, `vendor_operation` ignores the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse a vendor write without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
 ## The tools
 
@@ -280,7 +280,7 @@ One loop: **`graph_search` → `graph_schema` → `graph_query` → `graph_fetch
 | `graph_history` | Who changed what in the graph, and when: one node's history, one commit's diff, or the change feed. |
 | `graph_write` | Typed memory operations — `remember`, `revise`, `claim`, `link`, `unlink`, `close` (and `note`); no delete. Needs the `memory` scope. Prompt-gated by this plugin. |
 | `rules` | `list`/`get` the org's standing rules and slash commands freely; `save`/`update`/`delete` change binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
-| `tool_search`, `vendor_operation`, `vendor_operation_status` | The tool lake: find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) an operation on the vendor systems your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. `vendor_operation` acts as the signed-in user, reads and writes alike. **Not gated by this plugin, and its key scope is not checked by the server (1SI-2292)**: see [Vendor operations](#vendor-operations). |
+| `tool_search`, `vendor_operation`, `vendor_operation_status` | The tool lake: find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) an operation on the vendor systems your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. `vendor_operation` acts as the signed-in user, reads and writes alike. **Not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, `machine_attach`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
@@ -301,9 +301,9 @@ gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headles
 
 - **No write gate.** The write gate above does not cover `vendor_operation`, on any leg. The hook sees only the call (`operation_id`, `input`, `connection_ref`). Whether an operation reads or writes is the operation's `side_effect`, which the server returns in `tool_search` results and keeps in its catalog, not in the call. Gating on it would mean shipping a copy of the server's catalog (which differs by server version) or guessing from operation names, and a wrong guess is silence on a real write, so the plugin ships neither. `tests/test_gate.sh` pins the boundary.
 - **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any operation whose `side_effect` is not `read`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_operation` off your Claude Code allow-list, so its default permission mode asks on every call (reads too), or use the commented `approval_mode = "approve"` stanza in [`codex/config.toml`](codex/config.toml).
-- **The server does not check the key's scope for `vendor_operation`** (Linear 1SI-2292, see [API key scopes](#api-key-scopes)). Mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
+- **Servers before Linear 1SI-2292 do not check the key's scope for `vendor_operation`** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
 
-**Not served: agents, runs and sessions.** The lake's catalog is vendor operations only. Bonez agents, their runs and their sessions are not operations in it, and the chat agent's own `agent_list`/`agent_get` tools call the gateway's HTTP API, which an API key or MCP sign-in cannot reach (`/mcp` only). So this plugin cannot yet list the org's agents or read a run; MCP tools for that are planned (Linear 1SI-2290). The skill tells the agent to say so, not to hunt for an operation.
+**Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them as read-only operations in the same lake (`bonez.agent.list.v1`, `bonez.agent.read.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`), and `/bonez:agents` lists them. On an older server `tool_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
 ## Skills
 
@@ -318,9 +318,9 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
-- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and that agents, runs and sessions are not served yet.
+- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
 
 The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
@@ -473,7 +473,7 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
 .mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
 skills/           10 skills
-commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:new-plugin
+commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
