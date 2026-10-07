@@ -1,72 +1,78 @@
-# Working with bonez
+# Working with Bonez
 
-This org is connected to bonez — a knowledge graph over its repos, tickets,
-PRs, docs, conversations, and people, served over MCP as the `bonez` server
-(`search`, `schema`, `query`, `fetch`, `context`, `memory`, `rules`).
+This org is connected to Bonez — a knowledge graph over its repos, tickets,
+PRs, docs, conversations, and people, served over MCP as the `bonez` server.
+The tools: `graph_schema`, `graph_search`, `graph_query`, `graph_fetch`,
+`graph_history`, `graph_write`, `rules`, plus `tool_search` /
+`vendor_operation` / `vendor_operation_status` for the org's vendor systems.
 
 ## Start of task
 
-Call `context` once at the start of non-trivial work (`{"scope": "<repo_id>"}`
-for repo-scoped work, omitted for org-wide). It mounts the same
-identity/knowledge/rules/memories bands bonez's own agents boot with — read
-before guessing, and before a call an org rule may already settle.
+Orient once at the start of non-trivial work: `rules` with `{"op": "list"}`
+(add `"repo_id"` for repo-scoped work) for the standing rules — binding, they
+outrank generic defaults — and `graph_schema` with no arguments for a map of
+what the graph holds. There is no "mount everything" tool and no tool that
+lists memories: memories hang off the nodes they are about.
 
 ## Before building or deciding
 
-Search before you build: `search` the question as intent, entities left broad
-(`knowledge`, `memory`, `ticket`, `pr`, `doc`, not just `symbol`) — omit
-`repos` to search the whole org, since prior art usually lives outside the
-repo you're in. `fetch` the top 2-3 handles before quoting anything; snippets
-are bait, the fetched record carries provenance and temporal status and wins
-on disagreement. `[INCOMPLETE]` markers or an unavailable-arm notice mean a
-coverage gap, not absence — say so, don't present a partial answer as
-complete. "No results" proves nothing was indexed under that phrasing, not
-that the org never did it.
+Search before you build: `graph_search` the question as `text`, leaving
+`types` off (the allowed list is closed and per-graph; take names from
+`graph_schema`). Each result is a `~hex` handle with its attached-memory
+count. `graph_fetch` the top 2-3 before quoting anything: the fetched node
+carries provenance, validity and its attached memories (a memory whose code
+has changed is marked), and wins over the snippet on disagreement. "No nodes
+matched" proves nothing was indexed under that phrasing, not that the org
+never did it; a search that says it was cut off is not "nothing matched".
 
 ## Querying the graph
 
-Loop: `search` for a seed → `schema` when the shape is unknown → `query`
-(BGQ) to traverse → `fetch` to dereference. **Never guess node types or edge
-names** — an invented one doesn't error, it returns empty, which looks
-exactly like "no results." Call `schema` first when unsure.
+Loop: `graph_search` for a seed -> `graph_schema` when the shape is unknown ->
+`graph_query` to traverse -> `graph_fetch` to dereference. **Never guess type,
+field, edge or query names** — call `graph_schema` first (`find=` returns
+matching stored queries to run by `name=` + `params=`). A hand-written query is
+a complete BGQ definition and the name takes parentheses always:
+`query n($p: String) { match { ... } return { ... } limit 50 }`. Memories
+cannot be queried (`scope_refused`). An empty result is labelled "valid
+query, no rows"; a failure is an error — never read either as proof that
+nothing exists.
 
-For change-safety questions (what breaks, who calls this, is it safe to
-change), use `query` recipes callers → blast_radius → tests_for. Direct
+For change-safety questions use the stored code-navigation queries
+(`callers_of_symbol`, `blast_radius_calls`, `tests_for_symbol`,
+`importers_of_file`; confirm names with `graph_schema(find=...)`). Direct
 callers are not the blast radius; report which depth you measured. No tests
-found means untested, not safe — say "no indexed tests cover this," never
-"safe." Omit `repos` for anything exported from a shared library —
-out-of-repo consumers are exactly what local grep can't see.
+found means untested, not safe. Call edges are candidates, not proof.
 
 ## Citing results
 
-Every result carries a `~hex` handle (graph citation token, valid as tool
-input, dead text to a human) and a vendor URL (the link for humans). Cite the
-vendor URL to people; keep the handle for follow-up `fetch` calls. **Never
-fabricate a handle** — only reuse one that appeared verbatim in a tool result
-this session.
+Every result carries a `~hex` handle (a graph citation token: valid tool
+input, dead text to a person). **Never fabricate a handle** — only reuse one
+that appeared verbatim in a tool result this session.
 
-## Memory (`memory` tool)
+## Memory (`graph_write`)
 
-`recall` freely. `save`/`update`/`delete` write durable facts into every
-future session in the org — do it the moment you learn something durable
-(a correction, a convention, a non-obvious gotcha), not as cleanup. Pick
-`layer: personal` (about the user) or `org`, and `temporality: static` or
-`temporal`. Never store secrets/credentials or sensitive personal data.
-Don't store one-off task details or anything re-derivable from code — store
-the *why*, not the raw fact. `update` supersedes; never duplicate.
+`graph_write` is the only way to write, with typed ops: `remember`, `revise`,
+`claim`, `link`, `unlink`, `close`. A `remember` needs `content`,
+`description`, `kind`, `basis`, `reason` and at least one `about` anchor
+(a handle that resolves to a real node). Send it once with `"preflight": true`
+first — it writes nothing and returns similar memories, so you revise instead
+of duplicating. Default scope is personal; `org` is visible to every member, so
+confirm first. New memories start `pending` and are not visible on their anchor
+until promoted — read one back with `graph_fetch(ref="m:...")`; do not re-send.
+Writes need a key with the `read+memory` scope. Never store secrets/credentials
+or sensitive personal data; store the *why*, not facts recoverable from code.
 
 ## Rules (`rules` tool)
 
-`list`/`get` freely — these are the org's standing, binding instructions;
-follow them the way you follow this file, and they outrank generic defaults.
-`save`/`update`/`delete` change guidance mounted into every session for the
-whole org — write conservatively, confirm with the user first, and expect
-this to need a `read+write` key.
+`list`/`get` freely. `save`/`update`/`delete` change guidance mounted into every
+session for the whole org — write conservatively, confirm with the user first,
+and expect this to need a `read+write` key.
 
 **No write confirmation gate in this Codex setup.** Claude Code ships a
 `PreToolUse` hook here that pauses for interactive approval before any
-`memory`/`rules` write. Codex has no equivalent: a `PreToolUse` hook can only
-unconditionally allow or deny a call, not pause for a yes/no prompt (`ask` is
-parsed but unimplemented — see the repo README's Codex section). Treat every
-`rules` write as already-approved before you make it, and prefer proposing
-the change in chat over calling `save`/`update`/`delete` unprompted.
+`graph_write` call and any `rules` write. Codex has no equivalent: a
+`PreToolUse` hook can only unconditionally allow or deny a call, not pause for
+a yes/no prompt (`ask` is parsed but unimplemented — see the repo README's
+Codex section). Treat every `graph_write` and `rules` write as already-approved
+before you make it, and prefer proposing the change in chat over writing
+unprompted.

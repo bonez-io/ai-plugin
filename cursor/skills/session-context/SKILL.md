@@ -1,35 +1,41 @@
 ---
 name: session-context
-description: Mount the org's context at the start of work. Use when starting a session or a new task in a bonez-connected org, when you need the org brief, standing rules, or team memories, when unsure which conventions apply, or before making a call that an org rule may already settle.
+description: Orient yourself in the org's Bonez graph at the start of work. Use when starting a session or a new task in a Bonez-connected org, when you need the org's standing rules or a map of what the graph holds, when unsure which conventions apply, or before a call an org rule may already settle.
 ---
 
 # Session context
 
-Call `bonez:context` at the START of a task — not mid-task after you have already guessed. It returns the same mount the org's own first-party agents boot with, so you begin with the org's brain instead of reconstructing it.
+Bonez has no "mount everything" tool. You orient with two cheap reads at the START of a task — not mid-task after you have already guessed.
+
+## 1. The standing rules — `rules`
 
 ```json
-{"scope": "harness-ui", "include": ["identity", "knowledge", "rules", "memories"]}
+{"op": "list"}
 ```
 
-- `scope` — a repo id for repo-scoped work; omit it for the org-wide mount.
-- `include` — defaults to everything; narrow it only when you know exactly which band you need.
+Add `"repo_id": "<repo>"` for repo-scoped work. The answer is the org's mounted rules in full, a count of narrower rules pinned below repo scope (counted, not listed), and the org's slash commands. `{"op": "get", "urn": "<urn from the list>"}` expands one rule or command to its full body.
 
-## What the bands mean
+Rules are binding. Follow them the way you follow your agent instructions file (CLAUDE.md / AGENTS.md): they encode how THIS org works and outrank your generic defaults.
 
-- **identity** — who the caller is in the graph: their user node, teams, and footprint. Ground any "me"/"my" question here instead of guessing from git config.
-- **knowledge** — distilled org and repo knowledge: decisions, gotchas, architecture notes. This is curated signal, not raw search results.
-- **rules** — the org's standing instructions (repo rules, review rules, commands). Follow them the way you follow your agent instructions file (CLAUDE.md / AGENTS.md): they encode how THIS org works and outrank your generic defaults.
-- **memories** — durable facts the org's agents have accumulated, personal and org layer, pre-filtered to the same set bonez's own agents mount. Treat them as established context, not hypotheses.
+## 2. The map — `graph_schema` with no arguments
+
+```json
+{}
+```
+
+The overview: node and edge counts, the largest types, which types you may write, and the query-language gaps. Read it once so you stop guessing at type names. For one type use `{"type": "<Type>"}`; to find a type by what it is, `{"find": "<word or phrase>"}`; for a chapter, `{"guide": "queries"}` (also `versioning`, `search`, `writing`, `memories`).
+
+Then, for the task itself, go to `graph_search` (see `finding-prior-art`).
 
 ## Judgment
 
-- `context` is a mount, not a search. For a specific question, use `bonez:search`; for a relationship, `bonez:query`. Calling `context` repeatedly to "look things up" wastes tokens on re-mounting.
-- Once per task is the default cadence. Re-call only when the scope changes (you move to a different repo) or the session is long enough that staleness matters.
-- A band returned with an unavailable marker (e.g. `[bonez] rules unavailable`) is an outage, not an empty org. Say the band was unavailable — never conclude "this org has no rules".
-- An empty `memories` band in a young org is normal. Don't pad it by treating search results as memories.
+- **A tool error is not an empty org.** A failed call returns an error with the server's code and detail (for example `memory_scope_required`, `scope_refused`). Report it as an error. Only a `rules` list that says no rules or commands are defined means none are defined for that scope.
+- **Memories are not mounted.** There is no tool that lists them. They hang off the nodes they are about: `graph_search` shows a memory count per result and `graph_fetch` lists the attached memories. See `finding-prior-art`.
+- **Once per task is the cadence.** Re-run `rules` when you move to a different repo; do not re-run the overview to "look things up" — that is what `graph_search` and `graph_query` are for.
+- **Narrower rules exist that `list` only counts.** If the count is non-zero and you are about to change something specific, say so rather than assuming you have seen every rule.
 
 ## Hand-offs
 
-- About to review code → `reviewing-with-org-rules` (rules band, applied).
+- About to review code → `reviewing-with-org-rules`.
 - Need prior work on a topic → `finding-prior-art`.
 - Learned something durable during the task → `remembering`.

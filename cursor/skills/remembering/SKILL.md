@@ -1,48 +1,78 @@
 ---
 name: remembering
-description: Save durable facts into the org's memory via bonez:memory. Use when the user says "remember", "from now on", "always", or "never", when you learn a durable preference, convention, decision, or correction, when you hit a non-obvious gotcha worth keeping, or when deciding whether something belongs in long-term memory.
+description: Save durable facts into the org's memory with graph_write. Use when the user says "remember", "from now on", "always", or "never", when you learn a durable preference, convention, decision, or correction, when you hit a non-obvious gotcha worth keeping, or when deciding whether something belongs in long-term memory.
 ---
 
 # Remembering
 
-Facts saved through `bonez:memory` are mounted into the context of FUTURE sessions — yours and every other agent's in this org, in any harness. A good memory is one that will still be true, useful, and understandable next week with none of this conversation's context.
+Memories written through `graph_write` live in the org's graph, anchored to the nodes they are about, and surface in FUTURE sessions — yours and every other agent's in this org, in any harness. A good memory is one that will still be true, useful, and understandable next week with none of this conversation's context.
 
 Saving is a PRIMARY action, not end-of-task cleanup. The moment you learn something durable, save it right then, while you can still phrase it well. Under-saving is the common failure: a fact you don't store is a mistake the whole org repeats.
 
+`graph_write` is the only way to write. It takes typed operations — `remember`, `revise`, `claim`, `link`, `unlink`, `close` (and `note`, see below). There is no delete and no free-form mutation. The plugin gates the tool behind a permission prompt on every call, including `preflight` and `dry_run`, so expect the harness to ask — that is the gate working, not an error. Writes need a key or sign-in with the `memory` scope; a read-only API key gets `memory_scope_required`, and an OAuth token without it is answered with an insufficient-scope challenge so the client can re-authorize.
+
+## The shape of a `remember`
+
 ```json
-{"op": "save", "content": "POC repos push straight to main, not via a PR.", "layer": "org", "temporality": "static"}
+{
+  "op": "remember",
+  "content": "The deploy script lives in infra/, not in the app repo.",
+  "description": "Where the deploy script lives",
+  "kind": "convention",
+  "basis": "stated",
+  "reason": "The user corrected my search path",
+  "about": ["~a1b2c3d4"]
+}
 ```
 
-`recall` is free — use it liberally. `save`/`update`/`delete` are writes; the plugin gates them behind a permission prompt, so expect the harness to ask — that is the gate working, not an error.
+- `content` — the fact itself. One or two sentences that stand ALONE; resolve relative dates to absolute.
+- `description` — one line, used wherever the memory is listed.
+- `kind` — `preference`, `convention`, `decision`, `gotcha`, `procedure`, `context`, `claim` or `note`: what sort of memory this is.
+- `basis` — `stated` (a person said it), `observed` (seen in code or data) or `inferred`.
+- `reason` — required on EVERY op, 200 characters at most. Why this is worth keeping.
+- `about` — at least one anchor that resolves to a real node: a `~hex` handle from `graph_search`/`graph_fetch`, a node key, or a URL. Anchor it to the node that actually describes the topic. If no relevant node resolves, say the note cannot be grounded yet instead of attaching an unrelated search result. An unresolvable anchor is refused with `anchor_unresolved`; never invent a handle.
+- `scope` — `personal` (the default: only its owner sees it) or `org` (every member sees it). Choose `org` deliberately and confirm with the user first.
+- `expiry` — typed clauses only, required for `kind: "context"` (a temporary status). Examples: `event:pr_merged(acme/payments-api#47)`, `event:ticket_done(ENG-102)`, `until:2026-12-31T00:00:00Z`, `idle:30d`. Free text is refused because it could never fire.
+
+## Before you save: preflight
+
+Duplicates are worse than nothing. Send the same `remember` with `"preflight": true` first: it writes NOTHING and returns the similar memories already in scope. Then choose — create the new one, `revise` the one that is already there, or do nothing. A successful `remember` returns the same list.
+
+## Changing and retiring
+
+- **revise** — a fact changed. `{"op": "revise", "memory": "m:…", "content": "<the whole new fact>", "description": "…", "basis": "stated", "reason": "…", "if_rev": <the revision you read>}`. A revision re-sends the WHOLE fact, inherits the memory's kind and anchors, and `if_rev` makes the edit fail instead of overwriting a concurrent one.
+- **close** — forget it, with a reason: `{"op": "close", "memory": "m:…", "reason": "…"}`. Nothing is ever hard-deleted.
+- **claim** — an assertion about the graph itself. When you believe an imported fact or relation is wrong, write a `claim` about it; imported records cannot be edited.
+- **link / unlink** — connect or detach one of YOUR memories to another real node by a typed edge (`memory`, `to`, `edge`); `graph_schema(guide="memories")` names the edges.
+
+The `m:…` id comes from the write's own result, from a `preflight`'s similar list, or from the attached-memories list on `graph_fetch`.
+
+## After you save: new memories start `pending`
+
+A new memory is written in the `pending` state and becomes `active` only once the memory worker promotes it. `remember` and `revise` ask for that promotion right away (best effort); a `claim`, or a write whose nudge failed, waits for the scheduled pass — up to an hour. Until then the memory does NOT show in `graph_search` memory counts or in the memories attached to its anchor. That is not a failed write: read it back with `graph_fetch(ref="m:…")`, which returns it in any state you may see, and cite the handle the write returned. Do not re-send it. A retried `remember` is a duplicate, not a no-op, unless you pinned `if_commit`.
+
+There is no tool that lists memories, and a query that names the memory plane is refused. To see what already exists, `graph_search` the node it would be anchored to and read the attached memories on `graph_fetch`.
 
 ## WHEN to remember
 
 - The user tells you to. "Remember that…", "from now on…", "always/never…" is an explicit, non-negotiable save.
-- A durable USER fact (`layer: personal`): who they are, how they want you to work, a standing preference.
+- A durable USER fact (`kind: preference`, personal scope): who they are, how they want you to work, a standing preference.
 - FEEDBACK — a correction or confirmed-good approach. Save the correction AND the reason, so future sessions apply the principle, not just the instance.
-- A durable ORG fact (`layer: org`): a convention, process, rule, or decision that applies beyond this task.
-- A REFERENCE the user relies on repeatedly — dashboard, ticket system, doc, channel — and what it's for.
+- A durable ORG fact (`convention`, `decision`, `procedure`, `gotcha`): applies beyond this task. Org scope only after the user agrees.
+- A temporary status worth carrying (`kind: context`) — with an `expiry` that will actually fire.
 
 ## WHEN NOT
 
 - One-off details that only matter to the task in front of you.
-- Anything recoverable from the code or the graph. Memory is for what is NOT re-derivable — if asked to remember something recoverable, save the non-obvious part (the why, the gotcha) instead of the raw fact.
-- How a specific symbol behaves — that is knowledge attached to code, not a memory.
-
-If your only hesitation is durability, save it as `temporality: temporal` rather than dropping it — temporal memories are cheap to supersede, and a slightly-stale memory beats a lost one.
+- Anything recoverable from the code or the graph. Memory is for what is NOT re-derivable — if asked to remember something recoverable, save the non-obvious part (the why, the gotcha).
+- `note` and `scope: "session"`. They are session scratch, which needs a verified interactive session; this connection has none, so `scope: "session"` is refused and a `note` without a scope is stored as a personal memory, not as disposable scratch. Use `remember`.
 
 ## NEVER STORE (hard rules)
 
 - Secrets or credentials of ANY kind — passwords, API keys, tokens, connection strings, `.env` values — even if the user pastes one into chat. They belong in a secret store, never in memory.
 - Sensitive personal data (health, ethnicity, religion, orientation, politics, precise location, financial account numbers) UNLESS the user explicitly and specifically asks.
 
-## How to write a good one
-
-- One or two sentences that stand ALONE. "The deploy script lives in infra/, not the app repo" — never "it's in the other one". Resolve relative dates to absolute.
-- Pick the layer: `personal` = about the user · `org` = about the organization.
-- Pick temporality: `static` = always true · `temporal` = can change later (superseded, not duplicated).
-
 ## Before you save
 
-- Sensitive, or contradicts a memory already in your context? Confirm with the user first.
-- Already mounted? Don't re-save. Fact changed? `{"op": "update", "key": "...", "content": "..."}` (the `key` from its `save`/`recall` result) to replace it in place — never pile up duplicates. `update` re-sends the WHOLE fact, not a diff: pass every field you want kept, not just the one that changed. Unsure whether it exists: `{"op": "recall", "query": "deploy conventions"}` first.
+- Sensitive, or contradicts something you already read? Confirm with the user first.
+- Writes are rate-limited (a per-session and a per-caller budget; `quota_exceeded`). Consolidate instead of saving ten fragments.
