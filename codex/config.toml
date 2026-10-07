@@ -9,7 +9,7 @@
 # section for what's confirmed vs assumed.
 
 # The URL below is Bonez's own cloud. For your own Bonez server (for example
-# https://rainguard.bonez.io), replace it with `https://<your server>/mcp`.
+# https://bonez.example.com), replace it with `https://<your server>/mcp`.
 [mcp_servers.bonez]
 url = "https://gateway.bonez.io/mcp"
 

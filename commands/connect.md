@@ -6,7 +6,7 @@ argument-hint: [server URL]
 
 # /bonez:connect
 
-Walk the user through connecting to THEIR Bonez server (for example `https://rainguard.bonez.io`) and authenticating. Explain; do not guess. Never ask the user to paste an API key into this chat — the key goes into a shell command they run themselves.
+Walk the user through connecting to THEIR Bonez server (for example `https://bonez.example.com`) and authenticating. Explain; do not guess. Never ask the user to paste an API key into this chat — the key goes into a shell command they run themselves.
 
 ## 1. Point the plugin at the server
 
@@ -15,7 +15,7 @@ The plugin asks for the **Bonez server URL** (option `bonez_url`) when it is ena
 To see or change it later: open `/config` and edit the Bonez plugin's `bonez_url` row, or from a shell:
 
 ```bash
-echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez@bonez --values-stdin
+echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
 ```
 
 Then restart Claude Code so the server connects to the new address. The server also serves its own copy-paste install page at `<server URL>/mcp/install`.
@@ -27,7 +27,7 @@ Then restart Claude Code so the server connects to the new address. The server a
 **B. An API key minted by a Bonez admin** — for a headless box, CI, or a server without OAuth. The key's scope decides what the agent can do: `read` reads everything; `read+memory` also lets it save memories with `graph_write`; `read+write` also lets it change the org's rules. Ask the admin for the smallest that covers the work, then run this yourself in a shell, with the server's URL:
 
 ```bash
-claude mcp add --transport http bonez https://rainguard.bonez.io/mcp --header "Authorization: Bearer <key>"
+claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
 ```
 
 ## 3. Why you may see two Bonez servers

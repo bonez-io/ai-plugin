@@ -476,7 +476,7 @@ cursor_run_case "cursor: bonez graph_search is ignored" \
     "$(cursor_call graph_search remember)" silent
 
 cursor_run_case "cursor: graph_write identified by url when mcp_server_name is absent" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"graph_write","tool_input":"{\"op\":\"claim\"}","url":"https://rainguard.bonez.io/mcp"}' \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"graph_write","tool_input":"{\"op\":\"claim\"}","url":"https://bonez.example.com/mcp"}' \
     prompt graph_write:claim
 
 cursor_run_case "cursor: flattened graph_write tool name self-identifies" \

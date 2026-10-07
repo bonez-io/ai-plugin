@@ -2,7 +2,7 @@
 
 The official [bonez](https://bonez.io) plugin for AI coding tools — your organization's **context graph** delivered into whatever coding agent you already use, over MCP.
 
-Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example `https://rainguard.bonez.io`).
+Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example `https://bonez.example.com`).
 
 ## Install for your own Bonez server
 
@@ -20,10 +20,10 @@ Claude Code. Five steps:
    claude plugin install bonez@bonez
    ```
 
-3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://rainguard.bonez.io`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
+3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://bonez.example.com`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
 
    ```bash
-   echo '{"bonez_url":"https://rainguard.bonez.io"}' | claude plugin configure bonez@bonez --values-stdin
+   echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
    ```
 
    then restart Claude Code.
@@ -34,7 +34,7 @@ Claude Code. Five steps:
    - **An API key** minted by an admin of your server (no browser, or a server without OAuth). Run, with your server's URL:
 
      ```bash
-     claude mcp add --transport http bonez https://rainguard.bonez.io/mcp --header "Authorization: Bearer <key>"
+     claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
      ```
 
    The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured, so the plugin's own server can only sign in with OAuth. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; per Claude Code's MCP docs a plugin server pointing at the same endpoint as one you added yourself counts as a duplicate, so keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains all of this in the session.

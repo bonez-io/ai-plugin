@@ -1273,14 +1273,14 @@ describe("login / install refuse a gateway Bonez does not operate", () => {
   const guarded = (extra) => ({ BONEZ_OAUTH_CLIENT_ID: "", ...extra })
 
   for (const [label, env] of [
-    ["BONEZ_GATEWAY_URL", { BONEZ_GATEWAY_URL: "https://rainguard.bonez.io" }],
-    ["BONEZ_MCP_URL", { BONEZ_MCP_URL: "https://rainguard.bonez.io/mcp" }],
+    ["BONEZ_GATEWAY_URL", { BONEZ_GATEWAY_URL: "https://bonez.example.com" }],
+    ["BONEZ_MCP_URL", { BONEZ_MCP_URL: "https://bonez.example.com/mcp" }],
   ]) {
     test(`install refuses a customer box set via ${label}, and writes nothing`, async () => {
       const dataDir = freshDir("guard-install")
       const res = await runCli(["install", TEST_KEY, "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, ...env }) })
       assert.equal(res.status, 1)
-      assert.match(res.stderr, /refusing `install`.*rainguard\.bonez\.io/s)
+      assert.match(res.stderr, /refusing `install`.*bonez\.example\.com/s)
       assert.equal(existsSync(join(dataDir, "config.json")), false)
       rmSync(dataDir, { recursive: true, force: true })
     })
@@ -1289,7 +1289,7 @@ describe("login / install refuse a gateway Bonez does not operate", () => {
       const dataDir = freshDir("guard-login")
       const res = await runCli(["login", "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, ...env }) })
       assert.equal(res.status, 1)
-      assert.match(res.stderr, /refusing `login`.*rainguard\.bonez\.io/s)
+      assert.match(res.stderr, /refusing `login`.*bonez\.example\.com/s)
       assert.doesNotMatch(res.stderr, /install <bnz_/, "must refuse on the host, not fall through to the missing-client path")
       assert.equal(existsSync(join(dataDir, "config.json")), false)
       rmSync(dataDir, { recursive: true, force: true })
