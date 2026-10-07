@@ -34,16 +34,22 @@ url = "https://gateway.bonez.io/mcp"
 # inside config.toml the way the Claude Code leg's .mcp.json does.
 #   url = "https://qa.gateway.bonez.io/mcp"
 
-# --- Optional: coarse write friction on graph_write/rules (see README) ---
+# --- Optional: coarse write friction on graph_write/rules/vendor_operation (see README) ---
 # Codex has no per-argument write gate (no equivalent of the Claude Code
 # PreToolUse "ask" hook — see README). The closest native approximation
 # prompts for EVERY call to a tool — every graph_write op is a write, but
-# `rules` also prompts for harmless `list`/`get` reads:
+# `rules` also prompts for harmless `list`/`get` reads, and `vendor_operation`
+# (the tool lake: reads AND writes on the org's vendors, as you) prompts for
+# every operation. No harness's plugin gate covers `vendor_operation`, and the
+# server does not check the key's scope for it, so this is the only hard stop:
 #
 # [mcp_servers.bonez.tools.graph_write]
 # approval_mode = "approve"
 #
 # [mcp_servers.bonez.tools.rules]
+# approval_mode = "approve"
+#
+# [mcp_servers.bonez.tools.vendor_operation]
 # approval_mode = "approve"
 
 # --- Optional: session capture (off until you run `login` — see README) ---
