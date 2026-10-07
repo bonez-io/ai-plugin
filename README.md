@@ -76,7 +76,7 @@ Guidance ports:
   always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 8 skills, ported ~verbatim,
+- [`codex/skills/`](codex/skills/) — the same 9 skills, ported ~verbatim,
   because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
@@ -103,7 +103,7 @@ the Claude Code gate.**
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 8 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
+install brings the MCP server, the 9 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
 Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
@@ -302,8 +302,9 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **citing-bonez-sources** — handles; never fabricate one; staleness and history.
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
+- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>` and `/bonez:connect` on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
 
 The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
@@ -455,8 +456,8 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
 .mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
-skills/           8 skills
-commands/         /bonez:context, /bonez:search, /bonez:connect
+skills/           9 skills
+commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
