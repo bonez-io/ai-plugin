@@ -296,6 +296,29 @@ run_case "the read tools are ignored even if their input mentions a write op" \
     '{"tool_name":"mcp__bonez__graph_query","tool_input":{"query":"x","params":{"op":"remember"}}}' \
     silent
 
+# --- vendor_operation is deliberately NOT gated ---
+#
+# The call carries only operation_id / input / connection_ref. Whether an operation
+# writes (`side_effect`) lives in the server's catalog and in tool_search results,
+# never in the call this hook sees, so the gate cannot tell a read from a write
+# without shipping its own catalog copy or guessing from operation names, and a wrong
+# guess is silence on a real write. The README ("Vendor operations") and the
+# using-the-tool-lake skill say so and make the agent ask the user in words instead.
+# These cases pin that boundary so a half-gate cannot appear unnoticed: if the call
+# ever carries read/write metadata and the gate is extended, flip them and the README.
+
+run_case "vendor_operation is not gated: a write operation is silent" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_operation","tool_input":{"operation_id":"linear.issue.create.v1","input":{"title":"x"}}}' \
+    silent
+
+run_case "tool_search is not gated either" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__tool_search","tool_input":{"query":"issue create","vendor":"linear"}}' \
+    silent
+
+cursor_run_case "cursor: vendor_operation is not gated" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"vendor_operation","tool_input":"{\"operation_id\":\"database.execute.v1\",\"input\":{}}"}' \
+    silent
+
 run_case "disable=1 silences a graph_write" \
     "$(graph_write_call remember)" \
     silent "" \
