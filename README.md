@@ -72,11 +72,11 @@ yourself — same OAuth-by-default install as Claude Code (`auth` defaults to
 
 Guidance ports:
 
-- [`codex/AGENTS.md`](codex/AGENTS.md) — the 8 skills compressed into
-  always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
+- [`codex/AGENTS.md`](codex/AGENTS.md) — the graph and tool-lake skills (all
+  but `creating-a-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 9 skills, ported ~verbatim,
+- [`codex/skills/`](codex/skills/) — the same 10 skills, ported ~verbatim,
   because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
@@ -98,12 +98,13 @@ closest native substitute is `approval_mode = "approve"` on the MCP server's
 [`codex/config.toml`](codex/config.toml)), but that prompts for *every* call
 including `rules` `list`/`get` reads, not just writes. **Writes are
 unguarded by default on the Codex leg — there is no bundled equivalent of
-the Claude Code gate.**
+the Claude Code gate.** The same commented block also lists `vendor_operation`,
+which no leg's gate covers (see [Vendor operations](#vendor-operations)).
 
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 9 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
+install brings the MCP server, the 10 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
 Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
@@ -131,7 +132,7 @@ every part is discovered without configuration:
 | --- | --- | --- |
 | Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
 | MCP server | `cursor/mcp.json` | OAuth by default |
-| Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
+| Skills | `cursor/skills/` | the same 10 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
 | Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
 | Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
@@ -259,10 +260,12 @@ MCP-scoped key never reaches the import routes. Mint the smallest one that cover
 
 | Scope | Unlocks |
 | --- | --- |
-| `read` | Everything read-only: `graph_schema`, `graph_query`, `graph_search`, `graph_fetch`, `graph_history`, plus `rules` list/get. |
+| `read` | Everything read-only: `graph_schema`, `graph_query`, `graph_search`, `graph_fetch`, `graph_history`, plus `rules` list/get, `tool_search` and `vendor_operation_status`. It also runs `vendor_operation`, writes included: see the note below. |
 | `read+memory` | `read`, plus `graph_write`. A read-only key gets `memory_scope_required`. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
+
+**`vendor_operation` ignores the key's scope today** (Linear 1SI-2292): the server checks scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake until that is fixed server-side. See [Vendor operations](#vendor-operations).
 
 ## The tools
 
@@ -277,7 +280,7 @@ One loop: **`graph_search` → `graph_schema` → `graph_query` → `graph_fetch
 | `graph_history` | Who changed what in the graph, and when: one node's history, one commit's diff, or the change feed. |
 | `graph_write` | Typed memory operations — `remember`, `revise`, `claim`, `link`, `unlink`, `close` (and `note`); no delete. Needs the `memory` scope. Prompt-gated by this plugin. |
 | `rules` | `list`/`get` the org's standing rules and slash commands freely; `save`/`update`/`delete` change binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
-| `tool_search`, `vendor_operation`, `vendor_operation_status` | Find, run and poll an operation on the vendor systems your org has connected. `vendor_operation` acts as the signed-in user and is not gated by this plugin. |
+| `tool_search`, `vendor_operation`, `vendor_operation_status` | The tool lake: find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) an operation on the vendor systems your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. `vendor_operation` acts as the signed-in user, reads and writes alike. **Not gated by this plugin, and its key scope is not checked by the server (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, `machine_attach`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
@@ -289,6 +292,18 @@ skills never use them.
 is a write; a `preflight` or `dry_run` asks too) and before `rules` `save`/`update`/`delete`. Reads pass
 through untouched. For servers that still serve the retired `memory` tool, its `save`/`update`/`delete` are
 gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs.
+
+### Vendor operations
+
+`tool_search`, `vendor_operation` and `vendor_operation_status` are the same tool lake the Bonez chat agent uses, served over MCP. The `using-the-tool-lake` skill teaches the flow: `tool_search` first, an `operation_id` copied from its result (never guessed), `vendor_operation` with the operation's own `input`, and `vendor_operation_status` for an `invocation_id` a result carried. If the org has not connected a vendor, the skill has the agent say so rather than work around it.
+
+**What is not guarded.**
+
+- **No write gate.** The write gate above does not cover `vendor_operation`, on any leg. The hook sees only the call (`operation_id`, `input`, `connection_ref`). Whether an operation reads or writes is the operation's `side_effect`, which the server returns in `tool_search` results and keeps in its catalog, not in the call. Gating on it would mean shipping a copy of the server's catalog (which differs by server version) or guessing from operation names, and a wrong guess is silence on a real write, so the plugin ships neither. `tests/test_gate.sh` pins the boundary.
+- **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any operation whose `side_effect` is not `read`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_operation` off your Claude Code allow-list, so its default permission mode asks on every call (reads too), or use the commented `approval_mode = "approve"` stanza in [`codex/config.toml`](codex/config.toml).
+- **The server does not check the key's scope for `vendor_operation`** (Linear 1SI-2292, see [API key scopes](#api-key-scopes)). Mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
+
+**Not served: agents, runs and sessions.** The lake's catalog is vendor operations only. Bonez agents, their runs and their sessions are not operations in it, and the chat agent's own `agent_list`/`agent_get` tools call the gateway's HTTP API, which an API key or MCP sign-in cannot reach (`/mcp` only). So this plugin cannot yet list the org's agents or read a run; MCP tools for that are planned (Linear 1SI-2290). The skill tells the agent to say so, not to hunt for an operation.
 
 ## Skills
 
@@ -303,6 +318,7 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
+- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and that agents, runs and sessions are not served yet.
 
 Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
 
@@ -456,7 +472,7 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
 .mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
-skills/           9 skills
+skills/           10 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
