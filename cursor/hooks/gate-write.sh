@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# PreToolUse gate for the bonez MCP write tools: `memory` and `rules`.
+# PreToolUse gate for the bonez MCP write tools: `graph_write` and `rules`
+# (plus the retired `memory` tool, still gated for servers that serve it).
 #
-# Both tools take an `op` that selects the action: reads (`recall` for
-# memory; `list` / `get` for rules) or `save` / `update` / `delete` (writes —
-# to the org's durable memory, or to its standing rules and slash commands,
-# which are binding guidance mounted into every session). Once the user
-# allow-lists a tool, every write would run without a prompt. This hook
-# re-introduces a prompt for the write ops by returning
+# Each takes an `op` that selects the action:
+#
+#   graph_write  note / remember / revise / claim / link / unlink / close —
+#                every op is a write (durable memory in the org's graph).
+#   rules        `list` / `get` read; `save` / `update` / `delete` write the
+#                org's standing rules and slash commands, which are binding
+#                guidance mounted into every session.
+#   memory       `recall` reads; `save` / `update` / `delete` write.
+#
+# Once the user allow-lists a tool, every write would run without a prompt.
+# This hook re-introduces a prompt for the write ops by returning
 # `permissionDecision: "ask"`; reads and anything it cannot parse fall
-# through to normal permission flow.
+# through to normal permission flow. `graph_write` calls that write nothing
+# (`dry_run`, `preflight`) prompt too: they cannot be told apart from a
+# nested-key spoof by a pure-bash regex, and a spurious prompt is the safe
+# direction for a write gate.
 #
 # Env knobs:
 #
@@ -91,15 +100,15 @@ if [[ "$input" =~ \"tool_name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
     tool_name="${BASH_REMATCH[1]}"
 fi
 
-# Only gate the bonez memory/rules tools.
+# Only gate the bonez write tools (graph_write / rules / memory).
 #
 # Claude Code flattens the server into the tool name — `mcp__bonez__memory`
 # (raw `claude mcp add`), `mcp__plugin_bonez_bonez__memory` (plugin-installed),
 # or a renamed server key that still contains `bonez`. hooks.json matches
-# broadly on `__(memory|rules)$`; this is the narrow check, so a different
-# product's memory or rules tool never gets our prompt.
+# broadly on `__(memory|rules|graph_write)$`; this is the narrow check, so a
+# different product's tool of the same name never gets our prompt.
 #
-# Cursor keeps them apart: `tool_name` is the BARE tool (`memory`), and the
+# Cursor keeps them apart: `tool_name` is the BARE tool (`graph_write`), and the
 # server key arrives separately as `mcp_server_name`. So the server identity
 # has to be checked there instead — and Cursor's hooks.json carries no matcher
 # at all, making this the ONLY filter on that leg.
@@ -117,16 +126,16 @@ if [[ "$protocol" == "cursor" ]]; then
         identified=1
     elif [[ "$input" =~ \"url\"[[:space:]]*:[[:space:]]*\"([^\"]*bonez[^\"]*)\" ]]; then
         identified=1
-    elif [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]]; then
+    elif [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules|graph_write)$ ]]; then
         # A build that flattens the server into the tool name the way Claude Code
         # does identifies itself that way and needs no separate server field.
         identified=1
     fi
     (( identified )) || exit 0
-    [[ "$tool_name" =~ ^(mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__)?(memory|rules)$ ]] || exit 0
+    [[ "$tool_name" =~ ^(mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__)?(memory|rules|graph_write)$ ]] || exit 0
     tool="${BASH_REMATCH[2]}"
 else
-    [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules)$ ]] || exit 0
+    [[ "$tool_name" =~ ^mcp__[A-Za-z0-9_-]*bonez[A-Za-z0-9_-]*__(memory|rules|graph_write)$ ]] || exit 0
     tool="${BASH_REMATCH[1]}"
 fi
 
@@ -160,8 +169,17 @@ if [[ "$protocol" == "cursor" ]]; then
     haystack="${input//\\\"/\"}"
 fi
 
+# The write ops differ per tool: graph_write has no read op at all (every op is
+# a write), while memory/rules write with save/update/delete.
+if [[ "$tool" == "graph_write" ]]; then
+    write_ops="note|remember|revise|claim|link|unlink|close"
+else
+    write_ops="save|update|delete"
+fi
+
 op=""
-if [[ "$haystack" =~ \"op\"[[:space:]]*:[[:space:]]*\"(save|update|delete)\" ]]; then
+op_re="\"op\"[[:space:]]*:[[:space:]]*\"($write_ops)\""
+if [[ "$haystack" =~ $op_re ]]; then
     op="${BASH_REMATCH[1]}"
 fi
 
@@ -170,13 +188,15 @@ fi
 # `op` empty and fall through to normal permission flow. The case guard is
 # belt-and-braces: `op` can already only be a write op or empty.
 case "$op" in
-    save|update|delete)
-        # `tool` is restricted to memory|rules and `op` to
-        # save|update|delete by the regexes above, so interpolating them
-        # into the JSON response is safe. `target` is a fixed literal.
+    save|update|delete|note|remember|revise|claim|link|unlink|close)
+        # `tool` is restricted to memory|rules|graph_write and `op` to the
+        # write ops above by the regexes, so interpolating them into the JSON
+        # response is safe. `target` is a fixed literal.
         target="durable org memory"
         if [[ "$tool" == "rules" ]]; then
             target="the org's binding rules and commands"
+        elif [[ "$tool" == "graph_write" ]]; then
+            target="durable memory in the org's graph"
         fi
         reason="bonez $tool \`$op\` writes to $target — approve to run."
         if [[ "$protocol" == "cursor" ]]; then

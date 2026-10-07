@@ -76,6 +76,13 @@ rules_call() {
     printf '{"tool_name":"%s","tool_input":{"op":"%s","name":"no-force-push","content":"Never force-push shared branches."}}' "$tool_name" "$op"
 }
 
+# Helper: payload for a graph_write invocation. Mirrors what the server's tool
+# schema accepts: every op is a write, and `about` is an array of anchor handles.
+graph_write_call() {
+    local op="$1" tool_name="${2:-mcp__bonez__graph_write}"
+    printf '{"tool_name":"%s","tool_input":{"op":"%s","content":"deploys run from infra/","description":"where deploys live","kind":"convention","basis":"stated","reason":"user said so","about":["~4f1a9c2e"]}}' "$tool_name" "$op"
+}
+
 # --- Cursor leg (beforeMCPExecution) -------------------------------------
 #
 # Cursor speaks a different protocol on both ends: it keeps `mcp_server_name`
@@ -235,6 +242,70 @@ run_case "rules read with a nested write-op name fails toward prompting" \
     '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"list","params_schema":{"op":"delete"}}}' \
     prompt rules:delete
 
+# --- graph_write: every op is a write, so every op prompts ---
+#
+# graph_write replaced `memory`: it has seven typed ops and no read op at all.
+
+for _op in note remember revise claim link unlink close; do
+    run_case "graph_write $_op prompts" \
+        "$(graph_write_call "$_op")" \
+        prompt "graph_write:$_op"
+done
+
+run_case "graph_write via plugin-prefixed tool name prompts" \
+    "$(graph_write_call remember mcp__plugin_bonez_bonez__graph_write)" \
+    prompt graph_write:remember
+
+run_case "other product graph_write tool is ignored" \
+    "$(graph_write_call remember mcp__someothermcp__graph_write)" \
+    silent
+
+run_case "graph_write with an unknown op is silent" \
+    "$(graph_write_call frobnicate)" \
+    silent
+
+run_case "graph_write with a missing op is silent" \
+    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"content":"x"}}' \
+    silent
+
+# The write-op lists are per tool: `save` is not a graph_write op, and `remember`
+# is not a rules op, so neither is treated as one.
+run_case "graph_write with a memory-style op (save) is silent" \
+    "$(graph_write_call save)" \
+    silent
+
+run_case "rules with a graph_write op (remember) is silent" \
+    "$(rules_call remember)" \
+    silent
+
+# `preflight` and `dry_run` write nothing, but a pure-bash regex cannot tell them
+# from a nested-key spoof, so they prompt like any other call.
+run_case "graph_write remember with preflight still prompts" \
+    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remember","preflight":true,"content":"x","reason":"y"}}' \
+    prompt graph_write:remember
+
+run_case "graph_write remember with dry_run still prompts" \
+    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remember","dry_run":true,"content":"x","reason":"y"}}' \
+    prompt graph_write:remember
+
+run_case "escaped op text inside graph_write content does not fool the gate" \
+    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"frobnicate","content":"note that {\"op\":\"close\"} appears in a doc"}}' \
+    silent
+
+run_case "the read tools are ignored even if their input mentions a write op" \
+    '{"tool_name":"mcp__bonez__graph_query","tool_input":{"query":"x","params":{"op":"remember"}}}' \
+    silent
+
+run_case "disable=1 silences a graph_write" \
+    "$(graph_write_call remember)" \
+    silent "" \
+    BONEZ_MCP_GATE_DISABLE="1"
+
+run_case "PLUGIN_ROOT set (Codex) silences a graph_write" \
+    "$(graph_write_call remember)" \
+    silent "" \
+    PLUGIN_ROOT="/tmp/codex-plugin-root"
+
 # --- BONEZ_MCP_GATE_DISABLE turns the gate off entirely ---
 
 run_case "disable=1 silences a save" \
@@ -280,7 +351,9 @@ for _payload in \
     'not json at all {{{' \
     '{"tool_name":"mcp__bonez__memory"}' \
     '{"tool_name":"mcp__bonez__memory","tool_input":{"op":"sa' \
-    "$(memory_call save)"
+    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remem' \
+    "$(memory_call save)" \
+    "$(graph_write_call remember)"
 do
     env -i PATH="$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR" bash "$HOOK" <<<"$_payload" >/dev/null 2>&1
     if (( $? != 2 )); then
@@ -316,8 +389,8 @@ cursor_run_case "cursor: rules list is silent" \
 cursor_run_case "cursor: another server's memory tool is ignored" \
     "$(cursor_call memory save othervendor)" silent
 
-cursor_run_case "cursor: a non-memory/rules bonez tool is ignored" \
-    "$(cursor_call search save)" silent
+cursor_run_case "cursor: a non-write bonez tool is ignored" \
+    "$(cursor_call graph_search save)" silent
 
 # tool_input as a real object rather than the documented string — tolerated
 # either way, so a Cursor build that stops stringifying cannot silently disarm
@@ -366,6 +439,26 @@ cursor_run_case "cursor: no identifying field at all is silent" \
 cursor_run_case "cursor: flattened tool name self-identifies" \
     '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__memory","tool_input":"{\"op\":\"save\"}"}' \
     prompt save
+
+cursor_run_case "cursor: graph_write remember prompts" \
+    "$(cursor_call graph_write remember)" prompt graph_write:remember
+
+cursor_run_case "cursor: graph_write close prompts" \
+    "$(cursor_call graph_write close)" prompt graph_write:close
+
+cursor_run_case "cursor: another server's graph_write is ignored" \
+    "$(cursor_call graph_write remember othervendor)" silent
+
+cursor_run_case "cursor: bonez graph_search is ignored" \
+    "$(cursor_call graph_search remember)" silent
+
+cursor_run_case "cursor: graph_write identified by url when mcp_server_name is absent" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"graph_write","tool_input":"{\"op\":\"claim\"}","url":"https://rainguard.bonez.io/mcp"}' \
+    prompt graph_write:claim
+
+cursor_run_case "cursor: flattened graph_write tool name self-identifies" \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__graph_write","tool_input":"{\"op\":\"revise\"}"}' \
+    prompt graph_write:revise
 
 # The plugin must be SELF-CONTAINED. Cursor resolves a plugin hook `command`
 # from the plugin root, and a marketplace install copies that directory on its

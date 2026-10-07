@@ -1,9 +1,9 @@
 {
-  "description": "Permission gate for bonez writes (prompts before the bonez MCP `memory` and `rules` tools run save/update/delete — reads pass through untouched), plus opt-in session capture: at SessionEnd it hands the transcript to bonez-session-sync.mjs, and at SessionStart it flushes any session in this workspace whose SessionEnd never fired (a crash, a kill, or the plugin having been disabled). Both are a silent no-op until `login` (or, headless, `install`) has been run (see README — Session capture).",
+  "description": "Permission gate for bonez writes (prompts before the bonez MCP `graph_write` tool runs any op, and before `rules` save/update/delete — reads pass through untouched), plus opt-in session capture: at SessionEnd it hands the transcript to bonez-session-sync.mjs, and at SessionStart it flushes any session in this workspace whose SessionEnd never fired (a crash, a kill, or the plugin having been disabled). Both are a silent no-op until `login` (or, headless, `install`) has been run (see README — Session capture).",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "__(memory|rules)$",
+        "matcher": "__(memory|rules|graph_write)$",
         "hooks": [
           {
             "type": "command",
