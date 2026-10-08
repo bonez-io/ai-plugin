@@ -305,3 +305,15 @@ jobs:
       - name: Write gate under Git Bash
         shell: bash
         run: ./tests/test_gate.sh
+
+      # The checklist a human or an agent runs on a Windows machine (tests/windows-client-checks.ps1), in
+      # both PowerShells. The claude / codex / cursor CLIs are not on a runner and report SKIP.
+      - name: Windows client checks, Windows PowerShell 5.1
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: ./tests/windows-client-checks.ps1
+
+      - name: Windows client checks, PowerShell 7
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./tests/windows-client-checks.ps1
