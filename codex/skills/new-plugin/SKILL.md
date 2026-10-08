@@ -1,13 +1,13 @@
 ---
-description: Scaffold, test, bundle and hash a new Bonez plugin (a package that adds tools to Bonez agents), then push it to your Bonez server (or print the manual handoff)
-argument-hint: <name>
+name: new-plugin
+description: Scaffold, test, bundle, hash and push a new Bonez plugin (a package that adds tools to Bonez agents) to the user's Bonez server, or print the manual handoff. Use when the user asks to create, build or upload a Bonez plugin.
 ---
 
-# /prompts:new-plugin
+# $new-plugin
 
-Create a new Bonez plugin named **$ARGUMENTS** and get it onto your Bonez server. Read the `creating-a-plugin` skill first: its rules apply to every line of code you write here.
+Create a new Bonez plugin and get it onto your Bonez server. The plugin's name comes from what the user asked for: "Use the new-plugin skill to create the Bonez plugin hello-check" means the name `hello-check`. Read the `creating-a-plugin` skill first (`<skill folder>/../creating-a-plugin/SKILL.md`): its rules apply to every line of code you write here.
 
-**Paths.** `<skill folder>` is the folder that holds the `creating-a-plugin` skill's `SKILL.md`: the folder Codex tells you to resolve a skill's relative paths against (expand the skill's short path with its alias from `### Skill roots`). If the skill is not listed, look for `creating-a-plugin/SKILL.md` under `~/.codex/plugins/` and `~/.agents/skills/` (`%USERPROFILE%\.codex\plugins\` on Windows). The scaffold is `<skill folder>/templates`. The hash and push tools are two folders above the skill, in the plugin's `bin/`: `<skill folder>/../../bin/bonez-package-hash.mjs` and `<skill folder>/../../bin/bonez-plugin-push.mjs`. Resolve them to absolute paths once and check that both files exist before you start; if they do not, the skill was copied out of its plugin (for example to `~/.agents/skills/`), so tell the user to take `bin/` from `codex/bin/` of bonez-io/ai-plugin, or reinstall the plugin with `codex plugin add bonez@bonez`, and stop.
+**Paths.** `<skill folder>` is the folder that holds this skill's `SKILL.md`: the folder Codex tells you to resolve a skill's relative paths against (expand the skill's short path with its alias from `### Skill roots`). If the skill is not listed, look for `new-plugin/SKILL.md` under `~/.codex/plugins/` and `~/.agents/skills/` (`%USERPROFILE%\.codex\plugins\` on Windows). The scaffold is `<skill folder>/../creating-a-plugin/templates`, in the `creating-a-plugin` skill beside this one. The hash and push tools are two folders above this skill, in the plugin's `bin/`: `<skill folder>/../../bin/bonez-package-hash.mjs` and `<skill folder>/../../bin/bonez-plugin-push.mjs`. Resolve all three to absolute paths once and check that both files and the `templates` folder exist before you start; if they do not, the skill was copied out of its plugin (for example to `~/.agents/skills/`), so tell the user to take `bin/` from `codex/bin/` and `creating-a-plugin/` from `codex/skills/` of bonez-io/ai-plugin, or reinstall the plugin with `codex plugin add bonez@bonez`, and stop.
 
 **Sandbox.** Codex runs commands in a sandbox. `bun install` and the push need the network, and bun keeps its cache outside the workspace, so Codex may ask to run them outside the sandbox. If one is blocked, ask the user to approve it; do not work around the block and do not report the step as passed.
 
@@ -15,7 +15,7 @@ Run every command with its working directory set to the folder the step names (t
 
 ## 1. Name and scope
 
-- The name is the first word of `$ARGUMENTS`, lowercased. Drop a leading `pi-`. It must match `^[a-z][a-z0-9-]*$`; if it is empty or invalid, ask for one.
+- The name is the plugin name the user gave (the first word, if they wrote more), lowercased. Drop a leading `pi-`. It must match `^[a-z][a-z0-9-]*$`; if the user gave none or it is invalid, ask for one.
 - The package name is `@<scope>/pi-<name>`. Scope defaults to the org in `git remote get-url origin` (for `git@github.com:acme/x.git`, `acme`), lowercased. With no remote, ask for the scope in your question message (step 2) and wait.
 - Work in `./<name>/` under the current directory. If it exists and is not empty, stop and ask: never overwrite.
 - Check `bun --version` and `node --version` (Node 18 or newer runs the hash and push tools). Bonez pins bun 1.3.14: if bun or node is missing, stop and tell the user to install it; if the bun version differs, say so and continue. On Windows give them these lines (PowerShell or cmd), one per missing tool, and tell them to **restart Codex itself** afterwards, not only the terminal: a running Codex keeps the PATH it started with, so a tool installed after that stays invisible to it until it is restarted:
@@ -36,7 +36,7 @@ Skip any the user already answered. Do not ask follow-ups beyond these: if an an
 
 ## 3. Scaffold
 
-1. `node -e "require('fs').cpSync(process.argv[1], process.argv[2], { recursive: true })" "<skill folder>/templates" "<abs path>/<name>"` (the same in every shell; it copies `.gitignore` too).
+1. `node -e "require('fs').cpSync(process.argv[1], process.argv[2], { recursive: true })" "<skill folder>/../creating-a-plugin/templates" "<abs path>/<name>"` (the same in every shell; it copies `.gitignore` too).
 2. In `<name>/package.json` replace `__PACKAGE_NAME__` with the package name and `__DESCRIPTION__` with a one-sentence description from answer 1. The description sits inside a JSON string: **JSON-escape it** (`\"` for a double quote, `\\` for a backslash, no line breaks), or set the field with a JSON serializer (read the file with `JSON.parse`, assign `description`, write it back with `JSON.stringify(pkg, null, 2)`). A description pasted as plain text with a `"` in it breaks the file; check it still parses, from `<name>/`: `node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"`.
 3. Write the tools from answer 2:
    - one plain function per tool in `src/<tool>.ts` (no `pi` inside), and a `pi.registerTool` call per tool in `src/index.ts` using the template's `reply` and `fail` helpers;

@@ -94,27 +94,30 @@ codex plugin add bonez@bonez
 codex mcp login bonez
 ```
 
+To build a Bonez plugin afterwards, ask Codex: `Use the new-plugin skill to create the Bonez plugin <name>`. The skill ships in the plugin, together with the hash and push tools it runs; a Codex plugin cannot ship custom prompts, which is why it is a skill and not a `/prompts:` command.
+
 The plugin's [`codex/.mcp.json`](codex/.mcp.json) pins the sign-in to the Bonez CLI app with the `bonez:*` scopes: Codex asks only for OpenID scopes unless told, and its own client is not one every Bonez server's login knows. To add only the server by hand, paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml` (`$HOME\.codex\config.toml` on Windows).
 
 Guidance ports:
 
 - [`codex/AGENTS.md`](codex/AGENTS.md) — the graph and tool-lake skills (all
-  but `creating-a-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
+  but `creating-a-plugin` and `new-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 10 skills, ported ~verbatim,
-  because Codex turns out to support the same on-demand `SKILL.md` format
+- [`codex/skills/`](codex/skills/) — the same 10 skills, ported ~verbatim, plus
+  `new-plugin` (the plugin creator, see below), because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
   a common but wrong guess. AGENTS.md above is the belt; these are the
-  suspenders, loaded on demand instead of always in context. `creating-a-plugin` reaches the hash
-  and push tools in [`codex/bin/`](codex/bin/) two folders above itself (a plugin install has them
+  suspenders, loaded on demand instead of always in context. `creating-a-plugin` and `new-plugin` reach the hash
+  and push tools in [`codex/bin/`](codex/bin/) two folders above themselves (a plugin install has them
   there); a copy of `skills/` alone has no `bin/` beside it, so copy `codex/bin/` to `~/.agents/bin/` too, or run the tools from a
-  clone of this repo.
+  clone of this repo. `new-plugin` is the flow of `/bonez:new-plugin` written for Codex's sandbox and skill paths
+  (the same steps, the same HANDOFF block; CI pins it against `commands/new-plugin.md`), and it takes its scaffold
+  from the `creating-a-plugin` folder beside it.
 - [`codex/prompts/`](codex/prompts/) — `/prompts:context`,
-  `/prompts:search`, `/prompts:agents` and `/prompts:new-plugin <name>`, ported from `commands/`
-  (the last one is the plugin creator, written for Codex's sandbox and skill paths). Copy to `~/.codex/prompts/`
-  (top-level `.md` files only). Upstream marks custom prompts deprecated in
+  `/prompts:search` and `/prompts:agents`, ported from `commands/`. A plugin install does not register them as
+  commands: copy to `~/.codex/prompts/` (top-level `.md` files only). Upstream marks custom prompts deprecated in
   favor of skills; included anyway since they still work today.
 
 **Write-gate gap.** Claude Code's `hooks/gate-write.sh` pauses for
@@ -362,9 +365,9 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search`, `/prompts:agents` and `/prompts:new-plugin <name>` on Codex, `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
 
-The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
+The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there; `codex/skills/` also has `new-plugin`, the plugin creator, because a Codex plugin cannot ship the command that Claude Code and Cursor have; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
 
 ## Session capture
 
@@ -514,7 +517,7 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 
 ## Pushing a plugin
 
-`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it (Cursor: `/bonez-new-plugin <name>`; Codex: `/prompts:new-plugin <name>`). You can also push any
+`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it (Cursor: `/bonez-new-plugin <name>`; Codex: ask `Use the new-plugin skill to create the Bonez plugin <name>`). You can also push any
 built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only):
 
 ```bash
@@ -575,7 +578,7 @@ server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
                   windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
 .gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
-codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/ (incl. new-plugin), bin/ (plugin tools), config.toml (see Other clients → OpenAI Codex; no write gate)
+codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
 cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
@@ -606,4 +609,4 @@ On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `n
 
 `tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, `bin/lib/plugin-tree.mjs` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs (Codex has `new-plugin` on top, nothing else) with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies and the Cursor command and Codex `new-plugin` skill held to the steps of `commands/new-plugin.md`, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
