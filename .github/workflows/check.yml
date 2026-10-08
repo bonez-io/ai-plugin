@@ -67,7 +67,7 @@ jobs:
       - name: bonez-session-sync.mjs syntax + vendored bundle
         run: |
           set -euo pipefail
-          for f in bin/*.mjs bin/lib/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
+          for f in bin/*.mjs bin/lib/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/lib/*.mjs cursor/bin/vendor/*.mjs codex/bin/*.mjs codex/bin/lib/*.mjs skills/creating-a-plugin/templates/scripts/*.mjs tests/*.mjs tests/lib/*.mjs; do
             node --check "$f"
             echo "ok: $f"
           done
@@ -81,6 +81,9 @@ jobs:
       - name: Plugin push tests
         run: ./tests/test_plugin_push.sh
 
+      - name: Plugin-creator on the Cursor and Codex legs (byte copies of the tools, skill forks, flows)
+        run: ./tests/test_legs.sh
+
       - name: Windows-portability tests (shared hash vectors, path normalisation, line endings, hook commands)
         run: ./tests/test_windows.sh
 
@@ -89,18 +92,25 @@ jobs:
           set -euo pipefail
           # All three legs must expose the SAME SET of skills. Cursor's copy is
           # byte-identical to the canonical one — its write gate works, so the
-          # Claude wording ("expect the harness to ask") is true there. Codex
-          # deliberately forks two files because it has NO write gate and that
-          # same wording would be a lie; anything beyond those two is drift.
+          # Claude wording ("expect the harness to ask") is true there — with one
+          # exception: creating-a-plugin/SKILL.md, whose tool paths cannot be
+          # ${CLAUDE_PLUGIN_ROOT} on a harness that has no such variable (the rest
+          # of that skill folder is still byte-identical; tests/legs.test.mjs pins
+          # the SKILL.md rewrite line by line). Codex deliberately forks
+          # remembering and reviewing-with-org-rules because it has NO write gate and
+          # that same wording would be a lie, plus the same creating-a-plugin
+          # SKILL.md; anything beyond those three is drift.
           for leg in codex cursor; do
             diff <(ls skills) <(ls "$leg/skills") || {
               echo "::error::skills/ and $leg/skills/ expose different skill sets."; exit 1; }
+            diff -r -x SKILL.md skills/creating-a-plugin "$leg/skills/creating-a-plugin" || {
+              echo "::error::$leg/skills/creating-a-plugin has drifted from skills/creating-a-plugin (SKILL.md aside) — re-copy it."; exit 1; }
           done
-          if ! diff -r skills cursor/skills; then
-            echo "::error::cursor/skills has drifted — re-copy it (rm -rf cursor/skills && cp -R skills cursor/skills)."
+          if ! diff -r -x creating-a-plugin skills cursor/skills; then
+            echo "::error::cursor/skills has drifted — re-copy it (rm -rf cursor/skills && cp -R skills cursor/skills, then redo cursor/skills/creating-a-plugin/SKILL.md: tests/legs.test.mjs says how)."
             exit 1
           fi
-          expected="remembering reviewing-with-org-rules"
+          expected="creating-a-plugin remembering reviewing-with-org-rules"
           actual="$(for d in $(ls skills); do
             cmp -s "skills/$d/SKILL.md" "codex/skills/$d/SKILL.md" || echo "$d"
           done | sort | tr '\n' ' ' | sed 's/ $//')"
@@ -110,7 +120,7 @@ jobs:
             echo "  found:            $actual"
             exit 1
           fi
-          echo "ok: skill sets match; cursor/skills identical; codex divergence is the documented pair"
+          echo "ok: skill sets match; cursor/skills identical bar creating-a-plugin/SKILL.md; codex divergence is the documented three"
 
       - name: Cursor plugin structure
         run: |
@@ -302,7 +312,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Tree hash on the shared vectors, push CLI against a fake gateway, Windows paths
-        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs
+        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs
 
       - name: Push smoke test (fake gateway on 127.0.0.1)
         run: node tests/lib/push-smoke.mjs

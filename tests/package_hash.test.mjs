@@ -12,8 +12,10 @@ import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import { vetUpload } from "./lib/fake-plugin-server.mjs"
 import { symlinkOrSkip, trySymlink } from "./lib/fs-helpers.mjs"
+import { VECTORS, materialize } from "./lib/vectors.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
@@ -189,6 +191,14 @@ describe("refusals", () => {
     refuses(empty, /node_modules\/ not allowed/)
   })
 
+  test("a file Finder or Explorer added: .DS_Store, Thumbs.db, desktop.ini, at any depth and in any case", () => {
+    for (const rel of [".DS_Store", "dist/.DS_Store", "Thumbs.db", "dist/deep/THUMBS.DB", "Desktop.ini"]) {
+      const root = vectorTree()
+      put(root, rel, "x")
+      refuses(root, new RegExp(`${rel.replace(/[.]/g, "\\.")} was added by Finder or Explorer and the server refuses it: delete it`, "i"))
+    }
+  })
+
   test("a file merely named like node_modules is fine", () => {
     const root = vectorTree()
     put(root, "node_modules.txt", "x")
@@ -203,6 +213,36 @@ describe("refusals", () => {
     assert.match(none.stderr, /usage/)
     const two = spawnSync(process.execPath, [SCRIPT, "a", "b"], { encoding: "utf8" })
     assert.equal(two.status, 2)
+  })
+})
+
+// The template's own tree hash (scripts/tree-hash.mjs, which `bun run build:package` prints) is a fifth
+// implementation of the algorithm. It needs only node to be tested, so it is held to the shared vectors here.
+describe("template scripts/tree-hash.mjs", () => {
+  const load = () => import(pathToFileURL(join(TEMPLATES, "scripts", "tree-hash.mjs")).href)
+
+  test("gives the shared vectors' pinned hashes, and bonez-package-hash's on a messy tree", async () => {
+    const { treeHash } = await load()
+    for (const vector of VECTORS) assert.equal(treeHash(materialize(vector, freshDir(`tpl-${vector.name}`))), vector.tree_sha256, vector.name)
+    const root = vectorTree(freshDir("tpl-messy"))
+    for (const [rel, content] of [["dist/b.js", "b"], ["dist/a/z.js", "z"], ["dist/é.json", "{}"], ["dist/Z.js", "Z"], ["dist/ab.js", "ab"], ["dist/e.txt", ""]]) put(root, rel, content)
+    put(root, ".git/HEAD", "ref")
+    assert.equal(treeHash(root), hashOk(root))
+  })
+
+  test("refuses what the hash tool refuses: file manager files, node_modules, a symlink", async (t) => {
+    const { treeHash } = await load()
+    for (const rel of [".DS_Store", "dist/.DS_Store", "Thumbs.db", "desktop.ini"]) {
+      const root = vectorTree(freshDir("tpl-junk"))
+      put(root, rel, "x")
+      assert.throws(() => treeHash(root), /was added by Finder or Explorer/, rel)
+    }
+    const nm = vectorTree(freshDir("tpl-nm"))
+    put(nm, "dist/node_modules/x/index.js", "x")
+    assert.throws(() => treeHash(nm), /node_modules\/ not allowed/)
+    const link = vectorTree(freshDir("tpl-link"))
+    if (trySymlink("/nonexistent", join(link, "dangling"))) assert.throws(() => treeHash(link), /symlink not allowed: dangling/)
+    else t.diagnostic("no symlink privilege here: the symlink case was left out")
   })
 })
 
@@ -224,6 +264,7 @@ describe("template build:package", { skip: !hasBun && "bun not installed" }, () 
   function build(dir) {
     const r = spawnSync("bun", ["run", "build:package"], { cwd: dir, encoding: "utf8" })
     assert.equal(r.status, 0, `build failed: ${r.stdout}${r.stderr}`)
+    return r.stdout
   }
 
   test("template has no placeholder left after the two are filled in, and the scripts exist", () => {
@@ -264,6 +305,31 @@ describe("template build:package", { skip: !hasBun && "bun not installed" }, () 
     const first = hashOk(out)
     build(dir)
     assert.equal(hashOk(out), first)
+  })
+
+  test("the build prints the tree hash of out/<name>/, the value the hash tool prints and the push tool sends", () => {
+    const dir = instantiate()
+    const printed = /^sha256: ([0-9a-f]{64})$/m.exec(build(dir))?.[1]
+    assert.ok(printed, "the build must print a 'sha256: <hash>' line")
+    assert.equal(printed, hashOk(join(dir, "out", "hello")))
+  })
+
+  test("the built folder is one the server accepts (the stand-in holds the server's rules), under the hash the build printed", () => {
+    const dir = instantiate()
+    const printed = /^sha256: ([0-9a-f]{64})$/m.exec(build(dir))[1]
+    const out = join(dir, "out", "hello")
+    const files = {}
+    const walk = (d, rel = "") => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(join(d, e.name), `${rel}${e.name}/`)
+        else files[`${rel}${e.name}`] = readFileSync(join(d, e.name)).toString("base64")
+      }
+    }
+    walk(out)
+    const vetted = vetUpload(files, { claimedSha256: printed })
+    assert.equal(vetted.error, undefined, JSON.stringify(vetted.error))
+    assert.equal(vetted.name, "@example/pi-hello")
+    assert.equal(vetted.sha256, printed)
   })
 
   // The scaffold's own tests need no `bun install`: bun:test is built in and the Pi import is type-only.

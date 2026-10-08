@@ -19,16 +19,20 @@ const fail = (code: string, message: string) => reply({ ok: false, error: { code
 
 // Path allow-roots. Uncomment, set ALLOWED_ROOTS, and call allowedPath() on every path argument
 // before touching the file. Follows symlinks. For a file you will create, check its parent directory.
+// The roots are a parameter (defaulting to ALLOWED_ROOTS) so a test can pass a temp directory it made:
+//   allowedPath(file, [mkdtempSync(join(tmpdir(), "x-"))])
+// Never a fixed "/clips" in a test: it does not exist on a developer machine, and a "/" path is not
+// the same place on Windows. To test it, `export` the function (or move it to src/paths.ts and import it).
 //
 // import { realpathSync } from "node:fs"
 // import { isAbsolute, relative, resolve, sep } from "node:path"
 //
 // const ALLOWED_ROOTS = ["/clips"] // container paths; a new host directory needs a volume line from Bonez
 //
-// function allowedPath(input: string): string | null {
+// function allowedPath(input: string, roots: readonly string[] = ALLOWED_ROOTS): string | null {
 //   try {
 //     const real = realpathSync(resolve(input))
-//     for (const root of ALLOWED_ROOTS) {
+//     for (const root of roots) {
 //       const rel = relative(realpathSync(root), real)
 //       if (rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) return real
 //     }
@@ -37,9 +41,12 @@ const fail = (code: string, message: string) => reply({ ok: false, error: { code
 // }
 // // in a tool: const p = allowedPath(params.path); if (!p) return fail("path_not_allowed", "path is outside the allowed roots")
 
+// Tool names get a prefix: the package name without its scope and leading "pi-", with each run of
+// characters other than letters and digits written "_". Package `@acme/pi-hello-check` and a tool
+// registered as `hello` reach the model as `hello_check_hello`. Register the short name, not the prefixed one.
 export default function (pi: ExtensionAPI) {
   pi.registerTool({
-    name: "echo", // the model sees <prefix>_echo; the prefix is the package name without its scope and leading "pi-"
+    name: "echo", // the model sees <prefix>_echo (see the note above)
     label: "Echo",
     description: "Return the given text unchanged. Call it to check that the plugin is loaded.",
     parameters: {
