@@ -9,8 +9,10 @@
 //
 // It POSTs {files: {<path>: <base64>}, sha256} to $BONEZ_URL/api/admin/org/plugins with
 // "Authorization: Bearer $BONEZ_API_KEY". The sha256 is the tree hash of bonez-package-hash.mjs,
-// computed here by the SAME algorithm (copied below: that script exits the process, so it cannot be
-// imported; tests/plugin_push.test.mjs pins the two against each other). The server recomputes it.
+// computed by the SAME code (lib/plugin-tree.mjs; the keys of `files` are its tree paths, with "/"
+// on every OS, Windows included). The server recomputes it.
+//
+// Run it as `node bin/bonez-plugin-push.mjs <folder>`; the same on Windows (the shebang is POSIX only).
 //
 // stdout: the result (name, version, fingerprint, computers). stderr: everything else. The key is
 // never printed. Exit codes:
@@ -19,17 +21,14 @@
 //   2  nothing was sent: bad usage, missing or bad config, or a folder that cannot be uploaded
 //   3  could not complete: server unreachable or erroring, a redirect, or an unreadable answer
 // Node built-ins only (Node 18+).
-import { createHash } from "node:crypto"
-import { lstatSync, readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
+import { lstatSync, readFileSync } from "node:fs"
+import { FolderError, listFolder, sha256, treeHash } from "./lib/plugin-tree.mjs"
 
 const ROUTE = "/api/admin/org/plugins"
 const TIMEOUT_MS = 120_000
 // Memory guard only, not policy: the server's own cap (a few MiB) is far lower and it states the
 // real limit in its refusal, so this must not be tightened to mirror it.
 const MAX_READ_BYTES = 64 * 1024 * 1024
-
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex")
 
 function fail(code, message) {
   console.error(`bonez-plugin-push: ${message}`)
@@ -44,53 +43,35 @@ const clean = (text) => {
   return secret ? shown.split(secret).join("[key]") : shown
 }
 
-// ---- the folder: same walk and tree hash as bonez-package-hash.mjs ------------------------------
-
-function collect(root) {
-  const files = []
-  const walk = (dir, rel) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const relPath = rel ? `${rel}/${entry.name}` : entry.name
-      if (entry.isSymbolicLink()) fail(2, `symlink not allowed: ${relPath}`)
-      if (entry.isDirectory()) {
-        if (entry.name === ".git") continue
-        if (entry.name === "node_modules") fail(2, `node_modules/ not allowed (bundle the dependencies instead): ${relPath}`)
-        walk(join(dir, entry.name), relPath)
-      } else if (entry.isFile()) {
-        files.push({ rel: relPath, abs: join(dir, entry.name) })
-      }
-    }
-  }
-  walk(root, "")
-  return files
-}
+// ---- the folder: same walk and tree hash as bonez-package-hash.mjs (lib/plugin-tree.mjs) -------
 
 function readFolder(folder) {
-  let stat
+  let files
   try {
-    stat = lstatSync(folder)
+    files = listFolder(folder)
   } catch (err) {
-    fail(2, `cannot read ${folder}: ${err.code ?? err.message}`)
+    if (err instanceof FolderError) fail(2, err.message)
+    throw err
   }
-  if (stat.isSymbolicLink()) fail(2, `symlink not allowed: ${folder}`)
-  if (!stat.isDirectory()) fail(2, `not a directory: ${folder}`)
-  const files = collect(folder)
-  // Buffer.compare is UTF-8 byte order, as in the hash script.
-  files.sort((a, b) => Buffer.compare(Buffer.from(a.rel), Buffer.from(b.rel)))
-  if (!files.some((f) => f.rel === "package.json")) {
+  if (!files.some((f) => f.path === "package.json")) {
     fail(2, `${folder} has no package.json: pass the built folder (out/<name>/), not the project`)
   }
   let total = 0
   for (const f of files) total += lstatSync(f.abs).size
   if (total > MAX_READ_BYTES) fail(2, `${folder} is ${total} bytes: too large to be a built plugin`)
-  const tree = createHash("sha256")
   const map = {}
-  for (const { rel, abs } of files) {
-    const bytes = readFileSync(abs)
-    tree.update(`${rel}\0${sha256(bytes)}\n`)
-    map[rel] = bytes.toString("base64")
+  const entries = []
+  try {
+    for (const { path, abs } of files) {
+      const bytes = readFileSync(abs)
+      entries.push({ path, sha256: sha256(bytes) })
+      map[path] = bytes.toString("base64")
+    }
+  } catch (err) {
+    // A file another program holds open (Windows: EBUSY, EPERM) is "nothing was sent", not a stack trace.
+    fail(2, `cannot read ${err.path ?? folder}: ${err.code ?? err.message}`)
   }
-  return { map, fingerprint: tree.digest("hex"), count: files.length, total }
+  return { map, fingerprint: treeHash(entries), count: files.length, total }
 }
 
 // ---- config -------------------------------------------------------------------------------------

@@ -1,0 +1,30 @@
+{
+  "_source": "COPIED VERBATIM (the 'about' and 'vectors' keys below) from bonez-core libs/wire/contracts/computers/fixtures/plugin-tree.json at origin/main 71e4965cedb5. That file is the contract; this copy is what lets this repo's tests (and its Windows CI job) prove bin/bonez-package-hash.mjs and bin/bonez-plugin-push.mjs give the gateway's hash for the same bytes. Re-copy it when bonez-core changes the vectors; never edit a vector here.",
+  "about": "The folder-plugin tree hash, pinned for every implementation that computes it: the gateway (computers/plugins.py tree_hash), the harness loader (libs/harness/src/pi/tree-hash.ts), the runner (services/agent-runner/src/tree-hash.ts) and ai-plugin's bin/bonez-package-hash.mjs. Each vector is an upload body ({path: base64}) and the tree hash every implementation must give it. 'hello' is the loader's original vector (computed with python hashlib); 'ordering' was hashed by bonez-package-hash.mjs and covers byte-order sorting ('dist/a.js' before 'dist/a/b.js', 'B' before 'a'), an empty file, non-UTF-8 bytes and a non-ASCII file body. 'ordering' is also a valid upload: the gateway tests upload it and the heartbeat fixture's ok_with_plugin reply describes it.",
+  "vectors": [
+    {
+      "name": "hello",
+      "tree_sha256": "5dcf9ea45d1b202f72be9c654527081bb0ce0ed403902e92bf1f8f178bce72cb",
+      "size": 92,
+      "files": {
+        "package.json": "eyJuYW1lIjoiQGV4YW1wbGUvcGktaGVsbG8iLCJleHBvcnRzIjp7Ii4iOiIuL2Rpc3QvaW5kZXguanMifX0=",
+        "dist/index.js": "ZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gKCkge30K"
+      }
+    },
+    {
+      "name": "ordering",
+      "tree_sha256": "7d2e291a03108b2a44f1bbe3841378c8774c13787be37f62bfc038101f1df719",
+      "size": 213,
+      "files": {
+        "package.json": "eyJuYW1lIjoiQGV4YW1wbGUvcGktb3JkZXJpbmciLCJ2ZXJzaW9uIjoiMS4yLjMiLCJleHBvcnRzIjp7Ii4iOiIuL2Rpc3QvaW5kZXguanMifX0K",
+        "dist/index.js": "ZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gKCkge30K",
+        "dist/a.js": "ZXhwb3J0IGNvbnN0IGEgPSAxCg==",
+        "dist/a/b.js": "ZXhwb3J0IGNvbnN0IGIgPSAyCg==",
+        "dist/B.js": "ZXhwb3J0IGNvbnN0IHVwcGVyID0gMwo=",
+        "dist/empty.txt": "",
+        "dist/index.js.map": "eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIsOpLnRzIl19",
+        "dist/blob.txt": "AAH//go="
+      }
+    }
+  ]
+}

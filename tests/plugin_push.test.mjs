@@ -9,10 +9,11 @@ import { test, describe, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { execFile, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { trySymlink } from "./lib/fs-helpers.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PUSH = join(HERE, "..", "bin", "bonez-plugin-push.mjs")
@@ -76,7 +77,9 @@ function reset(fn) {
 // Async on purpose: the server above lives in this process, so a sync spawn would deadlock.
 function push(args, env = {}) {
   return new Promise((resolve) => {
-    execFile(process.execPath, [PUSH, ...args], { env: { BONEZ_URL: base, BONEZ_API_KEY: KEY, ...env }, encoding: "utf8" },
+    // The parent's environment is inherited (a Windows child without SystemRoot cannot open a socket);
+    // the three variables the tool reads are set here, so nothing of the developer's own leaks in.
+    execFile(process.execPath, [PUSH, ...args], { env: { ...process.env, BONEZ_ALLOW_HTTP: "", BONEZ_URL: base, BONEZ_API_KEY: KEY, ...env }, encoding: "utf8" },
       (err, stdout, stderr) => resolve({ status: err ? (err.code ?? 1) : 0, stdout, stderr }))
   })
 }
@@ -261,11 +264,10 @@ describe("nothing is sent when the input is wrong (exit 2)", () => {
     put(noManifest, "dist/index.js", VECTOR_INDEX_JS)
     await refusedLocally([noManifest], {}, /no package.json/)
     await refusedLocally([plugin({ "node_modules/x/index.js": "x" })], {}, /node_modules\/ not allowed/)
+    // Where symlinks are not allowed (Windows without Developer Mode) these two are left out.
     const withLink = plugin()
-    symlinkSync("/etc/hosts", join(withLink, "dist", "link.js"))
-    await refusedLocally([withLink], {}, /symlink not allowed/)
+    if (trySymlink("/etc/hosts", join(withLink, "dist", "link.js"))) await refusedLocally([withLink], {}, /symlink not allowed/)
     const link = join(freshDir(), "link")
-    symlinkSync(plugin(), link)
-    await refusedLocally([link], {}, /symlink not allowed/)
+    if (trySymlink(plugin(), link)) await refusedLocally([link], {}, /symlink not allowed/)
   })
 })

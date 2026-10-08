@@ -62,7 +62,7 @@ jobs:
       - name: bonez-session-sync.mjs syntax + vendored bundle
         run: |
           set -euo pipefail
-          for f in bin/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
+          for f in bin/*.mjs bin/lib/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/vendor/*.mjs tests/*.mjs tests/lib/*.mjs; do
             node --check "$f"
             echo "ok: $f"
           done
@@ -75,6 +75,9 @@ jobs:
 
       - name: Plugin push tests
         run: ./tests/test_plugin_push.sh
+
+      - name: Windows-portability tests (shared hash vectors, path normalisation, line endings, hook commands)
+        run: ./tests/test_windows.sh
 
       - name: Skills parity across harness legs
         run: |
@@ -275,3 +278,30 @@ jobs:
             grep -q '^description:' "$f" || { echo "::error::$f missing description"; exit 1; }
             echo "ok: $f"
           done
+
+  # The same node tests on Windows, where the plugin's users are (Claude Code, Codex and Cursor on
+  # Windows 11). A Windows runner defaults to core.autocrlf=true, so this also proves .gitattributes
+  # keeps the checkout LF. The write gate runs under Git Bash, the shell Claude Code uses for hooks.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The template build tests need bun and skip themselves without it.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Tree hash on the shared vectors, push CLI against a fake gateway, Windows paths
+        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs
+
+      - name: Push smoke test (fake gateway on 127.0.0.1)
+        run: node tests/lib/push-smoke.mjs
+
+      - name: Write gate under Git Bash
+        shell: bash
+        run: ./tests/test_gate.sh
