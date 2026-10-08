@@ -4,43 +4,63 @@ The official [bonez](https://bonez.io) plugin for AI coding tools — your organ
 
 Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example `https://bonez.example.com`).
 
-## Install for your own Bonez server
+## Install
 
-Claude Code. Three steps:
+Open `https://<your server>/mcp/install` (for example `https://bonez.example.com/mcp/install`). It shows one command for your OS. It installs this plugin into every one of Claude Code, Codex and Cursor on the machine, pointed at your server:
 
-1. **Install the plugin and point it at your server.** One command, the same in every shell (replace the address with your server's, no trailing slash and no `/mcp`; on Bonez's own cloud leave `--config` off):
+```powershell
+irm https://bonez.example.com/mcp/install.ps1 | iex      # Windows (PowerShell)
+```
 
-   ```bash
-   claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
-   ```
+```bash
+curl -fsSL https://bonez.example.com/mcp/install.sh | sh   # macOS and Linux
+```
 
-   It adds the marketplace, installs the plugin and sets `bonez_url`. (`--marketplace` and `--config` need a current Claude Code; `claude update` first if it says the option is unknown.) The `https://` URL is on purpose: the `owner/repo` form clones over SSH, which a machine without a GitHub SSH key cannot do.
+The server writes its own address into the plugin, because only Claude Code can ask for it at install time. The script is plain text at the same URL; read it first if you like. Then sign in once per tool:
 
-2. **Authenticate.** Pick one:
+| Tool | Sign in |
+|---|---|
+| Claude Code | `/mcp`, pick `bonez`, **Authenticate** |
+| Codex (CLI and ChatGPT app) | the script opens the browser; or `codex mcp login bonez` |
+| Cursor | reload the window, then **Customize > MCPs > bonez > Authenticate** |
 
-   - **OAuth**, when your server has OAuth enabled: run `/mcp`, choose the Bonez server (`plugin:bonez:bonez`), then **Authenticate**, and finish the sign-in in your browser.
-   - **An API key** minted by an admin of your server (no browser, or a server without OAuth). Run, with your server's URL:
+Then try:
 
-     ```bash
-     claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
-     ```
+```text
+/bonez:context
+Search Bonez for how we handle webhook retries.
+What breaks if I change <a symbol in this repo>?
+Remember that the deploy script lives in infra/, not the app repo.
+```
 
-   The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured, so the plugin's own server can only sign in with OAuth. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; per Claude Code's MCP docs a plugin server pointing at the same endpoint as one you added yourself counts as a duplicate, so keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains all of this in the session.
+The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
 
-3. **Try it.**
+### Bonez's own cloud (no script)
 
-   ```text
-   /bonez:context
-   Search Bonez for how we handle webhook retries.
-   What breaks if I change <a symbol in this repo>?
-   Remember that the deploy script lives in infra/, not the app repo.
-   ```
+Each tool installs the plugin natively and points at `gateway.bonez.io` by default:
 
-   The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
+```bash
+claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin
+codex plugin marketplace add bonez-io/ai-plugin && codex plugin add bonez@bonez
+```
+
+Cursor: copy [`cursor/`](cursor/) to `~/.cursor/plugins/local/bonez` (`%USERPROFILE%\.cursor\plugins\local\bonez` on Windows) and reload the window.
+
+For your own server in Claude Code without the script, add `--config bonez_url=https://bonez.example.com` to the first command.
+
+### Claude Code and an API key
+
+OAuth is the default. For a machine with no browser, an admin of your server mints a key and you add the server yourself:
+
+```bash
+claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
+```
+
+The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains this in the session.
 
 ## Windows
 
-Claude Code, Codex and Cursor run on Windows 11. What differs from the text above:
+Claude Code, Codex and Cursor run on Windows 11. Before the one command:
 
 ```powershell
 winget install --id Git.Git -e
@@ -48,37 +68,11 @@ winget install --id OpenJS.NodeJS.LTS -e
 winget install --id Oven-sh.Bun --exact --version 1.3.14
 ```
 
-Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code runs a plugin's hook commands through Git Bash (it falls back to PowerShell only when Git Bash is missing, and then `bash` is not found and the write gate silently does not run; [hooks reference](https://code.claude.com/docs/en/hooks)). **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
+Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code and Cursor run this plugin's write gate (a bash script) through it; without it writes go through unprompted and reads are unaffected. **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
 
-**Claude Code** (PowerShell). The install command is the same one as above, with nothing to quote:
+Cursor's gate runs `bash ./hooks/gate-write.sh`, so `bash` must be on the PATH Cursor starts with, and it must be Git Bash, not the WSL launcher in `C:\Windows\System32`. Git for Windows' default PATH option adds only Git itself; choose *Use Git and optional Unix tools from the Command Prompt* or add `C:\Program Files\Git\bin` to PATH.
 
-```powershell
-claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
-claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
-```
-
-The last line is only for an API key (set `$env:BONEZ_API_KEY = "bnz_..."` first); with OAuth, skip it and use `/mcp` as above.
-
-**Codex.** The config file is `$HOME\.codex\config.toml` (`%USERPROFILE%\.codex\config.toml`). The commands are the same; run them from a clone of this repo to copy the skills:
-
-```powershell
-codex mcp add bonez --url https://bonez.example.com/mcp
-codex mcp login bonez
-New-Item -ItemType Directory -Force $HOME\.agents\skills | Out-Null
-Copy-Item -Recurse -Force .\codex\skills\* $HOME\.agents\skills\
-```
-
-Inside WSL, use the Linux commands.
-
-**Cursor.** There is no `cursor --add-mcp '<json>'` line for Windows: Windows PowerShell 5.1 and cmd strip the inner double quotes of that argument (PowerShell 7 does too for a `.cmd` launcher; `tests\windows-client-checks.ps1` reproduces it with a `.cmd` shim). Use the one-click **Install in Cursor** button on `https://bonez.example.com/mcp/install`, or put the block that page shows in `%USERPROFILE%\.cursor\mcp.json` (`~/.cursor/mcp.json` in [Cursor's docs](https://cursor.com/docs/mcp)). To install this repo as a local plugin:
-
-```powershell
-git clone https://github.com/bonez-io/ai-plugin.git $HOME\bonez-ai-plugin
-New-Item -ItemType Directory -Force $HOME\.cursor\plugins\local | Out-Null
-Copy-Item -Recurse $HOME\bonez-ai-plugin\cursor $HOME\.cursor\plugins\local\bonez
-```
-
-Cursor's write gate runs `bash ./hooks/gate-write.sh`, so `bash` must be on the PATH Cursor starts with, and it must be Git Bash, not the WSL launcher in `C:\Windows\System32`. Git for Windows' default PATH option adds only Git itself; choose *Use Git and optional Unix tools from the Command Prompt* or add `C:\Program Files\Git\bin` to PATH (unverified on Windows). Without `bash`, Cursor lets writes through unprompted; reads are unaffected.
+There is no `cursor --add-mcp '<json>'` line for Windows: Windows PowerShell 5.1 and cmd strip the inner double quotes of that argument. Use the **Add to Cursor** button on the install page.
 
 **Check the machine.** From a clone of this repo, `tests\windows-client-checks.ps1` prints PASS / FAIL / SKIP, with evidence, for everything above (Git Bash, node, bun, the CLIs, the hash tool on the shared vectors, a push to a fake gateway on 127.0.0.1, the write gate under Git Bash). It makes no network call except to localhost:
 
@@ -92,19 +86,15 @@ The Codex and Cursor legs ship pointing at Bonez's own cloud (`gateway.bonez.io`
 
 ### OpenAI Codex
 
-MCP config in Codex lives in `~/.codex/config.toml`, shared by Codex CLI, the
-IDE extension, and the desktop app — no separate GUI "add server" flow is
-documented beyond that shared file, so config.toml (directly or via the CLI)
-is the one path in:
+Codex installs this as a plugin (skills and the MCP server together), from the CLI or the ChatGPT desktop app, which share `~/.codex`:
 
 ```bash
-codex mcp add bonez --url https://gateway.bonez.io/mcp   # your own server: https://<your server>/mcp
-codex mcp login bonez   # run OAuth now instead of waiting for a 401
+codex plugin marketplace add bonez-io/ai-plugin
+codex plugin add bonez@bonez
+codex mcp login bonez
 ```
 
-Or paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml`
-yourself — same OAuth-by-default install as Claude Code (`auth` defaults to
-`"oauth"` for a streamable-HTTP server with no bearer token configured).
+The plugin's [`codex/.mcp.json`](codex/.mcp.json) pins the sign-in to the Bonez CLI app with the `bonez:*` scopes: Codex asks only for OpenID scopes unless told, and its own client is not one every Bonez server's login knows. To add only the server by hand, paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml` (`$HOME\.codex\config.toml` on Windows).
 
 Guidance ports:
 
