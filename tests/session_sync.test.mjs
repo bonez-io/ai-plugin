@@ -1262,6 +1262,72 @@ describe("backfill: the accumulated history a per-start drip can never reach", (
   })
 })
 
+// ------------------------------------------------------------------ foreign gateway guard
+
+describe("login / install refuse a gateway Bonez does not operate", () => {
+  // The bug this guards: session capture signs in against Bonez's own identity provider and
+  // uploads to Bonez's own pipeline. A user whose plugin points at a customer's Bonez server
+  // (BONEZ_MCP_URL / BONEZ_GATEWAY_URL) must never end up shipping transcripts to ours by
+  // running `login` out of habit. BONEZ_OAUTH_CLIENT_ID is blanked so that even a regressed
+  // guard fails fast on an assertion rather than starting a real device flow.
+  const guarded = (extra) => ({ BONEZ_OAUTH_CLIENT_ID: "", ...extra })
+
+  for (const [label, env] of [
+    ["BONEZ_GATEWAY_URL", { BONEZ_GATEWAY_URL: "https://bonez.example.com" }],
+    ["BONEZ_MCP_URL", { BONEZ_MCP_URL: "https://bonez.example.com/mcp" }],
+  ]) {
+    test(`install refuses a customer box set via ${label}, and writes nothing`, async () => {
+      const dataDir = freshDir("guard-install")
+      const res = await runCli(["install", TEST_KEY, "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, ...env }) })
+      assert.equal(res.status, 1)
+      assert.match(res.stderr, /refusing `install`.*bonez\.example\.com/s)
+      assert.equal(existsSync(join(dataDir, "config.json")), false)
+      rmSync(dataDir, { recursive: true, force: true })
+    })
+
+    test(`login refuses a customer box set via ${label}, before any sign-in`, async () => {
+      const dataDir = freshDir("guard-login")
+      const res = await runCli(["login", "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, ...env }) })
+      assert.equal(res.status, 1)
+      assert.match(res.stderr, /refusing `login`.*bonez\.example\.com/s)
+      assert.doesNotMatch(res.stderr, /install <bnz_/, "must refuse on the host, not fall through to the missing-client path")
+      assert.equal(existsSync(join(dataDir, "config.json")), false)
+      rmSync(dataDir, { recursive: true, force: true })
+    })
+  }
+
+  test("look-alike hosts are refused: the match is on the exact host", async () => {
+    for (const url of [
+      "https://gateway.bonez.io.evil.example",
+      "https://evilgateway.bonez.io",
+      "https://console.bonez.io",
+      "not a url",
+    ]) {
+      const dataDir = freshDir("guard-lookalike")
+      const res = await runCli(["install", TEST_KEY, "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: url }) })
+      assert.equal(res.status, 1, `${url} must be refused`)
+      assert.equal(existsSync(join(dataDir, "config.json")), false)
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  test("our own gateways and loopback still install: prod (default), qa, and a local gateway", async () => {
+    for (const env of [
+      {},
+      { BONEZ_GATEWAY_URL: "https://qa.gateway.bonez.io" },
+      { BONEZ_MCP_URL: "https://GATEWAY.bonez.io:443/mcp" },
+      { BONEZ_GATEWAY_URL: "http://127.0.0.1:8080" },
+      { BONEZ_GATEWAY_URL: "http://localhost:8080" },
+    ]) {
+      const dataDir = freshDir("guard-allowed")
+      const res = await runCli(["install", TEST_KEY, "--global"], { env: guarded({ CLAUDE_PLUGIN_DATA: dataDir, ...env }) })
+      assert.equal(res.status, 0, `${JSON.stringify(env)} must be allowed: ${res.stderr}`)
+      assert.equal(existsSync(join(dataDir, "config.json")), true)
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+})
+
 // ------------------------------------------------------------------- credential store location
 
 describe("credential store: one sign-in shared by all three clients", () => {

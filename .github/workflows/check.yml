@@ -70,6 +70,9 @@ jobs:
       - name: Session capture tests
         run: ./tests/test_session_sync.sh
 
+      - name: Package hash tool tests
+        run: ./tests/test_package_hash.sh
+
       - name: Skills parity across harness legs
         run: |
           set -euo pipefail

@@ -2,7 +2,7 @@
   "mcpServers": {
     "bonez": {
       "type": "http",
-      "url": "${BONEZ_MCP_URL:-https://gateway.bonez.io/mcp}",
+      "url": "${user_config.bonez_url}/mcp",
       "headers": {
         "x-bonez-mcp-consumer": "claude-code-plugin"
       }

@@ -387,6 +387,33 @@ function gatewayBaseUrl() {
   return "https://gateway.bonez.io"
 }
 
+// Session capture signs in against Bonez's OWN identity provider and uploads to Bonez's OWN
+// import pipeline, so it is only for Bonez-operated gateways. A customer's Bonez server is a
+// different tenant, and a developer's transcripts must never land in ours by accident because
+// the plugin happens to point somewhere else. `login` and `install` therefore refuse any other
+// host. Loopback is allowed so a local gateway (and this repo's stub-gateway tests) still work.
+const OUR_GATEWAY_HOSTS = new Set(["gateway.bonez.io", "qa.gateway.bonez.io", "localhost", "127.0.0.1", "[::1]"])
+
+// Returns true (after saying why on stderr) when the configured gateway is not one of ours.
+function refuseForeignGateway(command) {
+  const base = gatewayBaseUrl()
+  let host = ""
+  try {
+    host = new URL(base).hostname.toLowerCase()
+  } catch {
+    /* an unparseable URL is not one of ours either */
+  }
+  if (OUR_GATEWAY_HOSTS.has(host)) return false
+  console.error(
+    `bonez session capture: refusing \`${command}\` — the configured Bonez URL (${host || "unparseable"}) is not a\n` +
+      "Bonez-operated gateway (gateway.bonez.io, qa.gateway.bonez.io). Session capture signs in to Bonez's own\n" +
+      "identity provider and uploads to Bonez's own pipeline, so it is not for a customer's Bonez server.\n" +
+      "If BONEZ_GATEWAY_URL or BONEZ_MCP_URL is set by mistake, unset it.",
+  )
+  process.exitCode = 1
+  return true
+}
+
 // -------------------------------------------------------------------------------- hook (fast path)
 
 // Reads the hook's stdin JSON synchronously — the same "block until EOF" approach
@@ -1310,6 +1337,7 @@ function consentText(cfg) {
 }
 
 function cmdInstall(key, rest) {
+  if (refuseForeignGateway("install")) return
   reportMigration()
   if (!key || !key.startsWith("bnz_")) {
     console.error("usage: bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
@@ -1326,6 +1354,7 @@ function cmdInstall(key, rest) {
 }
 
 async function cmdLogin(rest) {
+  if (refuseForeignGateway("login")) return
   reportMigration()
   const { repos: explicitRepos, global } = parseInstallArgs(rest)
   const scope = global ? "global" : "repo"

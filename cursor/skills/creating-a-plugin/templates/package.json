@@ -1,0 +1,23 @@
+{
+  "name": "__PACKAGE_NAME__",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "__DESCRIPTION__",
+  "keywords": ["pi-package"],
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test",
+    "build:package": "bun scripts/build-package.mjs"
+  },
+  "exports": { ".": "./src/index.ts" },
+  "pi": { "extensions": ["./src/index.ts"] },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "0.87.1" },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@tsconfig/bun": "1.0.9",
+    "@types/bun": "1.3.13",
+    "@types/node": "24.12.2",
+    "@typescript/native-preview": "7.0.0-dev.20251207.1"
+  }
+}

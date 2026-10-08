@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Official bonez plugin for Cursor. The org context lake — knowledge graph, search, rules, and memories — over MCP.",
-    "version": "0.7.1"
+    "version": "0.8.0"
   },
   "plugins": [
     {
       "name": "bonez",
       "source": "./cursor",
-      "version": "0.7.1",
+      "version": "0.8.0",
       "logo": "assets/logo.svg",
       "category": "productivity",
       "license": "MIT",
@@ -22,7 +22,7 @@
         "name": "Bonez",
         "url": "https://bonez.io"
       },
-      "description": "Bring your organization's context lake into Cursor — org search across code, decisions, tickets, PRs, docs and people; graph-powered navigation (callers, blast radius, tests-for); standing org rules and durable memories over the bonez MCP, with an approval gate on memory/rules writes.",
+      "description": "Bring your organization's context lake into Cursor — org search across code, decisions, tickets, PRs, docs and people; graph-powered navigation (callers, blast radius, tests-for); standing org rules and durable memories over the bonez MCP, with an approval gate on graph_write and rules writes.",
       "keywords": [
         "context",
         "knowledge-graph",

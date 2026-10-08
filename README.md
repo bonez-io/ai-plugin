@@ -1,33 +1,58 @@
 # bonez ai-plugin
 
-The official [bonez](https://bonez.io) plugin for AI coding tools — your organization's **context lake** delivered into whatever coding agent you already use, over MCP.
+The official [bonez](https://bonez.io) plugin for AI coding tools — your organization's **context graph** delivered into whatever coding agent you already use, over MCP.
 
-Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well.
+Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example `https://bonez.example.com`).
 
-## Install
+## Install for your own Bonez server
 
-### Claude Code (recommended)
+Claude Code. Five steps:
 
-The repo is its own marketplace:
+1. **Add the marketplace.**
 
-```bash
-claude plugin marketplace add bonez-io/ai-plugin
-claude plugin install bonez@bonez
-```
+   ```bash
+   claude plugin marketplace add bonez-io/ai-plugin
+   ```
 
-That's it — no key to mint, no env var to set. The bundled `.mcp.json` ships with no
-`Authorization` header, so the first call gets a 401 and Claude Code walks you through
-OAuth in the browser automatically. You need to be a member of an org that's already
-onboarded to bonez; sign in there.
+2. **Install the plugin.**
 
-To run that flow yourself instead of waiting for the first tool call (Claude Code
-v2.1.186+):
+   ```bash
+   claude plugin install bonez@bonez
+   ```
 
-```bash
-claude mcp login bonez
-```
+3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://bonez.example.com`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
 
-That opens a browser, you authorize, and `/mcp` shows `bonez` connected.
+   ```bash
+   echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
+   ```
+
+   then restart Claude Code.
+
+4. **Authenticate.** Pick one:
+
+   - **OAuth**, when your server has OAuth enabled: run `/mcp`, choose the Bonez server (`plugin:bonez:bonez`), then **Authenticate**, and finish the sign-in in your browser.
+   - **An API key** minted by an admin of your server (no browser, or a server without OAuth). Run, with your server's URL:
+
+     ```bash
+     claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
+     ```
+
+   The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured, so the plugin's own server can only sign in with OAuth. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; per Claude Code's MCP docs a plugin server pointing at the same endpoint as one you added yourself counts as a duplicate, so keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains all of this in the session.
+
+5. **Try it.**
+
+   ```text
+   /bonez:context
+   Search Bonez for how we handle webhook retries.
+   What breaks if I change <a symbol in this repo>?
+   Remember that the deploy script lives in infra/, not the app repo.
+   ```
+
+   The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
+
+## Other clients and credentials
+
+The Codex and Cursor legs ship pointing at Bonez's own cloud (`gateway.bonez.io`) and are written for that default; for your own Bonez server, change the URL as noted in each.
 
 ### OpenAI Codex
 
@@ -37,7 +62,7 @@ documented beyond that shared file, so config.toml (directly or via the CLI)
 is the one path in:
 
 ```bash
-codex mcp add bonez --url https://gateway.bonez.io/mcp
+codex mcp add bonez --url https://gateway.bonez.io/mcp   # your own server: https://<your server>/mcp
 codex mcp login bonez   # run OAuth now instead of waiting for a 401
 ```
 
@@ -47,11 +72,11 @@ yourself — same OAuth-by-default install as Claude Code (`auth` defaults to
 
 Guidance ports:
 
-- [`codex/AGENTS.md`](codex/AGENTS.md) — the 8 skills compressed into
-  always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
+- [`codex/AGENTS.md`](codex/AGENTS.md) — the graph and tool-lake skills (all
+  but `creating-a-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 8 skills, ported ~verbatim,
+- [`codex/skills/`](codex/skills/) — the same 10 skills, ported ~verbatim,
   because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
@@ -63,22 +88,23 @@ Guidance ports:
   favor of skills; included anyway since they still work today.
 
 **Write-gate gap.** Claude Code's `hooks/gate-write.sh` pauses for
-interactive approval before every `rules`/`memory` write, because rules bind
-every future session in the org. Codex has no equivalent: its `PreToolUse`
+interactive approval before every `graph_write` call and every `rules` write,
+because rules bind every future session in the org. Codex has no equivalent: its `PreToolUse`
 hook can only unconditionally allow or deny a call — `permissionDecision:
 "ask"` is parsed but explicitly unimplemented upstream, and Codex fails open
 (marks the hook run failed, lets the call through) rather than blocking. The
 closest native substitute is `approval_mode = "approve"` on the MCP server's
-`memory`/`rules` tools in `config.toml` (commented out in
+`graph_write`/`rules` tools in `config.toml` (commented out in
 [`codex/config.toml`](codex/config.toml)), but that prompts for *every* call
-including harmless `recall`/`list`/`get`, not just writes. **Writes are
+including `rules` `list`/`get` reads, not just writes. **Writes are
 unguarded by default on the Codex leg — there is no bundled equivalent of
-the Claude Code gate.**
+the Claude Code gate.** The same commented block also lists `vendor_operation`,
+which no leg's gate covers (see [Vendor operations](#vendor-operations)).
 
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 8 skills, both commands, and the write gate.
+install brings the MCP server, the 10 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
 Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
@@ -106,7 +132,7 @@ every part is discovered without configuration:
 | --- | --- | --- |
 | Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
 | MCP server | `cursor/mcp.json` | OAuth by default |
-| Skills | `cursor/skills/` | the same 8 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
+| Skills | `cursor/skills/` | the same 10 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
 | Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
 | Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
@@ -129,7 +155,7 @@ Naming the interpreter runs the script in-process over stdio on every OS; where
 window), which is the right side to fail on.
 
 **The write gate works here** — unlike the Codex leg. Cursor's
-`beforeMCPExecution` genuinely supports `permission: "ask"`, so `memory`/`rules`
+`beforeMCPExecution` genuinely supports `permission: "ask"`, so `graph_write` calls and `rules`
 writes get the same approval prompt Claude Code gives them; reads pass through
 untouched.
 
@@ -195,37 +221,35 @@ The bonez mark ships wherever a manifest has somewhere to put it:
 
 ### Headless / CI: API key instead
 
-OAuth needs a browser, so CI runners, remote boxes, and other headless contexts still use
-a personal API key. This lane isn't going away — it's just no longer the default. Mint one
-in [console.bonez.io](https://console.bonez.io) under **API keys**, then add the header
-yourself (the shipped `.mcp.json` deliberately omits it — Claude Code will not fall back to
-OAuth once *any* `Authorization` header is configured, even one that resolves empty):
+OAuth needs a browser, so CI runners, remote boxes, and servers without OAuth use an API key
+minted by an admin of your Bonez server (in the Bonez console under **API keys**; on Bonez's own
+cloud, [console.bonez.io](https://console.bonez.io)). Add the header yourself — the shipped
+`.mcp.json` deliberately omits it, because Claude Code will not fall back to OAuth once *any*
+`Authorization` header is configured, even one that resolves empty:
 
 ```bash
 export BONEZ_API_KEY=bnz_...
-claude mcp add --transport http bonez "${BONEZ_MCP_URL:-https://gateway.bonez.io/mcp}" \
+claude mcp add --transport http bonez https://<your server>/mcp \
   --header "Authorization: Bearer ${BONEZ_API_KEY}"
 ```
 
 ### Raw MCP (any client, no plugin)
 
-Any MCP client that speaks OAuth discovery: point it at the streamable-HTTP endpoint
-`https://gateway.bonez.io/mcp` with no `Authorization` header and let it 401 into the
-browser flow. Clients that don't: same endpoint, `Authorization: Bearer <key>` header.
-
-```bash
-claude mcp add --transport http bonez https://gateway.bonez.io/mcp --header "Authorization: Bearer <key>"
-```
+Any MCP client that speaks OAuth discovery: point it at your server's streamable-HTTP endpoint
+(`https://<your server>/mcp`; Bonez's own cloud is `https://gateway.bonez.io/mcp`) with no
+`Authorization` header and let it 401 into the browser flow. Clients that don't: same endpoint,
+`Authorization: Bearer <key>` header. The server also serves its own install page at
+`https://<your server>/mcp/install`.
 
 ### Environment
 
 | Variable | Purpose |
 | --- | --- |
-| `BONEZ_API_KEY` | Personal bonez API key (`bnz_…`), minted in console.bonez.io. Optional — only needed for the headless/CI key lane; the default install authenticates via OAuth instead. |
-| `BONEZ_MCP_URL` | Override the MCP endpoint — qa (`https://qa.gateway.bonez.io/mcp`) or a local gateway. Defaults to prod. |
-| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the memory/rules write permission prompts (headless/CI runs). |
+| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above; the Claude Code plugin itself never reads it. |
+| `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
+| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts (headless/CI runs). |
 | `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
-| `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — qa or a local gateway. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io`. |
+| `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — qa or a local gateway. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io` (the default; the override is for Bonez's own qa and local gateways — see Session capture). |
 
 ### API key scopes
 
@@ -236,39 +260,67 @@ MCP-scoped key never reaches the import routes. Mint the smallest one that cover
 
 | Scope | Unlocks |
 | --- | --- |
-| `read` | Everything read-only: `search`, `schema`, `query`, `fetch`, `context`, plus `memory` recall and `rules` list/get. |
-| `read+memory` | `read`, plus `memory` save/update/delete. |
+| `read` | Everything read-only: `graph_schema`, `graph_query`, `graph_search`, `graph_fetch`, `graph_history`, plus `rules` list/get, `tool_search` and `vendor_operation_status`. It also runs `vendor_operation`, writes included: see the note below. |
+| `read+memory` | `read`, plus `graph_write`. A read-only key gets `memory_scope_required`. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 
+**On servers released before Linear 1SI-2292, `vendor_operation` ignores the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse a vendor write without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
+
 ## The tools
 
-Seven tools, one loop: **`search` → `schema` → `query` → `fetch`**.
+One loop: **`graph_search` → `graph_schema` → `graph_query` → `graph_fetch`**, plus the rulebook and the vendor tools.
 
 | Tool | What it does |
 | --- | --- |
-| `search` | Fused org search by intent — code, knowledge, memories, tickets, PRs, docs, people — one ranked call. |
-| `schema` | The graph's live ontology: node types, edges, coverage. Call it before guessing shapes. |
-| `query` | The BGQ executor — graph traversals over the whole indexed org (callers, blast radius, tests-for, and anything else the grammar reaches). |
-| `fetch` | Dereference anything — `~handle`, vendor URL, urn, or `repo_id/path[:line]` — into the full record with provenance and temporal status. |
-| `context` | The mount: the same org identity, knowledge, rules, and memory bands bonez's own first-party agents boot with. |
-| `memory` | The pen: `recall` freely; `save`/`update`/`delete` durable facts back into the lake (gated behind a permission prompt by this plugin). |
-| `rules` | The rulebook: `list`/`get` the org's standing rules and slash commands freely; `save`/`update`/`delete` change binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
+| `graph_schema` | The graph's live schema and how to work with it: an overview, one type's detail, `find` for a matching sub-schema plus worked catalog queries, or a generated `guide`. Call it before guessing a type, field, edge or query name. |
+| `graph_search` | Find starting nodes by keywords plus meaning. Each result is a `~hex` handle with its attached-memory count. |
+| `graph_query` | Run a read-only BGQ query, or a stored catalog query by `name`; `at` reads the past. Memories cannot be queried. |
+| `graph_fetch` | Read one node in full — a handle, node key or URL — with provenance, neighbours and its attached memories; reads a memory by its `m:…` id. |
+| `graph_history` | Who changed what in the graph, and when: one node's history, one commit's diff, or the change feed. |
+| `graph_write` | Typed memory operations — `remember`, `revise`, `claim`, `link`, `unlink`, `close` (and `note`); no delete. Needs the `memory` scope. Prompt-gated by this plugin. |
+| `rules` | `list`/`get` the org's standing rules and slash commands freely; `save`/`update`/`delete` change binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
+| `tool_search`, `vendor_operation`, `vendor_operation_status` | The tool lake: find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) an operation on the vendor systems your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. `vendor_operation` acts as the signed-in user, reads and writes alike. **Not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
+
+A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, `machine_attach`, and
+others). They only work inside a Slack conversation turn and are refused for any other credential, so the
+skills never use them.
+
+### Write gate
+
+`hooks/gate-write.sh` is a `PreToolUse` hook: Claude Code asks you before **every `graph_write` call** (every op
+is a write; a `preflight` or `dry_run` asks too) and before `rules` `save`/`update`/`delete`. Reads pass
+through untouched. For servers that still serve the retired `memory` tool, its `save`/`update`/`delete` are
+gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs.
+
+### Vendor operations
+
+`tool_search`, `vendor_operation` and `vendor_operation_status` are the same tool lake the Bonez chat agent uses, served over MCP. The `using-the-tool-lake` skill teaches the flow: `tool_search` first, an `operation_id` copied from its result (never guessed), `vendor_operation` with the operation's own `input`, and `vendor_operation_status` for an `invocation_id` a result carried. If the org has not connected a vendor, the skill has the agent say so rather than work around it.
+
+**What is not guarded.**
+
+- **No write gate.** The write gate above does not cover `vendor_operation`, on any leg. The hook sees only the call (`operation_id`, `input`, `connection_ref`). Whether an operation reads or writes is the operation's `side_effect`, which the server returns in `tool_search` results and keeps in its catalog, not in the call. Gating on it would mean shipping a copy of the server's catalog (which differs by server version) or guessing from operation names, and a wrong guess is silence on a real write, so the plugin ships neither. `tests/test_gate.sh` pins the boundary.
+- **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any operation whose `side_effect` is not `read`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_operation` off your Claude Code allow-list, so its default permission mode asks on every call (reads too), or use the commented `approval_mode = "approve"` stanza in [`codex/config.toml`](codex/config.toml).
+- **Servers before Linear 1SI-2292 do not check the key's scope for `vendor_operation`** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
+
+**Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them as read-only operations in the same lake (`bonez.agent.list.v1`, `bonez.agent.read.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`), and `/bonez:agents` lists them. On an older server `tool_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
 ## Skills
 
-Judgment for using the lake well — traps, defaults, when to stop:
+Judgment for using the graph well — traps, defaults, when to stop:
 
-- **session-context** — mount `context` at task start; what the bands mean.
-- **finding-prior-art** — search→fetch before building; coverage gaps and why absence proves nothing.
-- **querying-the-graph** — the loop; never guess node types or edges.
-- **impact-analysis** — callers / blast radius / tests-for recipes and their depth traps.
-- **remembering** — the memory policy: when, when not, never store.
-- **citing-bonez-sources** — handles vs vendor URLs; never fabricate a handle.
+- **session-context** — load the standing rules and the graph overview at task start; what a failed read means.
+- **finding-prior-art** — search→fetch before building; memories are reached through their anchors; why absence proves nothing.
+- **querying-the-graph** — the loop; never guess type, edge or query names; BGQ pitfalls; memories cannot be queried.
+- **impact-analysis** — callers / blast radius / tests recipes and their depth traps.
+- **remembering** — the `graph_write` policy: when, when not, never store; preflight first; new memories start `pending`.
+- **citing-bonez-sources** — handles; never fabricate one; staleness and history.
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
+- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
+- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus two commands — `/bonez:context` and `/bonez:search <query>` on Claude Code, `/prompts:context` and `/prompts:search` on Codex, `/bonez-context` and `/bonez-search` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
 
 The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
@@ -278,6 +330,14 @@ Your Claude Code, Codex and Cursor conversations already hold everything the har
 learns from — what you tried, what broke, what you decided. This plugin can capture them into the same
 `bonez` knowledge graph the desktop app's manual "Import history" feature feeds, so the org
 learns from them too. It is **off by default** and stays off until you explicitly install it.
+
+**Bonez's own gateways only.** Capture signs in to Bonez's own identity provider and uploads to Bonez's own
+import pipeline, so it is not for a customer's Bonez server. `login` and `install` refuse any gateway host
+other than `gateway.bonez.io` and `qa.gateway.bonez.io` (a loopback host is allowed, for a local gateway),
+with a message saying so, and write nothing. The host checked is the one the script resolves from
+`BONEZ_GATEWAY_URL`, then `BONEZ_MCP_URL` (minus `/mcp`), then the default `https://gateway.bonez.io`; the
+plugin's `bonez_url` option is **not** visible to the script when you run it yourself. If your plugin
+points at your own Bonez server, do not run `login` or `install`.
 
 **What it does:** at the end of a matching session (Claude Code's `SessionEnd`; Codex's
 `SessionEnd`, plus its `SessionStart` as a durable fallback for sessions that crashed or hit
@@ -411,18 +471,18 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
-.mcp.json         the bonez MCP server (BONEZ_MCP_URL-overridable, OAuth by default)
-skills/           8 skills
-commands/         /bonez:context, /bonez:search
-hooks/            PreToolUse write gate + SessionEnd session-capture hook
+.mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
+skills/           10 skills
+commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
+hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture tests (run in CI)
-codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Install → OpenAI Codex; no write gate)
+codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
-cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Install → Cursor; write gate works, no session capture)
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Other clients → Cursor; write gate works, no session capture)
 ```
 
 One gate, three harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
@@ -438,7 +498,8 @@ Codex both read `SKILL.md` from `.agents/skills/`).
 claude --plugin-dir .         # load the working tree for one session
 ./tests/test_gate.sh          # hook gate tests
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
-claude plugin validate .
+claude plugin validate .                          # this repo's marketplace manifest
+claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
 CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root.

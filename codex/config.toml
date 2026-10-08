@@ -8,6 +8,8 @@
 # https://developers.openai.com/codex/mcp — see the repo README's Codex
 # section for what's confirmed vs assumed.
 
+# The URL below is Bonez's own cloud. For your own Bonez server (for example
+# https://bonez.example.com), replace it with `https://<your server>/mcp`.
 [mcp_servers.bonez]
 url = "https://gateway.bonez.io/mcp"
 
@@ -17,9 +19,9 @@ url = "https://gateway.bonez.io/mcp"
 #   codex mcp list          # confirm it's there; `/mcp` inside the TUI does too
 
 # --- Headless / CI: API key instead of OAuth (same lane as Claude Code) ---
-# OAuth needs a browser. For CI runners and other headless contexts, mint a
-# key in console.bonez.io under API keys, export it, and point Codex at the
-# env var instead — do not paste the key into this file.
+# OAuth needs a browser. For CI runners and other headless contexts, have a
+# Bonez admin of your server mint a key (console -> API keys), export it, and
+# point Codex at the env var instead — do not paste the key into this file.
 #
 #   export BONEZ_API_KEY=bnz_...
 #
@@ -32,16 +34,22 @@ url = "https://gateway.bonez.io/mcp"
 # inside config.toml the way the Claude Code leg's .mcp.json does.
 #   url = "https://qa.gateway.bonez.io/mcp"
 
-# --- Optional: coarse write friction on memory/rules (see README) ---
+# --- Optional: coarse write friction on graph_write/rules/vendor_operation (see README) ---
 # Codex has no per-argument write gate (no equivalent of the Claude Code
 # PreToolUse "ask" hook — see README). The closest native approximation
-# prompts for EVERY call to a tool, including harmless reads like `recall`
-# or `list`/`get`, not just save/update/delete:
+# prompts for EVERY call to a tool — every graph_write op is a write, but
+# `rules` also prompts for harmless `list`/`get` reads, and `vendor_operation`
+# (the tool lake: reads AND writes on the org's vendors, as you) prompts for
+# every operation. No harness's plugin gate covers `vendor_operation`, and the
+# server does not check the key's scope for it, so this is the only hard stop:
 #
-# [mcp_servers.bonez.tools.memory]
+# [mcp_servers.bonez.tools.graph_write]
 # approval_mode = "approve"
 #
 # [mcp_servers.bonez.tools.rules]
+# approval_mode = "approve"
+#
+# [mcp_servers.bonez.tools.vendor_operation]
 # approval_mode = "approve"
 
 # --- Optional: session capture (off until you run `login` — see README) ---
