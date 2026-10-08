@@ -25,7 +25,7 @@ Nothing in this plugin gates `vendor_operation` on any harness (the write gate c
 - **when it runs**, in words and as cron (`every night at 03:00 UTC`, `0 3 * * *`), or "only when someone starts it". Say the timezone; it is UTC unless the user names one;
 - the **plugins** it will use, by name, if any;
 - what the **instructions** will say, in two or three lines (the full text if they ask);
-- the **model** only if it is not the default, and what a run costs in words ("one run per night on the balanced model"), never a number you cannot know.
+- the **model tier** only if the user names one (`rig`), and what a run costs in words ("one run per night on the org's default models"), never a number you cannot know.
 
 Then wait for a clear yes in this conversation. A yes covers that spec: if anything changes, say the new spec and ask again. A yes to your earlier suggestion is not this yes.
 
@@ -64,7 +64,7 @@ Only `name` and `instructions` are required. The rest:
 - `description`: one line (default: the first sentence of the instructions). `display_name`: default is the name, title-cased.
 - `plugins`: names of plugins already uploaded to the org's Library, as the Library lists them (the package name, like `@acme/pi-hello-check`; right after the plugin creator it is the package name in its HANDOFF block). At most 16. An unknown name is refused as `unknown_plugin` with the names that exist: choose from those, never invent one.
 - `runs_on`: a computer tag, only if the user names the computer the agent must run on; the default is the Bonez box.
-- `model`: `economy`, `balanced` (the default) or `max`. Use `max` only when the user asks.
+- `rig`: only when the user asks for a particular model tier: the id or the name of one of the org's rigs. An unknown one is refused with the list of rigs that exist, so pick from that. Leave it out for the org's default, which is almost always right.
 - `schedule`: `{cron, timezone}` as in section 2. Leave it out for an agent that only a person starts.
 - `request_id`: leave it out.
 

@@ -18,7 +18,7 @@ Some work should not depend on someone remembering it. A Bonez agent runs writte
 - **Never for one-off work.** A one-time migration, a question you can answer now, a bug that cannot recur: no suggestion. Ask whether anyone would want this done again next week.
 - **Look before you offer.** Run `tool_search` with `{"vendor": "bonez"}`, then `bonez.agent.list.v1` with `{"search": "<a word from the job>"}`. If an agent already covers it, mention that one (its name, its trigger, its latest run) instead of proposing a twin.
 - **A server that cannot create agents** (the search shows no `bonez.agent.create.v1`) still gets the suggestion: give the same two lines, say the user can set it up in the web builder (the Agents page in the Bonez web app), and offer to write the instructions for them to paste. Do not drop the idea.
-- **Say the cost in words**, not in a number you cannot know: "one run a night on the balanced model".
+- **Say the cost in words**, not in a number you cannot know: "one run a night on the org's default models".
 - **Only what an agent can do.** Plan on an agent that reads the Bonez graph (code, PRs, tickets, docs and memories as Bonez has indexed them) and uses the plugins you list, with no connection of its own to other systems, reporting in its run summary. If the check needs a running service, a secret or a vendor system, say so in the offer.
 - **Accept a no.** Do not argue, and do not ask again this session.
 
