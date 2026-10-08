@@ -1,22 +1,25 @@
-# bonez MCP server for Codex — paste into ~/.codex/config.toml
-# (or <repo>/.codex/config.toml for a trusted-project-only install).
+# bonez MCP server for Codex, WITHOUT the plugin — paste into ~/.codex/config.toml
+# ($HOME\.codex\config.toml on Windows), or <repo>/.codex/config.toml for one trusted project.
 #
-# `auth` defaults to "oauth" when omitted, so this is the same no-key,
-# browser-OAuth default install as the Claude Code leg: the first tool call
-# 401s and Codex walks you through sign-in. Verified against the streamable
-# HTTP `mcp_servers` config documented at
-# https://developers.openai.com/codex/mcp — see the repo README's Codex
-# section for what's confirmed vs assumed.
+# The plugin is the way in: `codex plugin marketplace add bonez-io/ai-plugin`, then
+# `codex plugin add bonez@bonez` (see the README). Use this file only for the server alone.
+#
+# Sign-in is OAuth. Codex asks only for OpenID scopes unless `scopes` is set, and its own
+# client is not one every Bonez server's login knows, so the block pins the Bonez CLI app
+# (the same client and callback the plugin's .mcp.json and cursor/mcp.json use).
 
 # The URL below is Bonez's own cloud. For your own Bonez server (for example
 # https://bonez.example.com), replace it with `https://<your server>/mcp`.
 [mcp_servers.bonez]
 url = "https://gateway.bonez.io/mcp"
+scopes = ["bonez:read", "bonez:memory", "bonez:write"]
 
-# --- CLI equivalent of the block above ---
-#   codex mcp add bonez --url https://gateway.bonez.io/mcp
-#   codex mcp login bonez   # run the OAuth flow now instead of waiting for a 401
-#   codex mcp list          # confirm it's there; `/mcp` inside the TUI does too
+[mcp_servers.bonez.oauth]
+client_id = "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm"
+callback_port = 8787
+callback_url = "http://localhost:8787/callback"
+
+# Then sign in: `codex mcp login bonez`; `codex mcp list` (or `/mcp` in the TUI) confirms it.
 
 # --- Headless / CI: API key instead of OAuth (same lane as Claude Code) ---
 # OAuth needs a browser. For CI runners and other headless contexts, have a

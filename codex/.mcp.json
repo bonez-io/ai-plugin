@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "bonez": {
+      "type": "streamable-http",
+      "url": "https://gateway.bonez.io/mcp",
+      "http_headers": { "x-bonez-mcp-consumer": "codex-plugin" },
+      "scopes": ["bonez:read", "bonez:memory", "bonez:write"],
+      "oauth": {
+        "client_id": "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm",
+        "callback_port": 8787,
+        "callback_url": "http://localhost:8787/callback"
+      }
+    }
+  }
+}

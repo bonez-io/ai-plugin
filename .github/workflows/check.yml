@@ -18,7 +18,7 @@ jobs:
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json; do
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json codex/.codex-plugin/plugin.json codex/.mcp.json .agents/plugins/marketplace.json; do
             jq empty "$f"
             echo "ok: $f"
           done
@@ -40,10 +40,15 @@ jobs:
           plugin_version="$(jq -r '.version' .claude-plugin/plugin.json)"
           marketplace_version="$(jq -r '.plugins[] | select(.name == "bonez") | .version' .claude-plugin/marketplace.json)"
           server_version="$(jq -r '.version' server.json)"
+          codex_version="$(jq -r '.version' codex/.codex-plugin/plugin.json)"
+          cursor_version="$(jq -r '.version' cursor/.cursor-plugin/plugin.json)"
           echo "plugin.json:      $plugin_version"
           echo "marketplace.json: $marketplace_version"
           echo "server.json:      $server_version"
-          if [ "$plugin_version" != "$marketplace_version" ] || [ "$plugin_version" != "$server_version" ]; then
+          echo "codex plugin:     $codex_version"
+          echo "cursor plugin:    $cursor_version"
+          if [ "$plugin_version" != "$marketplace_version" ] || [ "$plugin_version" != "$server_version" ] \
+             || [ "$plugin_version" != "$codex_version" ] || [ "$plugin_version" != "$cursor_version" ]; then
             echo "::error::Version drift between manifests — one version, everywhere (see PostHog's 1.1.58/1.0.56/1.1.52/1.0.54 drift for why)."
             exit 1
           fi
