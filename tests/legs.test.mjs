@@ -2,8 +2,9 @@
 //
 // A marketplace install copies one leg's folder on its own: there is no repo behind it. So the Cursor and
 // Codex legs carry their own byte copy of the hash and push tools (and their lib), their own copy of the
-// creating-a-plugin skill, and a command (Cursor) or prompt (Codex) that runs the same steps as
-// commands/new-plugin.md. These tests keep the copies from drifting and prove a copy works alone.
+// creating-a-plugin skill, and a command (Cursor) or a skill (Codex: a plugin cannot ship custom prompts, so
+// the flow is the new-plugin skill) that runs the same steps as commands/new-plugin.md. These tests keep the
+// copies from drifting and prove a copy works alone.
 //
 // Offline and dependency-free (Node's built-in runner).
 // Run: node --test tests/legs.test.mjs   (or ./tests/test_legs.sh)
@@ -12,7 +13,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join, relative } from "node:path"
+import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { VECTORS, materialize } from "./lib/vectors.mjs"
 
@@ -20,10 +21,26 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), "..")
 const read = (...parts) => readFileSync(join(REPO, ...parts), "utf8")
 const SKILL = ["skills", "creating-a-plugin"]
 
-// What each leg calls the flow, and where the flow's file is (relative to the leg's plugin folder).
+// What each leg calls the flow, where the flow's file is (relative to the leg's plugin folder), how the
+// creating-a-plugin SKILL.md reaches it, and which skill folder the flow's own `<skill folder>` means (the tools
+// are two folders above either, the scaffold is in creating-a-plugin).
 const LEGS = {
-  cursor: { command: "/bonez-new-plugin", flow: "commands/bonez-new-plugin.md", others: [/Codex/, /\/prompts:/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/] },
-  codex: { command: "/prompts:new-plugin", flow: "prompts/new-plugin.md", others: [/Cursor/, /(^|[\s`(])\/bonez-[a-z]/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/] },
+  cursor: {
+    command: "/bonez-new-plugin",
+    flow: "commands/bonez-new-plugin.md",
+    flowRef: "<skill folder>/../../commands/bonez-new-plugin.md",
+    skillFolder: ["skills", "creating-a-plugin"],
+    templates: "<skill folder>/templates",
+    others: [/Codex/, /\/prompts:/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/],
+  },
+  codex: {
+    command: "$new-plugin",
+    flow: "skills/new-plugin/SKILL.md",
+    flowRef: "<skill folder>/../new-plugin/SKILL.md",
+    skillFolder: ["skills", "new-plugin"],
+    templates: "<skill folder>/../creating-a-plugin/templates",
+    others: [/Cursor/, /Claude Code/, /(^|[\s`(])\/bonez-[a-z]/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/, /\/prompts:/, /\$ARGUMENTS/],
+  },
 }
 // The tools every leg ships, as bin/ paths.
 const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs"]
@@ -74,7 +91,7 @@ describe("the creating-a-plugin skill in every leg", () => {
     // in the mechanical rewrites below. Nothing else may differ, so a fix to the canonical skill must be
     // carried over, and this says which line did not follow.
     test(`${leg}: SKILL.md is the canonical one with the tool paths and the command name rewritten`, () => {
-      const { command, flow } = LEGS[leg]
+      const { command, flowRef } = LEGS[leg]
       const canonical = read(...SKILL, "SKILL.md").split("\n")
       const fork = read(leg, ...SKILL, "SKILL.md").split("\n")
       assert.equal(fork.length, canonical.length, "a line was added or removed")
@@ -82,11 +99,11 @@ describe("the creating-a-plugin skill in every leg", () => {
       canonical.forEach((line, i) => {
         if (line.includes("commands/new-plugin.md")) {
           pointers++
-          assert.ok(fork[i].includes(command) && fork[i].includes(`<skill folder>/../../${flow}`), `line ${i + 1} must point at ${flow} as ${command}: ${fork[i].slice(0, 160)}`)
+          assert.ok(fork[i].includes(command) && fork[i].includes(flowRef), `line ${i + 1} must point at ${flowRef} as ${command}: ${fork[i].slice(0, 160)}`)
           assert.ok(!fork[i].includes("CLAUDE_PLUGIN_ROOT"), `line ${i + 1} still names CLAUDE_PLUGIN_ROOT`)
           return
         }
-        const expected = line.replaceAll("/bonez:new-plugin", command).replaceAll("${CLAUDE_PLUGIN_ROOT}", "<skill folder>/../..")
+        const expected = line.replaceAll("/bonez:new-plugin", () => command).replaceAll("${CLAUDE_PLUGIN_ROOT}", "<skill folder>/../..")
         assert.equal(fork[i], expected, `line ${i + 1} of ${leg}/${SKILL.join("/")}/SKILL.md should be the canonical line with the paths rewritten`)
       })
       assert.equal(pointers, 1, "the canonical SKILL.md must point at the flow on exactly one line")
@@ -97,11 +114,19 @@ describe("the creating-a-plugin skill in every leg", () => {
 describe("the new-plugin flow in every leg", () => {
   const steps = (text) => [...text.matchAll(/^## (\d+)\. (.+)$/gm)].map((m) => `${m[1]}. ${m[2]}`)
 
-  for (const [leg, { command, flow, others }] of Object.entries(LEGS)) {
+  for (const [leg, { command, flow, others, templates }] of Object.entries(LEGS)) {
     test(`${leg}: ${flow} has the frontmatter the harness reads, names its command, and holds nothing of another harness`, () => {
       const text = read(leg, ...flow.split("/"))
       assert.ok(text.startsWith("---\n"), "frontmatter")
-      assert.match(text.split("\n---\n")[0], /^description: .+/m)
+      const front = text.split("\n---\n")[0]
+      assert.match(front, /^description: .+/m)
+      if (flow.endsWith("/SKILL.md")) {
+        // A skill is found by its name (the folder's) and picked by its description, a one-line YAML scalar.
+        assert.match(front, new RegExp(`^name: ${flow.split("/").at(-2)}$`, "m"), "name must be the skill folder's name")
+        const description = front.match(/^description: (.+)$/m)[1]
+        assert.match(description, /Use when the user asks to create, build or upload a Bonez plugin/, "the description is what makes the harness pick this skill")
+        assert.doesNotMatch(description, /: | #/, "a colon-space or a space-hash in the description breaks the YAML")
+      }
       assert.ok(text.includes(`# ${command}`), `the title must be ${command}`)
       for (const foreign of others) assert.doesNotMatch(text, foreign, `${flow} mentions ${foreign}, which is not this harness`)
     })
@@ -120,6 +145,10 @@ describe("the new-plugin flow in every leg", () => {
       for (const file of mentioned) assert.ok(existsSync(join(REPO, leg, file)), `${leg}/${file} is named but not shipped`)
     })
 
+    test(`${leg}: the flow copies the scaffold from the creating-a-plugin skill's templates, which the leg ships`, () => {
+      assert.ok(read(leg, ...flow.split("/")).includes(`"${templates}"`), `${flow} must copy from "${templates}"`)
+    })
+
     test(`${leg}: the flow's own commands are the Claude Code command's, with the paths rewritten`, () => {
       // The commands that run something: same text in the three flows once the plugin-root spelling is rewritten.
       const code = (text) => [...text.matchAll(/`(node "[^`]+"|bun [^`]+)`/g)].map((m) => m[1].replaceAll("${CLAUDE_PLUGIN_ROOT}", "<skill folder>/../.."))
@@ -135,11 +164,11 @@ describe("the new-plugin flow in every leg", () => {
 // What a marketplace install gives the user: the leg's folder, copied somewhere on its own. The skill asks the
 // agent to reach the tools as <skill folder>/../../bin/, so that is what is resolved here.
 describe("a leg copied on its own works", () => {
-  for (const leg of Object.keys(LEGS)) {
+  for (const [leg, { skillFolder, templates }] of Object.entries(LEGS)) {
     test(`${leg}: the tools resolved from the skill folder hash a plugin folder like the shared vectors, and the scaffold copies`, () => {
       const standalone = join(freshDir(`leg-${leg}`), "bonez")
       cpSync(join(REPO, leg), standalone, { recursive: true })
-      const skill = join(standalone, ...SKILL)
+      const skill = join(standalone, ...skillFolder)
       const tool = (name) => join(skill, "..", "..", "bin", name)
       for (const vector of VECTORS) {
         const folder = materialize(vector, join(freshDir(`leg-${leg}-${vector.name}`), "pkg"))
@@ -153,7 +182,7 @@ describe("a leg copied on its own works", () => {
       assert.match(push.stderr, /BONEZ_URL is not set/)
       // Step 3.1 of the flow: copy the scaffold, .gitignore included.
       const target = join(freshDir(`leg-${leg}-scaffold`), "hello")
-      const copy = spawnSync(process.execPath, ["-e", "require('fs').cpSync(process.argv[1], process.argv[2], { recursive: true })", join(skill, "templates"), target], { encoding: "utf8" })
+      const copy = spawnSync(process.execPath, ["-e", "require('fs').cpSync(process.argv[1], process.argv[2], { recursive: true })", resolve(skill, templates.replace("<skill folder>/", "")), target], { encoding: "utf8" })
       assert.equal(copy.status, 0, copy.stderr)
       assert.ok(existsSync(join(target, ".gitignore")) && existsSync(join(target, "scripts", "tree-hash.mjs")) && statSync(join(target, "src", "index.ts")).isFile())
       mkdirSync(join(target, "out"), { recursive: true })
