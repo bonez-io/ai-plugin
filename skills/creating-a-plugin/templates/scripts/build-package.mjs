@@ -1,9 +1,11 @@
 // Builds the folder you hand to Bonez: out/<name>/ holding package.json + dist/index.js, nothing else.
 // Every dependency is bundled into dist/index.js (no --external), because the folder ships WITHOUT
 // node_modules. The Pi import in src/index.ts is `import type`, so it is erased and nothing of Pi is bundled.
-// Run it as `bun run build:package`.
+// Run it as `bun run build:package`. It ends by printing the tree hash of out/<name>/ (scripts/tree-hash.mjs):
+// the value `bonez-package-hash.mjs` prints for that folder and `bonez-plugin-push.mjs` sends with it.
 import { spawnSync } from "node:child_process"
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { treeHash } from "./tree-hash.mjs"
 
 // Run it with bun (`bun run build:package`), and spawn that same bun: a `bun` found on PATH can be a
 // .cmd shim on Windows (an npm global install), which spawnSync cannot start without a shell.
@@ -38,3 +40,12 @@ const slim = {
 }
 writeFileSync(`${out}/package.json`, `${JSON.stringify(slim, null, 2)}\n`)
 console.log(`built ${out}`)
+
+let hash
+try {
+  hash = treeHash(out)
+} catch (err) {
+  console.error(`cannot hash ${out}: ${err.message}`)
+  process.exit(1)
+}
+console.log(`sha256: ${hash}`)

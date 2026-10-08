@@ -16,7 +16,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { FolderError, listFolder, sha256, toTreePath, treeHash } from "../bin/lib/plugin-tree.mjs"
-import { startFakePluginServer } from "./lib/fake-plugin-server.mjs"
+import { startFakePluginServer, vetUpload } from "./lib/fake-plugin-server.mjs"
 import { symlinkOrSkip } from "./lib/fs-helpers.mjs"
 import { VECTORS, decode, materialize } from "./lib/vectors.mjs"
 
@@ -76,12 +76,19 @@ describe("the shared vectors", () => {
         const r = await new Promise((resolve) =>
           execFile(process.execPath, [PUSH, folder], { env: { ...process.env, BONEZ_URL: server.url, BONEZ_API_KEY: KEY }, encoding: "utf8" },
             (err, stdout, stderr) => resolve({ status: err ? (err.code ?? 1) : 0, stdout, stderr })))
-        assert.equal(r.status, 0, r.stderr)
         assert.equal(server.requests.length, 1)
         const seen = server.requests[0]
-        assert.equal(seen.outcome, "ok")
         assert.deepEqual([...seen.paths].sort(), Object.keys(vector.files).sort())
         assert.equal(seen.claimed, vector.tree_sha256)
+        if (vetUpload(vector.files).error) {
+          // The 'hello' vector pins the hash only: its package.json has no version, which the gateway refuses
+          // (it needs one) after the hash has been checked. The paths and the claim above still held.
+          assert.equal(r.status, 1, r.stderr)
+          assert.match(r.stderr, /needs a version/)
+          return
+        }
+        assert.equal(r.status, 0, r.stderr)
+        assert.equal(seen.outcome, "ok")
         assert.equal(seen.recomputed, vector.tree_sha256, "the gateway's own algorithm agrees")
         assert.ok(r.stdout.includes(`fingerprint: ${vector.tree_sha256}`), r.stdout)
       } finally {

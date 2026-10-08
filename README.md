@@ -68,7 +68,7 @@ winget install --id OpenJS.NodeJS.LTS -e
 winget install --id Oven-sh.Bun --exact --version 1.3.14
 ```
 
-Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code and Cursor run this plugin's write gate (a bash script) through it; without it writes go through unprompted and reads are unaffected. **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
+Afterwards restart the tool itself (Claude Code, Codex, Cursor), not only the terminal: a running program keeps the PATH it started with, so it cannot see what `winget` just installed. **Git for Windows** gives Claude Code its Bash tool, and Claude Code and Cursor run this plugin's write gate (a bash script) through it; without it writes go through unprompted and reads are unaffected. **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
 
 Cursor's gate runs `bash ./hooks/gate-write.sh`, so `bash` must be on the PATH Cursor starts with, and it must be Git Bash, not the WSL launcher in `C:\Windows\System32`. Git for Windows' default PATH option adds only Git itself; choose *Use Git and optional Unix tools from the Command Prompt* or add `C:\Program Files\Git\bin` to PATH.
 
@@ -107,9 +107,13 @@ Guidance ports:
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
   a common but wrong guess. AGENTS.md above is the belt; these are the
-  suspenders, loaded on demand instead of always in context.
-- [`codex/prompts/`](codex/prompts/) — `/prompts:context` and
-  `/prompts:search`, ported from `commands/`. Copy to `~/.codex/prompts/`
+  suspenders, loaded on demand instead of always in context. `creating-a-plugin` reaches the hash
+  and push tools in [`codex/bin/`](codex/bin/) two folders above itself (a plugin install has them
+  there); a copy of `skills/` alone has no `bin/` beside it, so copy `codex/bin/` to `~/.agents/bin/` too, or run the tools from a
+  clone of this repo.
+- [`codex/prompts/`](codex/prompts/) — `/prompts:context`,
+  `/prompts:search`, `/prompts:agents` and `/prompts:new-plugin <name>`, ported from `commands/`
+  (the last one is the plugin creator, written for Codex's sandbox and skill paths). Copy to `~/.codex/prompts/`
   (top-level `.md` files only). Upstream marks custom prompts deprecated in
   favor of skills; included anyway since they still work today.
 
@@ -130,7 +134,8 @@ which no leg's gate covers (see [Vendor operations](#vendor-operations)).
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 10 skills, both commands, and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
+install brings the MCP server, the 10 skills, the commands (`/bonez-context`, `/bonez-search`,
+`/bonez-agents`, `/bonez-new-plugin`), and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
 Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
@@ -158,8 +163,9 @@ every part is discovered without configuration:
 | --- | --- | --- |
 | Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
 | MCP server | `cursor/mcp.json` | OAuth by default |
-| Skills | `cursor/skills/` | the same 10 `SKILL.md` files, byte-identical to `skills/` (CI-enforced) |
-| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search` |
+| Skills | `cursor/skills/` | the same 10 `SKILL.md` files, byte-identical to `skills/` (CI-enforced), except `creating-a-plugin/SKILL.md`, whose tool paths are relative to the skill folder because Cursor has no plugin-root variable |
+| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search`, `/bonez-agents`, `/bonez-new-plugin` |
+| Tools | `cursor/bin/` | byte copies of `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs` and `bin/lib/` (for `/bonez-new-plugin`), and of the session-capture helper (CI-enforced) |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
 | Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
 
@@ -279,7 +285,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 | Variable | Purpose |
 | --- | --- |
 | `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above, and by `bin/bonez-plugin-push.mjs` (a `plugins`-scope key, see [Pushing a plugin](#pushing-a-plugin)); the Claude Code plugin itself never reads it. |
-| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`, no trailing path). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
+| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`; a trailing `/mcp` is dropped, a bare host gets `https://`). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
 | `BONEZ_ALLOW_HTTP` | Set to `1` to let `bonez-plugin-push` use a plain-`http` server on a private network (the key then travels unencrypted). Not needed for `https` or `localhost`. |
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts (headless/CI runs). |
@@ -356,9 +362,9 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search`, `/prompts:agents` and `/prompts:new-plugin <name>` on Codex, `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
 
-The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
+The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
 
 ## Session capture
 
@@ -508,27 +514,29 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 
 ## Pushing a plugin
 
-`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it. You can also push any
+`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it (Cursor: `/bonez-new-plugin <name>`; Codex: `/prompts:new-plugin <name>`). You can also push any
 built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only):
 
 ```bash
-export BONEZ_URL=https://bonez.example.com   # your server
+export BONEZ_URL=https://bonez.example.com   # your server (the /mcp address works too)
 export BONEZ_API_KEY=bnz_...                 # scope "plugins", minted by an org admin
 node bin/bonez-plugin-push.mjs ./my-plugin/out/my-plugin
+node bin/bonez-plugin-push.mjs --status @acme/pi-my-plugin   # is it on the server, and does each computer have it?
 ```
 
-On Windows PowerShell (set them in the window you start Claude Code from, if `/bonez:new-plugin` is to push):
+On Windows PowerShell:
 
 ```powershell
 $env:BONEZ_URL = "https://bonez.example.com"
 $env:BONEZ_API_KEY = "bnz_..."
-node bin\bonez-plugin-push.mjs .\my-plugin\out\my-plugin
+node "$env:USERPROFILE\.claude\plugins\cache\bonez\bonez\<version>\bin\bonez-plugin-push.mjs" .\my-plugin\out\my-plugin
 ```
 
-Inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's `PATH`, so
-`bonez-plugin-push.mjs <folder>` works bare on macOS and Linux; on Windows call it as `node <path>`.
+**Where the tool is.** In a clone of this repo it is `bin\bonez-plugin-push.mjs` (and `bin\bonez-package-hash.mjs`). Installed with the plugin, it sits in the plugin's own folder under `bin/`: for Claude Code `~/.claude/plugins/cache/bonez/bonez/<version>/bin/` (on Windows `%USERPROFILE%\.claude\plugins\cache\bonez\bonez\<version>\bin\`, the path in the PowerShell line above; `<version>` is the folder named for the installed version), for Cursor `~/.cursor/plugins/cache/bonez-io-ai-plugin/bonez/<hash>/bin/` (`%USERPROFILE%\.cursor\plugins\cache\...` on Windows), for Codex the `bin/` of the installed `codex/` plugin folder (the skill finds it two folders above itself). Inside a Claude Code session with this plugin enabled, `bin/` is also on the Bash tool's `PATH`, so `bonez-plugin-push.mjs <folder>` works bare on macOS and Linux; on Windows call it as `node <path>`.
 It needs only Node 18+. The tree hash is over bytes (line endings and a BOM are never normalised) and
 its paths use `/` on every OS, so a folder built on Windows gets the gateway's hash.
+
+**`$env:` only reaches that window.** A PowerShell `$env:BONEZ_API_KEY = ...` lives in that window and in the programs started from it. Run the push in the same window, or start Claude Code, Cursor or Codex from it; a copy started from the Start menu or from another window does not have the variables, and `/bonez:new-plugin` then prints the manual handoff instead of pushing.
 
 It sends the folder as `{path: base64}` plus its tree sha256 (the algorithm of
 `bonez-package-hash.mjs`) to `$BONEZ_URL/api/admin/org/plugins`. The server recomputes the hash,
@@ -537,10 +545,13 @@ name, version, fingerprint and how many computers it rolls out to; if the server
 the refusal code and detail as sent. Exit codes: `0` uploaded, `1` refused by the server, `2` nothing
 sent (bad folder or configuration), `3` server unreachable or answer unreadable.
 
+- **The address.** `BONEZ_URL` is your server: `https://bonez.example.com`. A trailing `/mcp` (the address you gave your AI tool) and trailing slashes are dropped. A bare host works: `bonez.example.com` is tried over `https`, and `localhost:4000`, `127.0.0.1:4000` and `[::1]:4000` over `http`. When the server cannot be reached, the message names the full address it tried and says to check `BONEZ_URL`. A server with a self-signed or private-CA certificate fails the TLS check: point Node at the CA with `NODE_EXTRA_CA_CERTS` (`export NODE_EXTRA_CA_CERTS=/path/ca.pem`, or `$env:NODE_EXTRA_CA_CERTS = "C:\path\ca.pem"`); never switch the check off, the key would go to whoever answers.
 - **The key.** Mint a key with the **plugins** scope in the console. It reaches plugin upload and
   the plugin list only, and the server checks on every request that its owner is still an org admin.
   The command never prints it, refuses to send it over plain `http` (except to `localhost`, or with
   `BONEZ_ALLOW_HTTP=1`) and does not follow redirects with it.
+- **What the server accepts.** Only `package.json` and files under `dist/` ending in `.js .mjs .cjs .json .map .txt .md`; at most 32 files and 8 MiB; a lowercase npm-style name and a `version`. A folder you opened in Finder or Explorer may hold a `.DS_Store`, `Thumbs.db` or `desktop.ini`: the server refuses the upload, and the hash and push tools stop first and name the file. Delete it.
+- **Checking it landed.** `bonez-plugin-push.mjs --status [<package name>]` prints the active version with its fingerprint (it must equal the push's) and each computer's state: `ready`, or `not_delivered` until its next heartbeat (about 30 seconds). Then choose the plugin in the agent builder's **Plugins** field (it writes the agent's `metadata.packages`, which the server hands the harness as the run plan's `execution.packages`).
 - **What it does not carry.** Environment variables, apt packages and host mounts are not part of an
   upload; the creator prints them and an operator sets them once per computer.
 - **Servers.** Needs a Bonez server release with plugin upload; an older server answers 404 and the
@@ -558,15 +569,16 @@ hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd sessi
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
                   bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload),
                   lib/plugin-tree.mjs (the walk and tree hash those two share)
-                  cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
+                  cursor/bin/ and codex/bin/ hold byte copies — a marketplace install ships only cursor/ or codex/, with no repo behind it
+                  (cursor/bin/: session sync + vendor/, the hash and push tools + lib/; codex/bin/: the hash and push tools + lib/)
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
                   windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
 .gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
-codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Other clients → OpenAI Codex; no write gate)
+codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/ (incl. new-plugin), bin/ (plugin tools), config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
-cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/, hooks/ (see Other clients → Cursor; write gate works, no session capture)
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
 ```
 
 One gate, three harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
@@ -584,11 +596,14 @@ claude --plugin-dir .         # load the working tree for one session
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
 ./tests/test_package_hash.sh  # plugin tree-hash tests
 ./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
+./tests/test_legs.sh          # the plugin creator on the Cursor and Codex legs: tool copies, skill forks, flows
 ./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs`.
+On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs`.
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
+`tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, `bin/lib/plugin-tree.mjs` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
+
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
