@@ -6,29 +6,17 @@ Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people in
 
 ## Install for your own Bonez server
 
-Claude Code. Five steps:
+Claude Code. Three steps:
 
-1. **Add the marketplace.**
-
-   ```bash
-   claude plugin marketplace add bonez-io/ai-plugin
-   ```
-
-2. **Install the plugin.**
+1. **Install the plugin and point it at your server.** One command, the same in every shell (replace the address with your server's, no trailing slash and no `/mcp`; on Bonez's own cloud leave `--config` off):
 
    ```bash
-   claude plugin install bonez@bonez
+   claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
    ```
 
-3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://bonez.example.com`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
+   It adds the marketplace, installs the plugin and sets `bonez_url`. (`--marketplace` and `--config` need a current Claude Code; `claude update` first if it says the option is unknown.) The `https://` URL is on purpose: the `owner/repo` form clones over SSH, which a machine without a GitHub SSH key cannot do.
 
-   ```bash
-   echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
-   ```
-
-   then restart Claude Code.
-
-4. **Authenticate.** Pick one:
+2. **Authenticate.** Pick one:
 
    - **OAuth**, when your server has OAuth enabled: run `/mcp`, choose the Bonez server (`plugin:bonez:bonez`), then **Authenticate**, and finish the sign-in in your browser.
    - **An API key** minted by an admin of your server (no browser, or a server without OAuth). Run, with your server's URL:
@@ -39,7 +27,7 @@ Claude Code. Five steps:
 
    The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured, so the plugin's own server can only sign in with OAuth. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; per Claude Code's MCP docs a plugin server pointing at the same endpoint as one you added yourself counts as a duplicate, so keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains all of this in the session.
 
-5. **Try it.**
+3. **Try it.**
 
    ```text
    /bonez:context
@@ -49,6 +37,54 @@ Claude Code. Five steps:
    ```
 
    The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
+
+## Windows
+
+Claude Code, Codex and Cursor run on Windows 11. What differs from the text above:
+
+```powershell
+winget install --id Git.Git -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Oven-sh.Bun --exact --version 1.3.14
+```
+
+Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code runs a plugin's hook commands through Git Bash (it falls back to PowerShell only when Git Bash is missing, and then `bash` is not found and the write gate silently does not run; [hooks reference](https://code.claude.com/docs/en/hooks)). **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
+
+**Claude Code** (PowerShell). The install command is the same one as above, with nothing to quote:
+
+```powershell
+claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
+claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
+```
+
+The last line is only for an API key (set `$env:BONEZ_API_KEY = "bnz_..."` first); with OAuth, skip it and use `/mcp` as above.
+
+**Codex.** The config file is `$HOME\.codex\config.toml` (`%USERPROFILE%\.codex\config.toml`). The commands are the same; run them from a clone of this repo to copy the skills:
+
+```powershell
+codex mcp add bonez --url https://bonez.example.com/mcp
+codex mcp login bonez
+New-Item -ItemType Directory -Force $HOME\.agents\skills | Out-Null
+Copy-Item -Recurse -Force .\codex\skills\* $HOME\.agents\skills\
+```
+
+Inside WSL, use the Linux commands.
+
+**Cursor.** There is no `cursor --add-mcp '<json>'` line for Windows: Windows PowerShell 5.1 and cmd strip the inner double quotes of that argument (PowerShell 7 does too for a `.cmd` launcher; `tests\windows-client-checks.ps1` reproduces it with a `.cmd` shim). Use the one-click **Install in Cursor** button on `https://bonez.example.com/mcp/install`, or put the block that page shows in `%USERPROFILE%\.cursor\mcp.json` (`~/.cursor/mcp.json` in [Cursor's docs](https://cursor.com/docs/mcp)). To install this repo as a local plugin:
+
+```powershell
+git clone https://github.com/bonez-io/ai-plugin.git $HOME\bonez-ai-plugin
+New-Item -ItemType Directory -Force $HOME\.cursor\plugins\local | Out-Null
+Copy-Item -Recurse $HOME\bonez-ai-plugin\cursor $HOME\.cursor\plugins\local\bonez
+```
+
+Cursor's write gate runs `bash ./hooks/gate-write.sh`, so `bash` must be on the PATH Cursor starts with, and it must be Git Bash, not the WSL launcher in `C:\Windows\System32`. Git for Windows' default PATH option adds only Git itself; choose *Use Git and optional Unix tools from the Command Prompt* or add `C:\Program Files\Git\bin` to PATH (unverified on Windows). Without `bash`, Cursor lets writes through unprompted; reads are unaffected.
+
+**Check the machine.** From a clone of this repo, `tests\windows-client-checks.ps1` prints PASS / FAIL / SKIP, with evidence, for everything above (Git Bash, node, bun, the CLIs, the hash tool on the shared vectors, a push to a fake gateway on 127.0.0.1, the write gate under Git Bash). It makes no network call except to localhost:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-client-checks.ps1
+```
 
 ## Other clients and credentials
 
@@ -233,6 +269,13 @@ claude mcp add --transport http bonez https://<your server>/mcp \
   --header "Authorization: Bearer ${BONEZ_API_KEY}"
 ```
 
+On Windows PowerShell:
+
+```powershell
+$env:BONEZ_API_KEY = "bnz_..."
+claude mcp add --transport http bonez https://<your server>/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
+```
+
 ### Raw MCP (any client, no plugin)
 
 Any MCP client that speaks OAuth discovery: point it at your server's streamable-HTTP endpoint
@@ -245,7 +288,9 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 
 | Variable | Purpose |
 | --- | --- |
-| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above; the Claude Code plugin itself never reads it. |
+| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above, and by `bin/bonez-plugin-push.mjs` (a `plugins`-scope key, see [Pushing a plugin](#pushing-a-plugin)); the Claude Code plugin itself never reads it. |
+| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`, no trailing path). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
+| `BONEZ_ALLOW_HTTP` | Set to `1` to let `bonez-plugin-push` use a plain-`http` server on a private network (the key then travels unencrypted). Not needed for `https` or `localhost`. |
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts (headless/CI runs). |
 | `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
@@ -256,7 +301,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 `read` / `read+memory` / `read+write` are nested tiers for the MCP tool surface (`/mcp`).
 `sessions` is a separate, disjoint lane for the [session capture](#session-capture) uploader's
 two calls (`/api/import/presign`, `/api/import/{id}/complete`) — it never reaches `/mcp`, and an
-MCP-scoped key never reaches the import routes. Mint the smallest one that covers what you need:
+MCP-scoped key never reaches the import routes. `plugins` is a third such lane, for [pushing a plugin](#pushing-a-plugin). Mint the smallest one that covers what you need:
 
 | Scope | Unlocks |
 | --- | --- |
@@ -264,6 +309,7 @@ MCP-scoped key never reaches the import routes. Mint the smallest one that cover
 | `read+memory` | `read`, plus `graph_write`. A read-only key gets `memory_scope_required`. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
+| `plugins` | Only `bonez-plugin-push.mjs` needs this. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
 **On servers released before Linear 1SI-2292, `vendor_operation` ignores the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse a vendor write without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
@@ -291,7 +337,7 @@ skills never use them.
 `hooks/gate-write.sh` is a `PreToolUse` hook: Claude Code asks you before **every `graph_write` call** (every op
 is a write; a `preflight` or `dry_run` asks too) and before `rules` `save`/`update`/`delete`. Reads pass
 through untouched. For servers that still serve the retired `memory` tool, its `save`/`update`/`delete` are
-gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs.
+gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
 
 ### Vendor operations
 
@@ -317,10 +363,10 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **citing-bonez-sources** — handles; never fabricate one; staleness and history.
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
-- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
+- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
 
 The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
@@ -372,7 +418,10 @@ though it sits on your disk.
 
 Run from inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's
 `PATH`, so the bare command above works; otherwise invoke it by its full path (`node
-<plugin-root>/bin/bonez-session-sync.mjs login ...`). With no `--repo` given, `login` scopes
+<plugin-root>/bin/bonez-session-sync.mjs login ...`). On Windows always use the second form, in
+PowerShell: `node "$HOME\.claude\plugins\...\bin\bonez-session-sync.mjs" login --global`
+(Windows does not read the `#!` line; the credential lives in `%USERPROFILE%\.bonez\session-sync\`,
+protected by your profile's ACLs, since `chmod` is not enforced there). With no `--repo` given, `login` scopes
 capture to whatever directory you ran it from, and prints exactly what uploads, where it
 goes, and who can read it before anything is captured.
 
@@ -467,6 +516,47 @@ off by default) on top of this plugin's own `install` gate — see the commented
 wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/`~` in
 `config.toml`, same caveat as the MCP `url` field above).
 
+## Pushing a plugin
+
+`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it. You can also push any
+built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only):
+
+```bash
+export BONEZ_URL=https://bonez.example.com   # your server
+export BONEZ_API_KEY=bnz_...                 # scope "plugins", minted by an org admin
+node bin/bonez-plugin-push.mjs ./my-plugin/out/my-plugin
+```
+
+On Windows PowerShell (set them in the window you start Claude Code from, if `/bonez:new-plugin` is to push):
+
+```powershell
+$env:BONEZ_URL = "https://bonez.example.com"
+$env:BONEZ_API_KEY = "bnz_..."
+node bin\bonez-plugin-push.mjs .\my-plugin\out\my-plugin
+```
+
+Inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's `PATH`, so
+`bonez-plugin-push.mjs <folder>` works bare on macOS and Linux; on Windows call it as `node <path>`.
+It needs only Node 18+. The tree hash is over bytes (line endings and a BOM are never normalised) and
+its paths use `/` on every OS, so a folder built on Windows gets the gateway's hash.
+
+It sends the folder as `{path: base64}` plus its tree sha256 (the algorithm of
+`bonez-package-hash.mjs`) to `$BONEZ_URL/api/admin/org/plugins`. The server recomputes the hash,
+vets the files, stores the version and makes it the active one. The command prints the plugin's
+name, version, fingerprint and how many computers it rolls out to; if the server refuses, it prints
+the refusal code and detail as sent. Exit codes: `0` uploaded, `1` refused by the server, `2` nothing
+sent (bad folder or configuration), `3` server unreachable or answer unreadable.
+
+- **The key.** Mint a key with the **plugins** scope in the console. It reaches plugin upload and
+  the plugin list only, and the server checks on every request that its owner is still an org admin.
+  The command never prints it, refuses to send it over plain `http` (except to `localhost`, or with
+  `BONEZ_ALLOW_HTTP=1`) and does not follow redirects with it.
+- **What it does not carry.** Environment variables, apt packages and host mounts are not part of an
+  upload; the creator prints them and an operator sets them once per computer.
+- **Servers.** Needs a Bonez server release with plugin upload; an older server answers 404 and the
+  command says so. Without `BONEZ_API_KEY` and `BONEZ_URL`, `/bonez:new-plugin` prints the manual
+  handoff instead.
+
 ## Layout
 
 ```
@@ -475,10 +565,14 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 skills/           10 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
-bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
+bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
+                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload),
+                  lib/plugin-tree.mjs (the walk and tree hash those two share)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
 server.json       MCP registry entry for the remote server
-tests/            gate tests + session-capture tests (run in CI)
+tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
+                  windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
+.gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
@@ -498,8 +592,13 @@ Codex both read `SKILL.md` from `.agents/skills/`).
 claude --plugin-dir .         # load the working tree for one session
 ./tests/test_gate.sh          # hook gate tests
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
+./tests/test_package_hash.sh  # plugin tree-hash tests
+./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
+./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root.
+On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs`.
+
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.

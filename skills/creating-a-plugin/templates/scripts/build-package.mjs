@@ -5,6 +5,13 @@
 import { spawnSync } from "node:child_process"
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 
+// Run it with bun (`bun run build:package`), and spawn that same bun: a `bun` found on PATH can be a
+// .cmd shim on Windows (an npm global install), which spawnSync cannot start without a shell.
+if (!process.versions.bun) {
+  console.error("run this with bun: bun run build:package")
+  process.exit(1)
+}
+
 const pkg = JSON.parse(readFileSync("package.json", "utf8"))
 const name = pkg.name.replace(/^@[^/]+\//, "").replace(/^pi-/, "")
 const out = `out/${name}`
@@ -12,7 +19,7 @@ const out = `out/${name}`
 rmSync(out, { recursive: true, force: true })
 mkdirSync(out, { recursive: true })
 
-const build = spawnSync("bun", ["build", "src/index.ts", "--target", "bun", "--outfile", `${out}/dist/index.js`], {
+const build = spawnSync(process.execPath, ["build", "src/index.ts", "--target", "bun", "--outfile", `${out}/dist/index.js`], {
   stdio: "inherit",
 })
 if (build.status !== 0) {

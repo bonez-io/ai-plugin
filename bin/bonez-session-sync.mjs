@@ -36,6 +36,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -517,7 +518,7 @@ function findCodexCatchupTarget(currentSessionId) {
   withMtime.sort((a, b) => b.mtime - a.mtime)
   const newest = withMtime[0]
   if (!newest) return null
-  const sessionId = newest.p.split("/").pop()?.replace(/\.jsonl$/, "") ?? newest.p
+  const sessionId = newest.p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? newest.p
   return { sessionId, transcriptPath: newest.p }
 }
 
@@ -546,7 +547,19 @@ function findCodexCatchupTarget(currentSessionId) {
 // conversation per start, newest first, skipping anything sync-state already has.
 function cursorProjectSlug(workspaceRoot) {
   if (!workspaceRoot) return null
-  return workspaceRoot.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
+  // A Windows root (`c:\Users\me\proj`, or `/c:/Users/me/proj`) gets the same rule once its
+  // separators are "/" and its drive colon is gone: `c-Users-me-proj`. (Unverified on Windows: the
+  // exact slug Cursor writes there has not been looked at; the file system is case-insensitive
+  // there, so a drive letter in the other case still finds the directory.)
+  const root = isWindowsPath(workspaceRoot) ? workspaceRoot.replace(/\\/g, "/").replace(/^\/?([A-Za-z]):/, "$1") : workspaceRoot
+  return root.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
+}
+
+// A path from a Windows machine: a drive letter (`C:\x`, `C:/x`, `/c:/x`) or a UNC share. Told apart
+// by shape, not by process.platform, so POSIX paths keep their exact old behaviour and the Windows
+// branches are testable anywhere. (A POSIX directory whose first segment looks like `c:` is not a case.)
+function isWindowsPath(p) {
+  return /^\/?[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\")
 }
 
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
@@ -605,6 +618,9 @@ function findCursorCatchupTargets(currentConversationId, workspaceRoot, state) {
 // cwd → directory and never the reverse. Every consumer here has the cwd in hand.
 function claudeProjectSlug(workspaceRoot) {
   if (!workspaceRoot) return null
+  // On Windows the drive colon and the backslashes flatten the same way: `C:\Users\me\proj` is
+  // `C--Users-me-proj`. (Unverified on Windows.)
+  if (isWindowsPath(workspaceRoot)) return workspaceRoot.replace(/[\\/]+$/, "").replace(/[\\/:._]/g, "-")
   return workspaceRoot.replace(/\/+$/, "").replace(/[/._]/g, "-")
 }
 
@@ -1596,9 +1612,15 @@ async function main() {
 
 // Only dispatch when this file is run directly (`node bin/bonez-session-sync.mjs ...`), not
 // when a test imports it as an ES module to unit-test the pure helpers below.
+//
+// Compared as real file paths, not as `file://` strings. The string compare this replaces was
+// `import.meta.url === \`file://${process.argv[1]}\``, which is never true on Windows
+// (`file:///C:/x/y.mjs` against `C:\x\y.mjs`): main() never ran there, so every hook and every
+// `login` exited 0 having done nothing. It was also false whenever the script was reached through a
+// symlink or a path with a character a URL escapes (a space, `#`, `%`).
 const isMain = (() => {
   try {
-    return import.meta.url === `file://${process.argv[1]}`
+    return realpathSync.native(process.argv[1]) === realpathSync.native(SELF_PATH)
   } catch {
     return false
   }

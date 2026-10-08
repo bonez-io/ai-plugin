@@ -9,10 +9,11 @@ import { test, describe } from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { symlinkOrSkip, trySymlink } from "./lib/fs-helpers.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
@@ -132,7 +133,7 @@ describe("tree hash", () => {
     const root = vectorTree()
     put(root, ".git/HEAD", "ref: refs/heads/main\n")
     put(root, "sub/.git/config", "x")
-    symlinkSync("/nonexistent", join(root, ".git", "link"))
+    trySymlink("/nonexistent", join(root, ".git", "link")) // where symlinks are allowed; the rest holds without it
     assert.equal(hashOk(root), VECTOR_HASH)
     put(root, "sub/.git2", "x") // only a directory named exactly .git is skipped
     assert.notEqual(hashOk(root), VECTOR_HASH)
@@ -151,28 +152,28 @@ describe("refusals", () => {
     assert.match(r.stderr, pattern)
   }
 
-  test("symlink to a file", () => {
+  test("symlink to a file", (t) => {
     const root = vectorTree()
-    symlinkSync(join(root, "package.json"), join(root, "link.json"))
+    if (!symlinkOrSkip(t, join(root, "package.json"), join(root, "link.json"))) return
     refuses(root, /symlink not allowed: link\.json/)
   })
 
-  test("symlink to a directory, nested", () => {
+  test("symlink to a directory, nested", (t) => {
     const root = vectorTree()
-    symlinkSync(join(root, "dist"), join(root, "dist", "loop"))
+    if (!symlinkOrSkip(t, join(root, "dist"), join(root, "dist", "loop"))) return
     refuses(root, /symlink not allowed: dist\/loop/)
   })
 
-  test("dangling symlink", () => {
+  test("dangling symlink", (t) => {
     const root = vectorTree()
-    symlinkSync("/nonexistent/target", join(root, "dangling"))
+    if (!symlinkOrSkip(t, "/nonexistent/target", join(root, "dangling"))) return
     refuses(root, /symlink not allowed: dangling/)
   })
 
-  test("the folder argument itself being a symlink", () => {
+  test("the folder argument itself being a symlink", (t) => {
     const root = vectorTree()
     const link = join(freshDir("linkroot"), "pkg")
-    symlinkSync(root, link)
+    if (!symlinkOrSkip(t, root, link)) return
     refuses(link, /symlink not allowed/)
   })
 
@@ -263,6 +264,15 @@ describe("template build:package", { skip: !hasBun && "bun not installed" }, () 
     const first = hashOk(out)
     build(dir)
     assert.equal(hashOk(out), first)
+  })
+
+  // The scaffold's own tests need no `bun install`: bun:test is built in and the Pi import is type-only.
+  // This is the step a Windows developer reaches right after the scaffold.
+  test("the scaffold's own tests pass under bun test", () => {
+    const dir = instantiate()
+    const r = spawnSync("bun", ["test"], { cwd: dir, encoding: "utf8" })
+    assert.equal(r.status, 0, `bun test failed: ${r.stdout}${r.stderr}`)
+    assert.match(r.stdout + r.stderr, /2 pass/)
   })
 
   test("a failing build stops with a non-zero exit and leaves no half-built package.json", () => {

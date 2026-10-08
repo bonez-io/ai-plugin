@@ -12,10 +12,16 @@ Walk the user through connecting to THEIR Bonez server (for example `https://bon
 
 The plugin asks for the **Bonez server URL** (option `bonez_url`) when it is enabled. Give the server's address only — no trailing slash and no `/mcp`; the plugin adds `/mcp`. The default is Bonez's own cloud, `https://gateway.bonez.io`. If the user passed one (`$ARGUMENTS`), use it.
 
-To see or change it later: open `/config` and edit the Bonez plugin's `bonez_url` row, or from a shell:
+To see or change it later: open `/config` and edit the Bonez plugin's `bonez_url` row, or from a shell. macOS, Linux, Git Bash:
 
 ```bash
 echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
+```
+
+Windows PowerShell (single quotes keep the double quotes of the JSON; `echo` is not needed):
+
+```powershell
+'{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
 ```
 
 Then restart Claude Code so the server connects to the new address. The server also serves its own copy-paste install page at `<server URL>/mcp/install`.
@@ -24,7 +30,7 @@ Then restart Claude Code so the server connects to the new address. The server a
 
 **A. OAuth** — when the server has OAuth enabled. Run `/mcp`, select the Bonez server (`plugin:bonez:bonez`), choose **Authenticate**, and finish the sign-in in the browser. If the server has no OAuth set up, Authenticate will not complete; use B.
 
-**B. An API key minted by a Bonez admin** — for a headless box, CI, or a server without OAuth. The key's scope decides what the agent can do: `read` reads everything; `read+memory` also lets it save memories with `graph_write`; `read+write` also lets it change the org's rules. Ask the admin for the smallest that covers the work, then run this yourself in a shell, with the server's URL:
+**B. An API key minted by a Bonez admin** — for a headless box, CI, or a server without OAuth. The key's scope decides what the agent can do: `read` reads everything; `read+memory` also lets it save memories with `graph_write`; `read+write` also lets it change the org's rules. Ask the admin for the smallest that covers the work, then run this yourself in a shell (bash or PowerShell), with the server's URL:
 
 ```bash
 claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"
