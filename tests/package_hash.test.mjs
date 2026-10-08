@@ -266,6 +266,15 @@ describe("template build:package", { skip: !hasBun && "bun not installed" }, () 
     assert.equal(hashOk(out), first)
   })
 
+  // The scaffold's own tests need no `bun install`: bun:test is built in and the Pi import is type-only.
+  // This is the step a Windows developer reaches right after the scaffold.
+  test("the scaffold's own tests pass under bun test", () => {
+    const dir = instantiate()
+    const r = spawnSync("bun", ["test"], { cwd: dir, encoding: "utf8" })
+    assert.equal(r.status, 0, `bun test failed: ${r.stdout}${r.stderr}`)
+    assert.match(r.stdout + r.stderr, /2 pass/)
+  })
+
   test("a failing build stops with a non-zero exit and leaves no half-built package.json", () => {
     const dir = instantiate()
     writeFileSync(join(dir, "src", "index.ts"), "export default function ( {\n")

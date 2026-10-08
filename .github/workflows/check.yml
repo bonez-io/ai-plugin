@@ -306,10 +306,6 @@ jobs:
         shell: bash
         run: ./tests/test_gate.sh
 
-      - name: EXPLORATORY session capture tests on Windows (temporary)
-        continue-on-error: true
-        run: node --test tests/session_sync.test.mjs
-
       # The checklist a human or an agent runs on a Windows machine (tests/windows-client-checks.ps1), in
       # both PowerShells. The claude / codex / cursor CLIs are not on a runner and report SKIP.
       - name: Windows client checks, Windows PowerShell 5.1
