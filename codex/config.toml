@@ -38,23 +38,30 @@ callback_url = "http://localhost:8787/callback"
 # inside config.toml the way the Claude Code leg's .mcp.json does.
 #   url = "https://qa.gateway.bonez.io/mcp"
 
-# --- Optional: coarse write friction on graph_write/rules/vendor_operation (see README) ---
-# Codex has no per-argument write gate (no equivalent of the Claude Code
-# PreToolUse "ask" hook — see README). The closest native approximation
-# prompts for EVERY call to a tool — every graph_write op is a write, but
-# `rules` also prompts for harmless `list`/`get` reads, and `vendor_operation`
-# (the tool lake: reads AND writes on the org's vendors, as you) prompts for
-# every operation. No harness's plugin gate covers `vendor_operation`, and the
-# server does not check the key's scope for it, so this is the only hard stop:
+# --- Write approval: ask before graph_write and rules (the plugin ships this; add it by hand here) ---
+# The plugin's .mcp.json already sets these two, so a plugin install asks you before every
+# graph_write and rules call. Pasting this file instead of installing the plugin does NOT carry
+# them over: uncomment the first two stanzas to get the same prompts. Codex has no per-argument
+# gate, so `rules` also asks for harmless `list`/`get` reads, which is the cost of a per-tool setting.
+#
+# approval_mode, per tool (or default_tools_approval_mode on the server):
+#   auto    Codex decides (the default)
+#   prompt  asks you before EVERY call to that tool          <- what you want here
+#   writes  asks only for tools the server does not mark read-only
+#   approve RUNS THE TOOL WITHOUT ASKING — never use it as a stop; it turns prompting off
 #
 # [mcp_servers.bonez.tools.graph_write]
-# approval_mode = "approve"
+# approval_mode = "prompt"
 #
 # [mcp_servers.bonez.tools.rules]
-# approval_mode = "approve"
+# approval_mode = "prompt"
+#
+# Optional hard stop for the tool lake: `vendor_operation` runs reads AND writes on the org's
+# vendors as you, no harness's plugin gate covers it, and older servers do not check the key's
+# scope for it, so this prompts on every operation, reads too.
 #
 # [mcp_servers.bonez.tools.vendor_operation]
-# approval_mode = "approve"
+# approval_mode = "prompt"
 
 # --- Optional: session capture (off until you run `login` — see README) ---
 # Mirrors the Claude Code leg's hooks/hooks.json SessionEnd hook: at the end
