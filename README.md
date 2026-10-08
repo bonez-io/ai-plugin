@@ -120,19 +120,24 @@ Guidance ports:
   commands: copy to `~/.codex/prompts/` (top-level `.md` files only). Upstream marks custom prompts deprecated in
   favor of skills; included anyway since they still work today.
 
-**Write-gate gap.** Claude Code's `hooks/gate-write.sh` pauses for
-interactive approval before every `graph_write` call and every `rules` write,
-because rules bind every future session in the org. Codex has no equivalent: its `PreToolUse`
-hook can only unconditionally allow or deny a call — `permissionDecision:
-"ask"` is parsed but explicitly unimplemented upstream, and Codex fails open
-(marks the hook run failed, lets the call through) rather than blocking. The
-closest native substitute is `approval_mode = "approve"` on the MCP server's
-`graph_write`/`rules` tools in `config.toml` (commented out in
-[`codex/config.toml`](codex/config.toml)), but that prompts for *every* call
-including `rules` `list`/`get` reads, not just writes. **Writes are
-unguarded by default on the Codex leg — there is no bundled equivalent of
-the Claude Code gate.** The same commented block also lists `vendor_operation`,
-which no leg's gate covers (see [Vendor operations](#vendor-operations)).
+**Write approval.** Codex asks you before every `graph_write` call and every `rules` call.
+The plugin's [`codex/.mcp.json`](codex/.mcp.json) sets `approval_mode = "prompt"` on both tools
+(`"tools": { "graph_write": { "approval_mode": "prompt" }, "rules": { "approval_mode": "prompt" } }`),
+and Codex's own prompt is the gate. Two differences from the Claude Code and Cursor gate:
+
+- **Per tool, not per argument.** Codex cannot tell a `rules` `list`/`get` from a `save`, so `rules`
+  asks for harmless reads too. That is the cost of a per-tool setting, and why the Codex copies of the
+  `remembering` and `reviewing-with-org-rules` skills say so.
+- **No hook.** A Codex `PreToolUse` hook can only allow or deny a call: `permissionDecision: "ask"` is
+  parsed but not supported, so a hook cannot reproduce the Claude Code ask. The plugin ships none for this.
+  `BONEZ_MCP_GATE_DISABLE` therefore has no effect on Codex.
+
+The values of `approval_mode` are `auto` (the default: Codex decides), `prompt` (asks before every call
+to the tool), `writes` (asks for tools not marked read-only) and `approve` (**runs the tool without
+asking**, so never use it as a stop). `vendor_operation`, which no leg's gate covers (see
+[Vendor operations](#vendor-operations)), is not in the plugin's file; the same `prompt` stanza,
+commented out in [`codex/config.toml`](codex/config.toml), is the optional hard stop for it. A server
+added by hand from `codex/config.toml` has no prompts until you uncomment the stanzas there.
 
 ### Cursor
 
@@ -189,10 +194,11 @@ Naming the interpreter runs the script in-process over stdio on every OS; where
 `bash` is not on PATH the spawn fails and Cursor fails open (no gate, no
 window), which is the right side to fail on.
 
-**The write gate works here** — unlike the Codex leg. Cursor's
+**The write gate works here**, as a hook. Cursor's
 `beforeMCPExecution` genuinely supports `permission: "ask"`, so `graph_write` calls and `rules`
 writes get the same approval prompt Claude Code gives them; reads pass through
-untouched.
+untouched. (Codex asks too, but through a per-tool setting that also prompts for `rules` reads; see
+[OpenAI Codex](#openai-codex).)
 
 Two details the gate has to absorb, because Cursor's own sources disagree:
 
@@ -291,7 +297,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 | `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`; a trailing `/mcp` is dropped, a bare host gets `https://`). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
 | `BONEZ_ALLOW_HTTP` | Set to `1` to let `bonez-plugin-push` use a plain-`http` server on a private network (the key then travels unencrypted). Not needed for `https` or `localhost`. |
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
-| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts (headless/CI runs). |
+| `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts of the Claude Code and Cursor hook (headless/CI runs). Codex's prompts come from `approval_mode` in `codex/.mcp.json` and ignore it. |
 | `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
 | `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — qa or a local gateway. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io` (the default; the override is for Bonez's own qa and local gateways — see Session capture). |
 
@@ -338,6 +344,8 @@ is a write; a `preflight` or `dry_run` asks too) and before `rules` `save`/`upda
 through untouched. For servers that still serve the retired `memory` tool, its `save`/`update`/`delete` are
 gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
 
+Codex has no hook for this and does not need one: its plugin sets `approval_mode = "prompt"` on `graph_write` and `rules` in `codex/.mcp.json`, so Codex asks before every call to either, `rules` reads included (see [OpenAI Codex](#openai-codex)).
+
 ### Vendor operations
 
 `tool_search`, `vendor_operation` and `vendor_operation_status` are the same tool lake the Bonez chat agent uses, served over MCP. The `using-the-tool-lake` skill teaches the flow: `tool_search` first, an `operation_id` copied from its result (never guessed), `vendor_operation` with the operation's own `input`, and `vendor_operation_status` for an `invocation_id` a result carried. If the org has not connected a vendor, the skill has the agent say so rather than work around it.
@@ -345,7 +353,7 @@ gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headles
 **What is not guarded.**
 
 - **No write gate.** The write gate above does not cover `vendor_operation`, on any leg. The hook sees only the call (`operation_id`, `input`, `connection_ref`). Whether an operation reads or writes is the operation's `side_effect`, which the server returns in `tool_search` results and keeps in its catalog, not in the call. Gating on it would mean shipping a copy of the server's catalog (which differs by server version) or guessing from operation names, and a wrong guess is silence on a real write, so the plugin ships neither. `tests/test_gate.sh` pins the boundary.
-- **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any operation whose `side_effect` is not `read`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_operation` off your Claude Code allow-list, so its default permission mode asks on every call (reads too), or use the commented `approval_mode = "approve"` stanza in [`codex/config.toml`](codex/config.toml).
+- **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any operation whose `side_effect` is not `read`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_operation` off your Claude Code allow-list, so its default permission mode asks on every call (reads too), or, on Codex, uncomment the `vendor_operation` `approval_mode = "prompt"` stanza in [`codex/config.toml`](codex/config.toml).
 - **Servers before Linear 1SI-2292 do not check the key's scope for `vendor_operation`** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
 
 **Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them as read-only operations in the same lake (`bonez.agent.list.v1`, `bonez.agent.read.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`), and `/bonez:agents` lists them. On an older server `tool_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
@@ -367,7 +375,7 @@ Judgment for using the graph well — traps, defaults, when to stop:
 
 Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
 
-The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there; `codex/skills/` also has `new-plugin`, the plugin creator, because a Codex plugin cannot ship the command that Claude Code and Cursor have; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
+The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because on Codex the prompt comes from the plugin's per-tool `approval_mode`, not from the hook, and `rules` asks for reads too, which the Claude/Cursor wording ("expect the harness to ask" on writes) does not say; `codex/skills/` also has `new-plugin`, the plugin creator, because a Codex plugin cannot ship the command that Claude Code and Cursor have; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
 
 ## Session capture
 
@@ -578,17 +586,18 @@ server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
                   windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
 .gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
-codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), config.toml (see Other clients → OpenAI Codex; no write gate)
+codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), .mcp.json (the server, sign-in and `approval_mode = "prompt"` on `graph_write` and `rules`), config.toml (see Other clients → OpenAI Codex; native prompts, no write hook)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
 cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
 ```
 
-One gate, three harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
+One gate script, two hook harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
 and Cursor's `beforeMCPExecution` from the same script, dispatching on the payload's
 `hook_event_name` and emitting each host's own response shape. Codex is excluded on
 purpose — it parses `"ask"` but leaves it unimplemented, so the hook exits early there
-rather than fighting its approval flow. Skills are shared from `skills/` (Cursor and
+rather than fighting its approval flow; Codex gets its prompts from `approval_mode = "prompt"`
+in `codex/.mcp.json` instead. Skills are shared from `skills/` (Cursor and
 Codex both read `SKILL.md` from `.agents/skills/`).
 
 ## Development
@@ -600,13 +609,14 @@ claude --plugin-dir .         # load the working tree for one session
 ./tests/test_package_hash.sh  # plugin tree-hash tests
 ./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
 ./tests/test_legs.sh          # the plugin creator on the Cursor and Codex legs: tool copies, skill forks, flows
+./tests/test_codex_approval.sh # Codex asks before graph_write and rules; nothing sets approval_mode to approve
 ./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs`.
+On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs`.
 
 `tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, `bin/lib/plugin-tree.mjs` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs (Codex has `new-plugin` on top, nothing else) with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies and the Cursor command and Codex `new-plugin` skill held to the steps of `commands/new-plugin.md`, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), the Codex approval test (`codex/.mcp.json` prompts on `graph_write` and `rules`; no file sets `approval_mode` to `approve`), skill-set parity across all three legs (Codex has `new-plugin` on top, nothing else) with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies and the Cursor command and Codex `new-plugin` skill held to the steps of `commands/new-plugin.md`, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.

@@ -87,6 +87,9 @@ jobs:
       - name: Windows-portability tests (shared hash vectors, path normalisation, line endings, hook commands)
         run: ./tests/test_windows.sh
 
+      - name: Codex asks before graph_write and rules (approval_mode prompt, never approve)
+        run: ./tests/test_codex_approval.sh
+
       - name: Skills parity across harness legs
         run: |
           set -euo pipefail
@@ -101,8 +104,9 @@ jobs:
           # ${CLAUDE_PLUGIN_ROOT} on a harness that has no such variable (the rest
           # of that skill folder is still byte-identical; tests/legs.test.mjs pins
           # the SKILL.md rewrite line by line). Codex deliberately forks
-          # remembering and reviewing-with-org-rules because it has NO write gate and
-          # that same wording would be a lie, plus the same creating-a-plugin
+          # remembering and reviewing-with-org-rules because its write prompt comes from
+          # the per-tool approval_mode in codex/.mcp.json (and also fires for rules reads),
+          # which the Claude wording does not say, plus the same creating-a-plugin
           # SKILL.md; anything beyond those three is drift.
           test -f codex/skills/new-plugin/SKILL.md || {
             echo "::error::codex/skills/new-plugin/SKILL.md is missing — the Codex plugin has no way to create a plugin."; exit 1; }
@@ -320,7 +324,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Tree hash on the shared vectors, push CLI against a fake gateway, Windows paths
-        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs
+        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs
 
       - name: Push smoke test (fake gateway on 127.0.0.1)
         run: node tests/lib/push-smoke.mjs

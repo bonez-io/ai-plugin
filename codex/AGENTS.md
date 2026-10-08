@@ -82,15 +82,15 @@ or sensitive personal data; store the *why*, not facts recoverable from code.
 
 ## Rules (`rules` tool)
 
-`list`/`get` freely. `save`/`update`/`delete` change guidance mounted into every
-session for the whole org — write conservatively, confirm with the user first,
-and expect this to need a `read+write` key.
+`list`/`get` need no confirmation from you. `save`/`update`/`delete` change
+guidance mounted into every session for the whole org — write conservatively,
+confirm with the user first, and expect this to need a `read+write` key.
 
-**No write confirmation gate in this Codex setup.** Claude Code ships a
-`PreToolUse` hook here that pauses for interactive approval before any
-`graph_write` call and any `rules` write. Codex has no equivalent: a
-`PreToolUse` hook can only unconditionally allow or deny a call, not pause for
-a yes/no prompt (`ask` is parsed but unimplemented — see the repo README's
-Codex section). Treat every `graph_write` and `rules` write as already-approved
-before you make it, and prefer proposing the change in chat over writing
-unprompted.
+**Codex asks before each write.** The plugin's `.mcp.json` sets
+`approval_mode = "prompt"` on `graph_write` and `rules`, so Codex itself asks the
+user before every call to either tool (`rules` `list`/`get` too: the setting is
+per tool, not per argument). That prompt is the gate. You still describe in
+chat what you are about to write before you call, so the user is approving
+something they have read. If the server was added by hand without those
+settings, nothing asks: then confirm in chat first and treat the user's yes as
+the only approval.
