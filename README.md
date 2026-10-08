@@ -294,8 +294,9 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 
 | Variable | Purpose |
 | --- | --- |
-| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above, and by `bin/bonez-plugin-push.mjs` (a `plugins`-scope key, see [Pushing a plugin](#pushing-a-plugin)); the Claude Code plugin itself never reads it. |
-| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`; a trailing `/mcp` is dropped, a bare host gets `https://`). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
+| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above, and by `bin/bonez-plugin-push.mjs` (a `plugins`-scope key, optional: see [Publishing a plugin](#publishing-a-plugin)); the Claude Code plugin itself never reads it. |
+| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`; a trailing `/mcp` is dropped, a bare host gets `https://`). Read only by `bin/bonez-plugin-push.mjs` (`--server <url>` says the same and wins); no default, so a key or a sign-in is never sent to a server you did not name. |
+| `BONEZ_CLIENT_ID`, `BONEZ_NO_BROWSER` | `bonez-plugin-push` only: the OAuth application it signs in as (default: the public Bonez CLI app), and `1` to not try to open a browser (the address and the code are printed either way). |
 | `BONEZ_ALLOW_HTTP` | Set to `1` to let `bonez-plugin-push` use a plain-`http` server on a private network (the key then travels unencrypted). Not needed for `https` or `localhost`. |
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts of the Claude Code and Cursor hook (headless/CI runs). Codex's prompts come from `approval_mode` in `codex/.mcp.json` and ignore it. |
@@ -307,7 +308,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 `read` / `read+memory` / `read+write` are nested tiers for the MCP tool surface (`/mcp`).
 `sessions` is a separate, disjoint lane for the [session capture](#session-capture) uploader's
 two calls (`/api/import/presign`, `/api/import/{id}/complete`) — it never reaches `/mcp`, and an
-MCP-scoped key never reaches the import routes. `plugins` is a third such lane, for [pushing a plugin](#pushing-a-plugin). Mint the smallest one that covers what you need:
+MCP-scoped key never reaches the import routes. `plugins` is a third such lane, for [publishing a plugin](#publishing-a-plugin) without a browser. Mint the smallest one that covers what you need:
 
 | Scope | Unlocks |
 | --- | --- |
@@ -315,7 +316,7 @@ MCP-scoped key never reaches the import routes. `plugins` is a third such lane, 
 | `read+memory` | `read`, plus `graph_write`. A read-only key gets `memory_scope_required`. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
-| `plugins` | Only `bonez-plugin-push.mjs` needs this. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
+| `plugins` | Only `bonez-plugin-push.mjs` needs this, and only for CI or a machine without a browser: signed in, it needs no key. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
 **On servers released before Linear 1SI-2292, `vendor_operation` ignores the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse a vendor write without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
@@ -532,51 +533,64 @@ off by default) on top of this plugin's own `install` gate — see the commented
 wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/`~` in
 `config.toml`, same caveat as the MCP `url` field above).
 
-## Pushing a plugin
+## Publishing a plugin
 
-`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it (Cursor: `/bonez-new-plugin <name>`; Codex: ask `Use the new-plugin skill to create the Bonez plugin <name>`). You can also push any
-built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only):
+`/bonez:new-plugin <name>` builds a plugin and, as its last step, publishes it (Cursor: `/bonez-new-plugin <name>`; Codex: ask `Use the new-plugin skill to create the Bonez plugin <name>`). You can also publish any
+built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only). Only an org admin of your Bonez server can.
+
+**The first time you sign in, in the browser; there is no key to mint.** `BONEZ_URL` (or `--server`) is your server's address, nothing else is set:
+
+```bash
+node bin/bonez-plugin-push.mjs --server https://bonez.example.com ./my-plugin/out/my-plugin
+# sign in at: https://<your sign-in service>/activate?user_code=ABCD-EFGH
+# code: ABCD-EFGH                              (exit 4: a browser tab was opened too; approve there)
+node bin/bonez-plugin-push.mjs --server https://bonez.example.com ./my-plugin/out/my-plugin
+# pushed @acme/pi-my-plugin 1.0.0 ... rolling out to 3 computers   (the second run finishes the sign-in and publishes)
+node bin/bonez-plugin-push.mjs --server https://bonez.example.com ./my-plugin/out/my-plugin   # from now on: no prompt
+```
+
+Two runs, because a coding agent's shell shows a command's output only when the command ends: the first run starts the sign-in, prints the address and the code and **exits 4 at once**, so the creator can tell you to approve; the next run (any of `--login`, a publish) waits up to 5 minutes for the approval, saves the tokens and carries on. `--login` does just the sign-in, `--logout` forgets it. If you deny the sign-in or the code runs out, the run says so in one line (exit 4) and the next one starts over.
+
+**Credentials, in this order.**
+
+1. `BONEZ_API_KEY`: a key with the **plugins** scope that an org admin mints in the console, for CI and machines without a browser. The folder is POSTed to `$BONEZ_URL/api/admin/org/plugins` with it, as before. A wrong key is the server's refusal; it never falls back to signing in.
+2. A saved sign-in for that server.
+3. Otherwise it signs you in, as above.
 
 ```bash
 export BONEZ_URL=https://bonez.example.com   # your server (the /mcp address works too)
-export BONEZ_API_KEY=bnz_...                 # scope "plugins", minted by an org admin
+export BONEZ_API_KEY=bnz_...                 # CI only: scope "plugins", minted by an org admin
 node bin/bonez-plugin-push.mjs ./my-plugin/out/my-plugin
-node bin/bonez-plugin-push.mjs --status @acme/pi-my-plugin   # is it on the server, and does each computer have it?
+node bin/bonez-plugin-push.mjs --status @acme/pi-my-plugin   # with a key only, for now: is it on the server, and does each computer have it?
 ```
 
 On Windows PowerShell:
 
 ```powershell
-$env:BONEZ_URL = "https://bonez.example.com"
-$env:BONEZ_API_KEY = "bnz_..."
-node "$env:USERPROFILE\.claude\plugins\cache\bonez\bonez\<version>\bin\bonez-plugin-push.mjs" .\my-plugin\out\my-plugin
+node "$env:USERPROFILE\.claude\plugins\cache\bonez\bonez\<version>\bin\bonez-plugin-push.mjs" --server https://bonez.example.com .\my-plugin\out\my-plugin
 ```
+
+**What it does when signed in.** It discovers your server's sign-in service from `<server>/.well-known/oauth-protected-resource/mcp` (then the authorization server's `/.well-known/oauth-authorization-server`, else `openid-configuration`) and starts an OAuth device flow (RFC 8628) as the public Bonez CLI application (client `qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm`, or `BONEZ_CLIENT_ID`) for the scopes `bonez:read bonez:write offline_access` and the audience your server names. With the access token it calls your server's MCP endpoint (`<server>/mcp`: `initialize`, then the `vendor_operation` tool with the operation `bonez.plugin.publish.v1` and the same `{files, sha256}` the upload route takes), so the checks are the route's own. The access token is refreshed with the refresh token before it runs out and once more if the server answers 401; when the refresh is refused it signs you in again, and so it does when the server says the token's scope is too small.
+
+**Where the sign-in is saved.** `~/.bonez/plugin-login.json` (`os.homedir()`: on macOS and Linux `$HOME`, on Windows `%USERPROFILE%\.bonez\plugin-login.json`), one entry per server origin: the access token, the refresh token, when it runs out, the scope, and, while a sign-in waits for the browser, the pending device code. **On macOS and Linux the file is mode 0600 (and its folder 0700). On Windows Node cannot set permissions; the file is protected only by what your user profile already has, which on a normal install is you, SYSTEM and the administrators**. Nothing more is done there, so on a shared Windows machine run `--logout` when you are finished. The tool never prints a token, and refuses to send one over plain `http` (except to `localhost`, or with `BONEZ_ALLOW_HTTP=1`) or to follow a redirect with it.
+
+**Exit codes.** `0` published (or signed in, signed out, listed), `1` refused by the server (its code and detail as sent; for an account that is not an admin: `your account is not an admin of this Bonez server`), `2` nothing sent (bad usage, folder or configuration), `3` server unreachable or answer unreadable, `4` waiting for you to approve the sign-in in the browser (or it was denied or expired).
 
 **Where the tool is.** In a clone of this repo it is `bin\bonez-plugin-push.mjs` (and `bin\bonez-package-hash.mjs`). Installed with the plugin, it sits in the plugin's own folder under `bin/`: for Claude Code `~/.claude/plugins/cache/bonez/bonez/<version>/bin/` (on Windows `%USERPROFILE%\.claude\plugins\cache\bonez\bonez\<version>\bin\`, the path in the PowerShell line above; `<version>` is the folder named for the installed version), for Cursor `~/.cursor/plugins/cache/bonez-io-ai-plugin/bonez/<hash>/bin/` (`%USERPROFILE%\.cursor\plugins\cache\...` on Windows), for Codex the `bin/` of the installed `codex/` plugin folder (the skill finds it two folders above itself). Inside a Claude Code session with this plugin enabled, `bin/` is also on the Bash tool's `PATH`, so `bonez-plugin-push.mjs <folder>` works bare on macOS and Linux; on Windows call it as `node <path>`.
 It needs only Node 18+. The tree hash is over bytes (line endings and a BOM are never normalised) and
 its paths use `/` on every OS, so a folder built on Windows gets the gateway's hash.
 
-**`$env:` only reaches that window.** A PowerShell `$env:BONEZ_API_KEY = ...` lives in that window and in the programs started from it. Run the push in the same window, or start Claude Code, Cursor or Codex from it; a copy started from the Start menu or from another window does not have the variables, and `/bonez:new-plugin` then prints the manual handoff instead of pushing.
-
-It sends the folder as `{path: base64}` plus its tree sha256 (the algorithm of
-`bonez-package-hash.mjs`) to `$BONEZ_URL/api/admin/org/plugins`. The server recomputes the hash,
-vets the files, stores the version and makes it the active one. The command prints the plugin's
-name, version, fingerprint and how many computers it rolls out to; if the server refuses, it prints
-the refusal code and detail as sent. Exit codes: `0` uploaded, `1` refused by the server, `2` nothing
-sent (bad folder or configuration), `3` server unreachable or answer unreadable.
-
-- **The address.** `BONEZ_URL` is your server: `https://bonez.example.com`. A trailing `/mcp` (the address you gave your AI tool) and trailing slashes are dropped. A bare host works: `bonez.example.com` is tried over `https`, and `localhost:4000`, `127.0.0.1:4000` and `[::1]:4000` over `http`. When the server cannot be reached, the message names the full address it tried and says to check `BONEZ_URL`. A server with a self-signed or private-CA certificate fails the TLS check: point Node at the CA with `NODE_EXTRA_CA_CERTS` (`export NODE_EXTRA_CA_CERTS=/path/ca.pem`, or `$env:NODE_EXTRA_CA_CERTS = "C:\path\ca.pem"`); never switch the check off, the key would go to whoever answers.
+- **The address.** `BONEZ_URL` is your server: `https://bonez.example.com`. A trailing `/mcp` (the address you gave your AI tool) and trailing slashes are dropped. A bare host works: `bonez.example.com` is tried over `https`, and `localhost:4000`, `127.0.0.1:4000` and `[::1]:4000` over `http`. When the server cannot be reached, the message names the full address it tried and says to check `BONEZ_URL`. A server with a self-signed or private-CA certificate fails the TLS check: point Node at the CA with `NODE_EXTRA_CA_CERTS` (`export NODE_EXTRA_CA_CERTS=/path/ca.pem`, or `$env:NODE_EXTRA_CA_CERTS = "C:\path\ca.pem"`); never switch the check off, the key or the sign-in would go to whoever answers.
 - **The key.** Mint a key with the **plugins** scope in the console. It reaches plugin upload and
   the plugin list only, and the server checks on every request that its owner is still an org admin.
   The command never prints it, refuses to send it over plain `http` (except to `localhost`, or with
-  `BONEZ_ALLOW_HTTP=1`) and does not follow redirects with it.
+  `BONEZ_ALLOW_HTTP=1`) and does not follow redirects with it. The environment variable reaches only the window (and the programs started from it) where you set it (`$env:` in PowerShell): run the tool there.
 - **What the server accepts.** Only `package.json` and files under `dist/` ending in `.js .mjs .cjs .json .map .txt .md`; at most 32 files and 8 MiB; a lowercase npm-style name and a `version`. A folder you opened in Finder or Explorer may hold a `.DS_Store`, `Thumbs.db` or `desktop.ini`: the server refuses the upload, and the hash and push tools stop first and name the file. Delete it.
-- **Checking it landed.** `bonez-plugin-push.mjs --status [<package name>]` prints the active version with its fingerprint (it must equal the push's) and each computer's state: `ready`, or `not_delivered` until its next heartbeat (about 30 seconds). Then choose the plugin in the agent builder's **Plugins** field (it writes the agent's `metadata.packages`, which the server hands the harness as the run plan's `execution.packages`).
-- **What it does not carry.** Environment variables, apt packages and host mounts are not part of an
-  upload; the creator prints them and an operator sets them once per computer.
-- **Servers.** Needs a Bonez server release with plugin upload; an older server answers 404 and the
-  command says so. Without `BONEZ_API_KEY` and `BONEZ_URL`, `/bonez:new-plugin` prints the manual
-  handoff instead.
+- **Checking it landed.** The publish prints the plugin's name, version, fingerprint (it must equal the folder's hash) and how many computers it rolls out to. The Library page of the console lists the plugin with each computer's state, and with an API key `bonez-plugin-push.mjs --status [<package name>]` prints the active version with its fingerprint and each computer's state: `ready`, or `not_delivered` until its next heartbeat (about 30 seconds). A signed-in session cannot list plugins yet, so `--status` says it needs the key. Then choose the plugin in the agent builder's **Plugins** field (it writes the agent's `metadata.packages`, which the server hands the harness as the run plan's `execution.packages`).
+- **What it does not carry.** Environment variables, apt packages and host mounts are not part of a
+  publish; the creator prints them and an operator sets them once per computer.
+- **Servers.** Needs a Bonez server release with plugin upload; an older server answers 404 or does not know the operation, and the
+  command says so. If publishing cannot finish, `/bonez:new-plugin` prints the manual handoff instead.
 
 ## Layout
 
@@ -587,8 +601,8 @@ skills/           12 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
-                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload),
-                  lib/plugin-tree.mjs (the walk and tree hash those two share)
+                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin publish: browser sign-in or API key),
+                  lib/plugin-tree.mjs (the walk and tree hash those two share), lib/net.mjs + lib/signin.mjs + lib/mcp.mjs (the push tool's HTTP, sign-in and MCP call)
                   cursor/bin/ and codex/bin/ hold byte copies — a marketplace install ships only cursor/ or codex/, with no repo behind it
                   (cursor/bin/: session sync + vendor/, the hash and push tools + lib/; codex/bin/: the hash and push tools + lib/)
 server.json       MCP registry entry for the remote server
@@ -616,7 +630,7 @@ claude --plugin-dir .         # load the working tree for one session
 ./tests/test_gate.sh          # hook gate tests
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
 ./tests/test_package_hash.sh  # plugin tree-hash tests
-./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
+./tests/test_plugin_push.sh   # plugin push tests, API-key and browser sign-in lanes (local fake server, no network)
 ./tests/test_legs.sh          # the plugin creator on the Cursor and Codex legs: tool copies, skill forks, flows
 ./tests/test_codex_approval.sh # Codex asks before graph_write and rules; nothing sets approval_mode to approve
 ./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
@@ -624,8 +638,8 @@ claude plugin validate .                          # this repo's marketplace mani
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs`.
+On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/plugin_signin.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs`.
 
-`tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, `bin/lib/plugin-tree.mjs` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
+`tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`) and, with `oauth` on, of its sign-in side (protected-resource metadata, device flow, `/mcp` with the publish operation); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, anything in `bin/lib/` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
 
 CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), the Codex approval test (`codex/.mcp.json` prompts on `graph_write` and `rules`; no file sets `approval_mode` to `approve`), skill-set parity across all three legs (Codex has `new-plugin` on top, nothing else) with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies and the Cursor command and Codex `new-plugin` skill held to the steps of `commands/new-plugin.md`, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.

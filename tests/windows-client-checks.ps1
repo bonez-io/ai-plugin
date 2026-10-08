@@ -14,7 +14,8 @@
   It checks: Git Bash and `bash` on PATH, node and bun, the claude / codex / cursor CLIs, that the
   documented PowerShell snippets pass their quoting through intact, that the checkout is LF, that
   bin\bonez-package-hash.mjs reproduces the shared vectors, that junctions are refused, that
-  bin\bonez-plugin-push.mjs uploads a fixture to a fake gateway, that the write gate runs under Git
+  bin\bonez-plugin-push.mjs uploads a fixture to a fake gateway (with a key, and through a fake sign-in whose
+  tokens are saved under %USERPROFILE%), that the write gate runs under Git
   Bash and prompts for a simulated write (Claude Code and Cursor forms, from a path with a space), that
   bin\bonez-session-sync.mjs runs from a path with a space, and the repo's own node tests.
 
@@ -335,7 +336,7 @@ try {
 
   # ---- the push tool against a fake gateway on 127.0.0.1 --------------------------------------------
 
-  Check 'bonez-plugin-push uploads a fixture to a fake gateway and prints name, version, fingerprint, computers (127.0.0.1 only)' {
+  Check 'bonez-plugin-push uploads a fixture to a fake gateway, with a key and through a fake sign-in saved under USERPROFILE (127.0.0.1 only)' {
     if (-not $Node) { return (Skip 'no node') }
     $r = Invoke-Native $Node @((P $Spaced @('tests', 'lib', 'push-smoke.mjs')))
     if ($r.ExitCode -ne 0) { return (Fail ("exit $($r.ExitCode)`n" + (Show-Text ($r.Out + $r.Err) 40))) }
@@ -387,9 +388,9 @@ try {
 
   # ---- the repo's own node tests --------------------------------------------------------------------
 
-  Check "the repo's node tests (tree hash vectors, push CLI, Windows paths, line endings, hash and push suites)" {
+  Check "the repo's node tests (tree hash vectors, push CLI and its sign-in, Windows paths, line endings, hash and push suites)" {
     if (-not $Node) { return (Skip 'no node') }
-    $files = @('plugin_tree.test.mjs', 'windows_portability.test.mjs', 'package_hash.test.mjs', 'plugin_push.test.mjs') | ForEach-Object { P $Root @('tests', $_) }
+    $files = @('plugin_tree.test.mjs', 'windows_portability.test.mjs', 'package_hash.test.mjs', 'plugin_push.test.mjs', 'plugin_signin.test.mjs') | ForEach-Object { P $Root @('tests', $_) }
     $r = Invoke-Native $Node (@('--test') + $files) -TimeoutSec 600
     $summary = (($r.Out -split "`n") | Where-Object { $_ -match '^\S*\s*(tests|pass|fail|skipped) ' -or $_ -match '^# (tests|pass|fail|skipped)' } | ForEach-Object { $_.Trim() }) -join '; '
     if ($r.ExitCode -ne 0) {

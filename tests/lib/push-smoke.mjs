@@ -3,11 +3,13 @@
 //     node tests/lib/push-smoke.mjs [folder]
 //
 // With no argument it pushes the shared "ordering" vector (tests/fixtures/plugin-tree.json) written to a
-// temp folder, so the fingerprint it must print is known in advance. It prints one PASS/FAIL line per
-// check and exits 0 only when every check passed. Used by CI and by the Windows client checks script
+// temp folder, so the fingerprint it must print is known in advance. It does so with an API key, and then
+// without one: the sign-in (a fake device flow on the same fake gateway, the home directory a temp folder
+// named by HOME and USERPROFILE, which is where Windows keeps it) in two runs. It prints one PASS/FAIL line
+// per check and exits 0 only when every check passed. Used by CI and by the Windows client checks script
 // (tests/windows-client-checks.ps1). Its only network traffic is to 127.0.0.1.
 import { execFile } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -23,9 +25,9 @@ const check = (ok, what, evidence = "") => {
   console.log(`${ok ? "PASS" : "FAIL"} ${what}${ok || !evidence ? "" : `\n     ${String(evidence).replace(/\n/g, "\n     ")}`}`)
 }
 
-const run = (url, key, folder) =>
+const run = (url, key, folder, env = {}) =>
   new Promise((resolve) =>
-    execFile(process.execPath, [PUSH, folder], { env: { ...process.env, BONEZ_URL: url, BONEZ_API_KEY: key }, encoding: "utf8" }, (err, stdout, stderr) =>
+    execFile(process.execPath, [PUSH, folder], { env: { ...process.env, BONEZ_URL: url, BONEZ_API_KEY: key, ...env }, encoding: "utf8", timeout: 60_000 }, (err, stdout, stderr) =>
       resolve({ status: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr })))
 
 const tmp = mkdtempSync(join(tmpdir(), "bonez-push-smoke-"))
@@ -60,6 +62,27 @@ try {
 
   const refused = await run(server.url, "bnz_" + "cd".repeat(24), folder)
   check(refused.status === 1 && /unauthenticated/.test(refused.stderr), "a wrong key is refused by the server: exit 1 with its code", `exit ${refused.status}\n${refused.stderr}`)
+
+  // No key: sign in. The first run prints the address and the code and exits 4; once approved, the second run publishes.
+  const home = join(tmp, "Home Dir")
+  mkdirSync(home, { recursive: true })
+  const signIn = await startFakePluginServer({ oauth: {}, computers: 2 })
+  try {
+    const env = { BONEZ_NO_BROWSER: "1", BONEZ_CLIENT_ID: "", HOME: home, USERPROFILE: home }
+    const one = await run(signIn.url, "", folder, env)
+    check(one.status === 4 && /^sign in at: \S+\ncode: \S+\n$/.test(one.stdout), "no key: the first run prints the address and the code, and exits 4", `exit ${one.status}\nstdout: ${one.stdout}\nstderr: ${one.stderr}`)
+    signIn.signin.approve()
+    const two = await run(signIn.url, "", folder, env)
+    check(two.status === 0, "once approved, the second run publishes: exit 0", `exit ${two.status}\nstdout: ${two.stdout}\nstderr: ${two.stderr}`)
+    check(/^rolling out to 2 computers$/m.test(two.stdout) && (!expected || two.stdout.includes(expected)), "and prints the same result lines", two.stdout)
+    const file = join(home, ".bonez", "plugin-login.json")
+    check(existsSync(file) && readFileSync(file, "utf8").includes('"access_token"'), "the sign-in is saved under the home directory (HOME / USERPROFILE)", file)
+    const tool = signIn.requests.filter((q) => q.url === "/mcp" && q.rpc === "tools/call")
+    check(tool.length === 1 && tool[0].outcome === "ok" && tool[0].claimed === tool[0].recomputed, "the server's publish operation accepted exactly one upload with the right hash", JSON.stringify(tool))
+    check(signIn.signin.secrets.every((secret) => ![one, two].some((r) => r.stdout.includes(secret) || r.stderr.includes(secret))), "never prints a token")
+  } finally {
+    await signIn.close()
+  }
 } finally {
   await server.close()
   rmSync(tmp, { recursive: true, force: true })

@@ -1,53 +1,54 @@
 #!/usr/bin/env node
-// bonez-plugin-push <folder> — uploads a built Bonez plugin (the out/<name>/ folder of the plugin
+// bonez-plugin-push <folder> — publishes a built Bonez plugin (the out/<name>/ folder of the plugin
 // creator) to your Bonez server in one command. The server vets it, stores it, and the org's
 // computers pick it up on their next heartbeat.
 // bonez-plugin-push --status [<package name>] — lists the plugins the server holds and, per computer,
-// whether it has the active version yet (the server's GET /api/org/plugins; the same key reaches it).
+// whether it has the active version yet (the server's GET /api/org/plugins; needs BONEZ_API_KEY for now).
+// bonez-plugin-push --login | --logout — signs in to the server in the browser / forgets that sign-in.
 //
-//   BONEZ_URL       your server, e.g. https://bonez.example.com. A trailing /mcp (the MCP address) and
-//                   slashes are dropped; a bare host gets https:// (http:// for localhost, 127.0.0.1, [::1]).
-//   BONEZ_API_KEY   a bnz_ key with the "plugins" scope, minted in the console by an org admin
-//   BONEZ_ALLOW_HTTP=1   only for a plain-http server on a private network (the key travels in clear)
+//   BONEZ_URL       your server, e.g. https://bonez.example.com (or --server <url>, which wins). A trailing /mcp
+//                   (the MCP address) and slashes are dropped; a bare host gets https:// (http:// for localhost,
+//                   127.0.0.1, [::1]).
+//   BONEZ_API_KEY   optional: a bnz_ key with the "plugins" scope, minted in the console by an org admin, for CI
+//                   and machines without a browser. Without it you sign in once, in the browser (below).
+//   BONEZ_CLIENT_ID    the OAuth application to sign in as (default: the public Bonez CLI app)
+//   BONEZ_NO_BROWSER=1 do not try to open the browser (the address and code are printed either way)
+//   BONEZ_ALLOW_HTTP=1   only for a plain-http server on a private network (the key or sign-in travels in clear)
 //   NODE_EXTRA_CA_CERTS  Node's own variable: the CA file for a server with a self-signed or private-CA certificate
 //
-// It POSTs {files: {<path>: <base64>}, sha256} to $BONEZ_URL/api/admin/org/plugins with
-// "Authorization: Bearer $BONEZ_API_KEY". The sha256 is the tree hash of bonez-package-hash.mjs,
-// computed by the SAME code (lib/plugin-tree.mjs; the keys of `files` are its tree paths, with "/"
-// on every OS, Windows included). The server recomputes it.
+// Credentials, in this order:
+//   1. BONEZ_API_KEY: POSTs {files: {<path>: <base64>}, sha256} to $BONEZ_URL/api/admin/org/plugins with
+//      "Authorization: Bearer $BONEZ_API_KEY".
+//   2. A saved sign-in (~/.bonez/plugin-login.json; lib/signin.mjs): calls the server's MCP endpoint, the
+//      `vendor_operation` tool with operation bonez.plugin.publish.v1 and the same {files, sha256} (lib/mcp.mjs).
+//   3. Otherwise it signs you in, in two runs: the first prints an address and a code and exits 4 at once; once
+//      you have approved in the browser, running the same command again finishes the sign-in and publishes.
+// The sha256 is the tree hash of bonez-package-hash.mjs, computed by the SAME code (lib/plugin-tree.mjs; the keys
+// of `files` are its tree paths, with "/" on every OS, Windows included). The server recomputes it.
 //
 // Run it as `node bin/bonez-plugin-push.mjs <folder>`; the same on Windows (the shebang is POSIX only).
 //
-// stdout: the result (name, version, fingerprint, computers). stderr: everything else. The key is
-// never printed. Exit codes:
-//   0  uploaded (or listed)
-//   1  the server refused it (prints the refusal code and detail as the server sent them); with
-//      --status, also: the server holds no plugin of that name
+// stdout: the result (name, version, fingerprint, computers), or the address and code of a sign-in. stderr:
+// everything else. A key or a token is never printed. Exit codes:
+//   0  published (or listed, signed in, signed out)
+//   1  the server refused it (prints the refusal code and detail as the server sent them; for a signed-in
+//      account that is not an admin, one line saying so); with --status, also: the server holds no plugin of that name
 //   2  nothing was sent: bad usage, missing or bad config, or a folder that cannot be uploaded
 //   3  could not complete: server unreachable or erroring, a redirect, or an unreadable answer
+//   4  waiting for you to approve the sign-in in the browser (or it was denied or expired): run the command again
 // Node built-ins only (Node 18+).
 import { lstatSync, readFileSync } from "node:fs"
+import { callTool, HttpRefusal } from "./lib/mcp.mjs"
+import { CliError, clean, fail, hide, isSecure, LOOPBACK, redirected, send } from "./lib/net.mjs"
 import { FolderError, listFolder, sha256, treeHash } from "./lib/plugin-tree.mjs"
+import { accessToken, SCOPE, startLogin, logout } from "./lib/signin.mjs"
 
 const ROUTE = "/api/admin/org/plugins"
 const LIST_ROUTE = "/api/org/plugins"
-const TIMEOUT_MS = 120_000
+const OPERATION = "bonez.plugin.publish.v1"
 // Memory guard only, not policy: the server's own cap (a few MiB) is far lower and it states the
 // real limit in its refusal, so this must not be tightened to mirror it.
 const MAX_READ_BYTES = 64 * 1024 * 1024
-
-function fail(code, message) {
-  console.error(`bonez-plugin-push: ${message}`)
-  process.exit(code)
-}
-
-// Server text goes to a terminal: drop control characters (escape sequences) but keep newlines, and
-// never echo the key even if a server (or a proxy in front of it) reflects the request.
-let secret = ""
-const clean = (text) => {
-  const shown = String(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "?")
-  return secret ? shown.split(secret).join("[key]") : shown
-}
 
 // ---- the folder: same walk and tree hash as bonez-package-hash.mjs (lib/plugin-tree.mjs) -------
 
@@ -83,20 +84,10 @@ function readFolder(folder) {
 // ---- config -------------------------------------------------------------------------------------
 
 const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i
-const LOOPBACK = ["localhost", "127.0.0.1", "[::1]"]
-// What node's TLS says when it does not know the server's certificate authority.
-const UNTRUSTED_CERT = new Set([
-  "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "CERT_UNTRUSTED",
-])
-const WRONG_ADDRESS = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"])
 
-function readConfig() {
-  let raw = (process.env.BONEZ_URL ?? "").trim()
-  const key = (process.env.BONEZ_API_KEY ?? "").trim()
-  if (!raw) fail(2, "BONEZ_URL is not set (your Bonez server, e.g. https://bonez.example.com)")
-  if (!key) fail(2, "BONEZ_API_KEY is not set (a bnz_ key with the plugins scope, minted by an org admin in the console)")
-  if (!key.startsWith("bnz_")) fail(2, "BONEZ_API_KEY is not a bnz_ key")
+function readServer(given) {
+  let raw = (given ?? "").trim()
+  if (!raw) fail(2, "BONEZ_URL is not set (your Bonez server, e.g. https://bonez.example.com; or pass --server <url>)")
   if (!HAS_SCHEME.test(raw)) {
     // A bare host such as `localhost:4000` or `bonez.example.com`. `new URL("localhost:4000")` would read
     // "localhost:" as a scheme, so a scheme is added first: http for this machine, https for everything else.
@@ -114,40 +105,22 @@ function readConfig() {
   } catch {
     fail(2, "BONEZ_URL is not a valid URL")
   }
-  const loopback = LOOPBACK.includes(url.hostname)
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || process.env.BONEZ_ALLOW_HTTP === "1"))) {
-    fail(2, `BONEZ_URL must be https (the key would travel in clear); got ${url.protocol}//${url.host}. ` +
+  if (!isSecure(url)) {
+    fail(2, `BONEZ_URL must be https (the key or sign-in would travel in clear); got ${url.protocol}//${url.host}. ` +
       "For a plain-http server on a private network, set BONEZ_ALLOW_HTTP=1")
   }
   if (url.username || url.password) fail(2, "BONEZ_URL must not carry a user name or password")
   // The MCP address (https://host/mcp) is the one people have to hand: the API lives beside it, not under it.
   const path = url.pathname.replace(/\/+$/, "").replace(/\/mcp$/i, "").replace(/\/+$/, "")
-  return { base: `${url.origin}${path}`, origin: url.origin, key }
+  return { base: `${url.origin}${path}`, origin: url.origin, mcpPath: `${path}/mcp` }
 }
 
-// POST/GET to `endpoint`; exits 3 with a message that names what was tried when nothing came back.
-async function send(endpoint, init) {
-  try {
-    const res = await fetch(endpoint, {
-      redirect: "manual", // never carry the key to another place
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      ...init,
-      headers: { authorization: `Bearer ${secret}`, accept: "application/json", ...init.headers },
-    })
-    return { res, text: await res.text() }
-  } catch (err) {
-    const code = err?.cause?.code ?? err?.code
-    const why = err?.name === "TimeoutError" ? `no answer within ${TIMEOUT_MS / 1000}s` : (code ?? err?.message ?? "unknown error")
-    let hint = ""
-    if (WRONG_ADDRESS.has(code)) hint = ". That address did not answer: check BONEZ_URL"
-    else if (UNTRUSTED_CERT.has(code)) {
-      hint = ". The server's certificate is not signed by an authority Node trusts (a self-signed or private-CA certificate). " +
-        "Point NODE_EXTRA_CA_CERTS at your CA's .pem file and run this again " +
-        '(bash: export NODE_EXTRA_CA_CERTS=/path/ca.pem; PowerShell: $env:NODE_EXTRA_CA_CERTS = "C:\\path\\ca.pem"). ' +
-        "Do not switch certificate checking off: the key would go to whoever answers"
-    }
-    fail(3, `cannot reach ${endpoint}: ${clean(why)}${hint}`)
-  }
+function readKey() {
+  const key = (process.env.BONEZ_API_KEY ?? "").trim()
+  if (!key) return ""
+  if (!key.startsWith("bnz_")) fail(2, "BONEZ_API_KEY is not a bnz_ key")
+  hide(key, "key")
+  return key
 }
 
 // ---- the answer ---------------------------------------------------------------------------------
@@ -203,19 +176,9 @@ function listPlugins(answer, only) {
   }
 }
 
-// ---- main ---------------------------------------------------------------------------------------
-
-const usage = "usage: bonez-plugin-push <folder>  |  bonez-plugin-push --status [<package name>]   (BONEZ_URL and BONEZ_API_KEY must be set)"
-const statusMode = process.argv[2] === "--status"
-const folder = process.argv[2]
-if (!folder || process.argv.length > (statusMode ? 4 : 3)) fail(2, usage)
-
-const config = readConfig()
-secret = config.key
-
-if (statusMode) {
-  const { res, text } = await send(`${config.base}${LIST_ROUTE}`, { method: "GET" })
-  if (res.status >= 300 && res.status < 400) fail(3, `${config.origin} redirected the request (HTTP ${res.status}); not following it with your key. Check BONEZ_URL`)
+async function status(server, key, only) {
+  const { res, text } = await send(`${server.base}${LIST_ROUTE}`, { method: "GET", headers: { authorization: `Bearer ${key}`, accept: "application/json" } })
+  if (redirected(res)) fail(3, `${server.origin} redirected the request (HTTP ${res.status}); not following it with your key. Check BONEZ_URL`)
   if (res.status >= 500) fail(3, `the server failed: ${describeRefusal(res.status, text)}`)
   if (res.status >= 400) fail(1, `refused (${describeRefusal(res.status, text)})`)
   let answer
@@ -224,34 +187,152 @@ if (statusMode) {
   } catch {
     fail(3, `HTTP ${res.status} but the answer is not JSON: ${clean(text.slice(0, 200))}`)
   }
-  listPlugins(answer, process.argv[3])
-  process.exit(0)
+  listPlugins(answer, only)
 }
 
-const endpoint = `${config.base}${ROUTE}`
-const { map, fingerprint, count, total } = readFolder(folder)
-console.error(`bonez-plugin-push: uploading ${count} files (${total} bytes), fingerprint ${fingerprint}, to ${config.origin}`)
+// ---- publish with a key: the console's upload route ----------------------------------------------
 
-const { res, text } = await send(endpoint, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ files: map, sha256: fingerprint }),
-})
-
-if (res.status >= 300 && res.status < 400) {
-  fail(3, `${config.origin} redirected the upload (HTTP ${res.status}); not following it with your key. Check BONEZ_URL`)
+async function pushWithKey(server, key, { map, fingerprint, count, total }) {
+  const endpoint = `${server.base}${ROUTE}`
+  console.error(`bonez-plugin-push: uploading ${count} files (${total} bytes), fingerprint ${fingerprint}, to ${server.origin}`)
+  const { res, text } = await send(endpoint, {
+    method: "POST",
+    headers: { authorization: `Bearer ${key}`, accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ files: map, sha256: fingerprint }),
+  })
+  if (redirected(res)) {
+    fail(3, `${server.origin} redirected the upload (HTTP ${res.status}); not following it with your key. Check BONEZ_URL`)
+  }
+  if (res.status >= 500) fail(3, `the server failed: ${describeRefusal(res.status, text)}`)
+  if (res.status >= 400) {
+    const hint = res.status === 404
+      ? `\nPOST ${endpoint} found nothing: this server may predate plugin upload (hand the plugin over by hand instead), or BONEZ_URL is not your server's address.`
+      : ""
+    fail(1, `refused (${describeRefusal(res.status, text)})${hint}`)
+  }
+  let answer
+  try {
+    answer = JSON.parse(text)
+  } catch {
+    fail(3, `HTTP ${res.status} but the answer is not JSON: ${clean(text.slice(0, 200))}`)
+  }
+  return answer
 }
-if (res.status >= 500) fail(3, `the server failed: ${describeRefusal(res.status, text)}`)
-if (res.status >= 400) {
-  const hint = res.status === 404
-    ? `\nPOST ${endpoint} found nothing: this server may predate plugin upload (hand the plugin over by hand instead), or BONEZ_URL is not your server's address.`
+
+// ---- publish when signed in: the server's MCP endpoint -------------------------------------------
+
+// A refusal of the operation (code and detail as the server sent them), in the CLI's words.
+function refuse(code, detail) {
+  const text = String(detail ?? "")
+  if (code === "forbidden" || /admin role required/i.test(text)) fail(1, "your account is not an admin of this Bonez server")
+  const hint = code === "operation_not_found"
+    ? "\nThis server does not publish plugins from the tool (it may predate it). With BONEZ_API_KEY set to a plugins-scope key this tool uploads through the console's route instead."
     : ""
-  fail(1, `refused (${describeRefusal(res.status, text)})${hint}`)
+  fail(1, `refused (${clean(`${code ? `${code}: ` : ""}${text}`).slice(0, 2000)})${hint}`)
 }
-let answer
+
+// What the tool call answered: a tool-level error ("[bonez] <code>: <detail>"), a failed operation, or its output.
+function outcome(result) {
+  const text = (Array.isArray(result?.content) ? result.content : []).filter((c) => c?.type === "text").map((c) => String(c.text)).join("\n")
+  if (result?.isError) {
+    const m = /^\[bonez\] ([A-Za-z0-9_.-]+): ([\s\S]*)$/.exec(text)
+    return refuse(m?.[1], m ? m[2] : text)
+  }
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return fail(3, `the answer is not JSON: ${clean(text.slice(0, 200))}`)
+  }
+  if (body?.status === "failed") return refuse(body.code, body.detail)
+  if (body?.status !== "succeeded") fail(3, `the server did not finish the publish (status ${clean(body?.status ?? "missing")}): ${clean(text.slice(0, 200))}`)
+  return body.output
+}
+
+async function pushSignedIn(server, { map, fingerprint, count, total }) {
+  const url = `${server.origin}${server.mcpPath}`
+  let renew = false
+  for (;;) {
+    const token = await accessToken(server.origin, server.mcpPath, { renew }) // ends the run with exit 4 until you have signed in
+    hide(token, "token")
+    console.error(`bonez-plugin-push: publishing ${count} files (${total} bytes), fingerprint ${fingerprint}, to ${server.origin}`)
+    try {
+      return outcome(await callTool(url, token, "vendor_operation", { operation_id: OPERATION, input: { files: map, sha256: fingerprint } }))
+    } catch (err) {
+      if (!(err instanceof HttpRefusal)) throw err
+      // 401: the token. Once more with a fresh one, then a new sign-in.
+      if (err.status === 401 && !renew) {
+        renew = true
+        continue
+      }
+      if (err.status === 401) return startLogin(server.origin, server.mcpPath)
+      // 403 with a scope challenge: the sign-in was granted less than the publish needs. Sign in again asking for it.
+      const needed = /insufficient_scope/.test(err.challenge) ? /scope="([^"]*)"/.exec(err.challenge)?.[1] : undefined
+      if (err.status === 403 && needed) return startLogin(server.origin, server.mcpPath, [...new Set([...SCOPE.split(" "), ...needed.split(" ")])].join(" "))
+      if (err.status >= 500) fail(3, `the server failed: ${describeRefusal(err.status, err.text)}`)
+      if (err.status === 403) {
+        let body
+        try {
+          body = JSON.parse(err.text)
+        } catch {
+          body = undefined
+        }
+        return refuse(body?.code, typeof body?.detail === "string" ? body.detail : err.text.slice(0, 500))
+      }
+      const hint = err.status === 404 ? `\nPOST ${url} found nothing: BONEZ_URL may not be your server's address.` : ""
+      return fail(1, `refused (${describeRefusal(err.status, err.text)})${hint}`)
+    }
+  }
+}
+
+// ---- main ---------------------------------------------------------------------------------------
+
+const usage = "usage: bonez-plugin-push <folder>  |  bonez-plugin-push --status [<package name>]  |  bonez-plugin-push --login  |  bonez-plugin-push --logout   " +
+  "(BONEZ_URL or --server <url> names your server; BONEZ_API_KEY is optional: without it you sign in once, in the browser)"
+
+async function main() {
+  const args = process.argv.slice(2)
+  let given = process.env.BONEZ_URL
+  const flag = args.indexOf("--server")
+  if (flag !== -1) {
+    if (flag + 1 >= args.length) fail(2, usage)
+    given = args[flag + 1]
+    args.splice(flag, 2)
+  }
+  const [head, ...rest] = args
+  const mode = new Map([["--status", "status"], ["--login", "login"], ["--logout", "logout"]]).get(head) ?? "push"
+  if (!head || rest.length > (mode === "status" ? 1 : 0)) fail(2, usage)
+
+  const server = readServer(given)
+
+  if (mode === "logout") {
+    console.log(logout(server.origin) ? `signed out of ${server.origin}` : `not signed in to ${server.origin}`)
+    return
+  }
+  if (mode === "login") {
+    await accessToken(server.origin, server.mcpPath) // exit 4 until approved
+    console.log(`signed in to ${server.origin}`)
+    return
+  }
+
+  const key = readKey()
+  if (mode === "status") {
+    if (!key) {
+      fail(2, "--status needs BONEZ_API_KEY for now (a plugins-scope key): a signed-in session cannot list plugins yet. " +
+        "A publish prints how many computers the plugin rolls out to; the Library page of the console shows the rest")
+    }
+    return status(server, key, rest[0])
+  }
+
+  const folder = readFolder(head)
+  const answer = key ? await pushWithKey(server, key, folder) : await pushSignedIn(server, folder)
+  report(answer, folder.fingerprint)
+}
+
 try {
-  answer = JSON.parse(text)
-} catch {
-  fail(3, `HTTP ${res.status} but the answer is not JSON: ${clean(text.slice(0, 200))}`)
+  await main()
+} catch (err) {
+  if (!(err instanceof CliError)) throw err
+  console.error(`bonez-plugin-push: ${err.message}`)
+  process.exitCode = err.code
 }
-report(answer, fingerprint)
