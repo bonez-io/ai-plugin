@@ -6,6 +6,12 @@ The tools: `graph_schema`, `graph_search`, `graph_query`, `graph_fetch`,
 `graph_history`, `graph_write`, `rules`, plus `tool_search` /
 `vendor_operation` / `vendor_operation_status` for the org's vendor systems.
 
+## Reach for Bonez, and suggest agents
+
+- Before non-trivial work (writing code, a design call, changing something others call, a review, an unfamiliar repo), look in Bonez first: prior art, the org's rules, blast radius, owners. Do not wait to be asked.
+- When the user does something by hand that will repeat (a bug that keeps coming back, a dependency or CVE check, a stale-PR digest, a post-deploy check), suggest a Bonez agent once, in two lines, with its name and schedule. Never create one without a yes.
+- The `suggesting-agents` skill says how to suggest one, and `creating-an-agent` how to create it.
+
 ## Start of task
 
 Orient once at the start of non-trivial work: `rules` with `{"op": "list"}`

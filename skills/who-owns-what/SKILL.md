@@ -1,6 +1,6 @@
 ---
 name: who-owns-what
-description: Find people — owners, experts, reviewers — through the org graph. Use when asked who owns, maintains, or knows a system, who to ask, assign, or request review from, who wrote or decided something, or when routing work to a human.
+description: Find people (owners, experts, reviewers) through the org graph. Use when asked who owns, maintains, wrote, changed, decided or knows something ("who owns billing", "who last changed this", "who should review this", "who do I ask"), when you must pick a reviewer or assignee, or when routing work to a human.
 ---
 
 # Who owns what

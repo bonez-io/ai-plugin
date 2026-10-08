@@ -104,7 +104,7 @@ Guidance ports:
   but `creating-a-plugin` and `new-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 10 skills, ported ~verbatim, plus
+- [`codex/skills/`](codex/skills/) — the same 12 skills, ported ~verbatim, plus
   `new-plugin` (the plugin creator, see below), because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
@@ -142,7 +142,7 @@ added by hand from `codex/config.toml` has no prompts until you uncomment the st
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 10 skills, the commands (`/bonez-context`, `/bonez-search`,
+install brings the MCP server, the 12 skills, an always-apply rule, the commands (`/bonez-context`, `/bonez-search`,
 `/bonez-agents`, `/bonez-new-plugin`), and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
@@ -171,7 +171,8 @@ every part is discovered without configuration:
 | --- | --- | --- |
 | Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
 | MCP server | `cursor/mcp.json` | OAuth by default |
-| Skills | `cursor/skills/` | the same 10 `SKILL.md` files, byte-identical to `skills/` (CI-enforced), except `creating-a-plugin/SKILL.md`, whose tool paths are relative to the skill folder because Cursor has no plugin-root variable |
+| Skills | `cursor/skills/` | the same 12 `SKILL.md` files, byte-identical to `skills/` (CI-enforced), except `creating-a-plugin/SKILL.md`, whose tool paths are relative to the skill folder because Cursor has no plugin-root variable |
+| Rule | `cursor/rules/bonez.mdc` | an always-apply rule (`alwaysApply: true`): reach for Bonez before non-trivial work, suggest agents for recurring work (see [Proactive use](#proactive-use)) |
 | Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search`, `/bonez-agents`, `/bonez-new-plugin` |
 | Tools | `cursor/bin/` | byte copies of `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs` and `bin/lib/` (for `/bonez-new-plugin`), and of the session-capture helper (CI-enforced) |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
@@ -371,11 +372,19 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
+- **suggesting-agents** — propose a Bonez agent, once, when work will repeat (a bug that came back, a chore done by hand): its description is the trigger, its body the etiquette.
+- **creating-an-agent** — create a Bonez agent (manual or scheduled) from the session with `bonez.agent.create.v1`: say the spec and wait for a yes, instructions that stand alone, poll until ready, run once on request.
 - **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
 Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
 
 The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because on Codex the prompt comes from the plugin's per-tool `approval_mode`, not from the hook, and `rules` asks for reads too, which the Claude/Cursor wording ("expect the harness to ask" on writes) does not say; `codex/skills/` also has `new-plugin`, the plugin creator, because a Codex plugin cannot ship the command that Claude Code and Cursor have; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
+
+### Proactive use
+
+A skill's name and description sit in the model's context every session; its body loads only when the description matches. So each description states the moment to use the skill in plain words (before you write non-trivial code, before you change something others call, when you learn something a teammate would want, when asked who owns X, at the start of a task in an unfamiliar repo) and the agent reaches for Bonez without being asked. `suggesting-agents` does the same for agents: when the user fixes a bug that had come back, or does something periodic by hand, it proposes a Bonez agent (a nightly re-check, a weekly audit, a morning digest), once per session, in two lines, and never creates one without a yes; `creating-an-agent` then makes it with `bonez.agent.create.v1`. A server without that operation (`tool_search` with vendor `bonez` does not list it) cannot create agents from here, and both skills then point to the web builder's Agents page.
+
+The same three lines are the always-loaded part where the harness has a slot for them: [`codex/AGENTS.md`](codex/AGENTS.md) (copy it as described in the Codex section), [`cursor/AGENTS.md`](cursor/AGENTS.md) (the same text, for a Cursor project's own `AGENTS.md`) and, in the Cursor plugin, the always-apply rule `cursor/rules/bonez.mdc`. A Claude Code plugin has no such slot, so there the descriptions are the always-loaded part. `tests/legs.test.mjs` pins that every description is non-empty, under 1000 characters and identical in the three legs.
 
 ## Session capture
 
@@ -574,7 +583,7 @@ sent (bad folder or configuration), `3` server unreachable or answer unreadable.
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
 .mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
-skills/           10 skills
+skills/           12 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
@@ -589,7 +598,7 @@ tests/            gate tests + session-capture + plugin hash and push tests + Wi
 codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), .mcp.json (the server, sign-in and `approval_mode = "prompt"` on `graph_write` and `rules`), config.toml (see Other clients → OpenAI Codex; native prompts, no write hook)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
-cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, rules/ (the always-apply rule), commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
 ```
 
 One gate script, two hook harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`

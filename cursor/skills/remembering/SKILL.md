@@ -1,6 +1,6 @@
 ---
 name: remembering
-description: Save durable facts into the org's memory with graph_write. Use when the user says "remember", "from now on", "always", or "never", when you learn a durable preference, convention, decision, or correction, when you hit a non-obvious gotcha worth keeping, or when deciding whether something belongs in long-term memory.
+description: Save durable facts into the org's memory with graph_write. Use when you learn something a teammate would want next time (a convention, a decision and its why, a non-obvious gotcha, a correction the user made), when the user says "remember", "from now on", "always" or "never", or when deciding whether something belongs in long-term memory. Offer to save it at the moment you learn it.
 ---
 
 # Remembering

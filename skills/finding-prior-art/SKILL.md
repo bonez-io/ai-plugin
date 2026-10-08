@@ -1,6 +1,6 @@
 ---
 name: finding-prior-art
-description: Find what the org already knows before building or deciding. Use when starting non-trivial implementation or design work, when asked "have we done this before", "why is X like this", or "has anyone hit this error", when a decision smells like it was already made once, or before proposing an approach someone may have already rejected.
+description: Search what the org already knows before you build or decide. Use BEFORE you write non-trivial code, design an approach or choose a library, when the user asks "have we done this before", "why is X like this" or "has anyone hit this error", when a decision smells like it was already made once, or before you propose an approach someone may have rejected. Do not wait to be asked.
 ---
 
 # Finding prior art

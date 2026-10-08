@@ -1,6 +1,6 @@
 ---
 name: session-context
-description: Orient yourself in the org's Bonez graph at the start of work. Use when starting a session or a new task in a Bonez-connected org, when you need the org's standing rules or a map of what the graph holds, when unsure which conventions apply, or before a call an org rule may already settle.
+description: Orient in the org's Bonez graph. Use at the start of a task in an unfamiliar repo or a new session in a Bonez-connected org, when you need the org's standing rules or a map of what the graph holds, when unsure which conventions apply, or before a call an org rule may already settle. Do it once up front, not mid-task.
 ---
 
 # Session context

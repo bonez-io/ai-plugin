@@ -1,6 +1,6 @@
 ---
 name: citing-bonez-sources
-description: Cite and dereference Bonez results correctly. Use when presenting findings that came from Bonez tools, when a result carries a ~hex handle, when the user asks where a claim came from, or when you need the full record behind a search result.
+description: Cite and dereference Bonez results correctly. Use whenever you present or act on a finding that came from a Bonez tool, when a result carries a ~hex handle, when the user asks where a claim came from, or when you need the full record behind a search result.
 ---
 
 # Citing Bonez sources

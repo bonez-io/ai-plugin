@@ -1,6 +1,6 @@
 ---
 name: impact-analysis
-description: Assess blast radius before changing code. Use when asked "what breaks if", "who calls this", "is it safe to change or delete this", "what tests cover this", before refactoring a shared symbol or changing a public contract, or when judging how risky a diff is.
+description: Measure the blast radius before a change lands. Use BEFORE you change, rename or delete a function, type, file or public contract that other code may use, when asked "what breaks if", "who calls this", "is it safe to change or delete this" or "what tests cover this", before a refactor of a shared symbol, and when judging how risky a diff or PR is. Do not wait to be asked.
 ---
 
 # Impact analysis
