@@ -220,6 +220,18 @@ try {
     }
   }
 
+  Check 'claude is 2.1.285 or newer (`claude plugin configure --values-stdin`) and accepts this checkout (`claude plugin validate`)' {
+    $c = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $c) { return (Skip 'claude not on PATH') }
+    $v = Invoke-Native 'cmd.exe' @('/c', ('"' + $c.Source + '" --version')) -TimeoutSec 60
+    if ($v.Out -match '(\d+)\.(\d+)\.(\d+)') { $ver = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])") }
+    else { return (Fail "cannot read a version from: $($v.Out)") }
+    if ($ver -lt [version]'2.1.285') { return (Fail "claude $ver is older than 2.1.285, so 'claude plugin configure' does not exist yet. Fix: claude update") }
+    $r = Invoke-Native 'cmd.exe' @('/c', ('"' + $c.Source + '" plugin validate "' + $Root + '"')) -TimeoutSec 120
+    if ($r.ExitCode -ne 0 -or $r.Out -notmatch 'Validation passed') { return (Fail ("claude plugin validate exited $($r.ExitCode)`n" + (Show-Text ($r.Out + $r.Err) 12))) }
+    return (Pass "claude $ver`n$(Show-Text $r.Out 4)")
+  }
+
   # ---- the documented PowerShell snippets -----------------------------------------------------------
 
   Check 'snippet: JSON piped to a program (claude plugin configure --values-stdin) arrives byte for byte' {
