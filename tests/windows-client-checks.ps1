@@ -55,7 +55,8 @@ function ConvertTo-ArgString {
 }
 
 # Start a program with EXACT arguments (no PowerShell argument parsing in between), optional stdin and
-# environment, a timeout. Returns @{ ExitCode; Out; Err }.
+# environment, a timeout. Returns @{ ExitCode; Out; Err }. -RawArgs is the command line as is, for
+# cmd.exe, which does not read \" as an escaped quote (see Invoke-Cmd).
 function Invoke-Native {
   param(
     [string]$File,
@@ -63,11 +64,12 @@ function Invoke-Native {
     [string]$InputText = $null,
     [hashtable]$EnvVars = @{},
     [string]$WorkDir = $null,
-    [int]$TimeoutSec = 180
+    [int]$TimeoutSec = 180,
+    [string]$RawArgs = ''
   )
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $File
-  $psi.Arguments = ConvertTo-ArgString $ArgList
+  $psi.Arguments = if ($RawArgs) { $RawArgs } else { ConvertTo-ArgString $ArgList }
   $psi.UseShellExecute = $false
   $psi.CreateNoWindow = $true
   $psi.RedirectStandardInput = $true
@@ -96,6 +98,14 @@ function Invoke-Native {
   return @{ ExitCode = $p.ExitCode; Out = $outTask.Result; Err = $errTask.Result }
 }
 
+# Run `"<exe>" <args>` through cmd.exe, so a .cmd shim (npm installs codex that way) starts too. The whole
+# command goes inside one more pair of quotes, which cmd strips: that is what keeps a quoted exe AND a
+# quoted argument (a path with a space) intact. $ArgText is passed as typed.
+function Invoke-Cmd {
+  param([string]$Exe, [string]$ArgText = '', [int]$TimeoutSec = 60)
+  return (Invoke-Native 'cmd.exe' -RawArgs ('/c ""' + $Exe + '" ' + $ArgText + '"') -TimeoutSec $TimeoutSec)
+}
+
 function Show-Text {
   param([string]$Text, [int]$Max = 12)
   $lines = @(($Text -replace "`r", '') -split "`n" | Where-Object { $_ -ne '' })
@@ -108,17 +118,19 @@ function Pass { param([string]$Evidence) return @{ Status = 'PASS'; Evidence = $
 function Fail { param([string]$Evidence) return @{ Status = 'FAIL'; Evidence = $Evidence } }
 function Skip { param([string]$Evidence) return @{ Status = 'SKIP'; Evidence = $Evidence } }
 
+# The body runs in a child scope of this function, so it sees this function's variables before the
+# caller's: keep them unlike anything a body reads (a parameter called $Name hid the loop's $name).
 function Check {
-  param([string]$Name, [scriptblock]$Body)
+  param([string]$CheckTitle, [scriptblock]$CheckBody)
   try {
-    $r = @(& $Body)[-1]
-    if ($null -eq $r -or -not $r.Status) { $r = Fail 'the check returned nothing' }
+    $CheckResult = @(& $CheckBody)[-1]
+    if ($null -eq $CheckResult -or -not $CheckResult.Status) { $CheckResult = Fail 'the check returned nothing' }
   } catch {
-    $r = Fail ('exception: ' + $_.Exception.Message)
+    $CheckResult = Fail ('exception: ' + $_.Exception.Message)
   }
-  switch ($r.Status) { 'PASS' { $script:Pass++ } 'FAIL' { $script:Fail++ } default { $script:Skip++ } }
-  Write-Host ('{0} {1}' -f $r.Status, $Name)
-  foreach ($line in (([string]$r.Evidence) -replace "`r", '') -split "`n") { if ($line -ne '') { Write-Host ('       ' + $line) } }
+  switch ($CheckResult.Status) { 'PASS' { $script:Pass++ } 'FAIL' { $script:Fail++ } default { $script:Skip++ } }
+  Write-Host ('{0} {1}' -f $CheckResult.Status, $CheckTitle)
+  foreach ($CheckLine in (([string]$CheckResult.Evidence) -replace "`r", '') -split "`n") { if ($CheckLine -ne '') { Write-Host ('       ' + $CheckLine) } }
 }
 
 # ---- setup ------------------------------------------------------------------------------------------
@@ -182,14 +194,14 @@ try {
   Check '`bash` on PATH is Git Bash (Cursor runs `bash ./hooks/gate-write.sh`; without it Cursor lets writes through unprompted)' {
     $all = @(Get-Command bash -All -ErrorAction SilentlyContinue)
     if ($all.Count -eq 0) {
-      return (Fail "no `bash` on PATH. Fix: add the folder of Git's bash.exe to PATH (C:\Program Files\Git\bin), or install Git with the 'Use Git and optional Unix tools from the Command Prompt' PATH option.")
+      return (Fail "no bash on PATH. Fix: add the folder of Git's bash.exe to PATH (C:\Program Files\Git\bin), or install Git with the 'Use Git and optional Unix tools from the Command Prompt' PATH option.")
     }
     $first = $all[0].Source
     $list = ($all | ForEach-Object { $_.Source }) -join "`n"
     if ($first -match '\\Windows\\System32\\bash\.exe$') {
-      return (Fail "the first `bash` on PATH is the WSL launcher, not Git Bash:`n$list`nFix: put C:\Program Files\Git\bin before C:\Windows\System32 in PATH.")
+      return (Fail "the first bash on PATH is the WSL launcher, not Git Bash:`n$list`nFix: put C:\Program Files\Git\bin before C:\Windows\System32 in PATH.")
     }
-    if ($first -notmatch '\\Git\\') { return (Fail "the first `bash` on PATH is not under a Git folder:`n$list") }
+    if ($first -notmatch '\\Git\\') { return (Fail "the first bash on PATH is not under a Git folder:`n$list") }
     return (Pass $list)
   }
 
@@ -201,8 +213,8 @@ try {
     return (Pass "$Node $($v.Out.Trim())")
   }
 
-  Check 'bun (the plugin creator: bun install / test / build:package; Bonez pins 1.3.14)' {
-    if (-not $bunCmd) { return (Fail 'bun is not on PATH. Fix: winget install --id Oven-sh.Bun --exact --version 1.3.14 (then open a new terminal)') }
+  Check 'bun (SKIP if you do not use /bonez:new-plugin: bun install / test / build:package; Bonez pins 1.3.14)' {
+    if (-not $bunCmd) { return (Skip 'bun is not on PATH. Only /bonez:new-plugin needs it. To use that: winget install --id Oven-sh.Bun --exact --version 1.3.14 (then open a new terminal)') }
     $v = Invoke-Native $bunCmd.Source @('--version')
     $note = if ($v.Out.Trim() -eq '1.3.14') { '' } else { ' (Bonez pins 1.3.14; the creator warns and continues)' }
     return (Pass "$($bunCmd.Source) $($v.Out.Trim())$note")
@@ -211,23 +223,23 @@ try {
   foreach ($cli in @('claude', 'codex', 'cursor')) {
     $name = $cli
     Check "$name is on PATH (SKIP if you do not use that client)" {
-      $c = Get-Command $name -ErrorAction SilentlyContinue | Select-Object -First 1
+      # -CommandType Application: npm installs codex.ps1 as well as codex.cmd, and cmd.exe cannot run the .ps1.
+      $c = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
       if (-not $c) { return (Skip "$name not on PATH") }
-      # `--version` through cmd.exe so a .cmd shim (npm installs codex that way) starts too.
-      $r = Invoke-Native 'cmd.exe' @('/c', ('"' + $c.Source + '" --version')) -TimeoutSec 60
+      $r = Invoke-Cmd $c.Source '--version'
       if ($r.ExitCode -ne 0) { return (Fail "$($c.Source) --version exited $($r.ExitCode): $(Show-Text $r.Err 3)") }
       return (Pass "$($c.Source)`n$(Show-Text $r.Out 2)")
     }
   }
 
   Check 'claude is 2.1.285 or newer (`claude plugin configure --values-stdin`) and accepts this checkout (`claude plugin validate`)' {
-    $c = Get-Command claude -ErrorAction SilentlyContinue | Select-Object -First 1
+    $c = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $c) { return (Skip 'claude not on PATH') }
-    $v = Invoke-Native 'cmd.exe' @('/c', ('"' + $c.Source + '" --version')) -TimeoutSec 60
+    $v = Invoke-Cmd $c.Source '--version'
     if ($v.Out -match '(\d+)\.(\d+)\.(\d+)') { $ver = [version]("$($Matches[1]).$($Matches[2]).$($Matches[3])") }
     else { return (Fail "cannot read a version from: $($v.Out)") }
     if ($ver -lt [version]'2.1.285') { return (Fail "claude $ver is older than 2.1.285, so 'claude plugin configure' does not exist yet. Fix: claude update") }
-    $r = Invoke-Native 'cmd.exe' @('/c', ('"' + $c.Source + '" plugin validate "' + $Root + '"')) -TimeoutSec 120
+    $r = Invoke-Cmd $c.Source ('plugin validate "' + $Root + '"') -TimeoutSec 120
     if ($r.ExitCode -ne 0 -or $r.Out -notmatch 'Validation passed') { return (Fail ("claude plugin validate exited $($r.ExitCode)`n" + (Show-Text ($r.Out + $r.Err) 12))) }
     return (Pass "claude $ver`n$(Show-Text $r.Out 4)")
   }
