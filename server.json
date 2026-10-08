@@ -22,7 +22,7 @@
     "source": "github"
   },
   "websiteUrl": "https://bonez.io",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "remotes": [
     {
       "type": "streamable-http",
