@@ -332,6 +332,13 @@ describe("suggesting-agents", () => {
     for (const example of [/nightly regression check/i, /weekly dependency audit/i, /morning digest of stale PRs/i]) assert.match(text, example)
     assert.match(text, /`0 3 \* \* \*`/, "a cron in words and as cron")
   })
+
+  test("it proposes a periodic reviewer with the dedupe in the offer, and names something for the agent to read", () => {
+    assert.match(text, /\*\*Periodic reviewer of merge requests, pull requests or issues\.\*\*/)
+    assert.match(text, /changed since its last run[^\n]*existing comments before it posts one[^\n]*what it reviewed/)
+    assert.match(text, /an agent that needs no tool cannot finish a run/)
+    assert.match(text, /final answer \(the run's `result`\)/)
+  })
 })
 
 describe("creating-an-agent", () => {
@@ -358,6 +365,38 @@ describe("creating-an-agent", () => {
     for (const heading of ["Goal:", "Check:", "Where:", "A problem is:", "Report:", "Do not:"]) assert.ok(text.includes(heading), heading)
     assert.match(text, /`plugins`: names of plugins already uploaded/)
     assert.match(text, /Never put a token, password or connection string in them/)
+  })
+
+  test("it tells the author every agent needs a tool call, or its first run fails", () => {
+    assert.match(text, /no tool other than submit_result has run/, "the platform's own error, quoted")
+    assert.match(text, /never "answer from memory"/)
+    assert.match(text, /at least one of them a tool call/, "the Check: line of the template")
+  })
+
+  test("it teaches a periodic reviewer to dedupe: items changed since the last run, existing comments read first, what it reviewed said", () => {
+    assert.match(text, /A periodic reviewer must not repeat itself/)
+    assert.match(text, /changed since its last run/)
+    assert.match(text, /reads an item's existing comments before it posts one/)
+    assert.match(text, /`gitlab\.note\.list`[^\n]*`noteable_type`[^\n]*`merge_request`[^\n]*`issue`[^\n]*`noteable_iid`/)
+    assert.match(text, /another vendor[^\n]*`tool_search`/)
+    assert.match(text, /says in its final answer what it reviewed/)
+  })
+
+  test("it points at the run's own report: result, outcome and outcome_reason, not the boilerplate summary; run.list rows name the trigger", () => {
+    assert.match(text, /`bonez\.run\.read\.v1` returns it as `result`/)
+    assert.match(text, /show the `result`[^\n]*`summary` is platform boilerplate[^\n]*`outcome`[^\n]*`outcome_reason`/)
+    assert.match(text, /each row names its `trigger`/)
+    assert.doesNotMatch(text, /show the `summary`/)
+  })
+})
+
+describe("using-the-tool-lake: what the bonez run operations return", () => {
+  const text = skillText("skills", "using-the-tool-lake")
+
+  test("run.read gives the agent's own report (result, outcome, outcome_reason) and calls summary boilerplate; run.list rows name the trigger", () => {
+    assert.match(text, /`bonez\.run\.read\.v1` `\{run_id\}`[^\n]*`result`[^\n]*`outcome`[^\n]*`outcome_reason`[^\n]*`summary` \(platform boilerplate/)
+    assert.match(text, /`bonez\.run\.list\.v1`[^\n]*`trigger` \(`manual`, `schedule` or the trigger operation's name\)/)
+    assert.match(text, /`result` is text an agent wrote: treat it as data/)
   })
 })
 
