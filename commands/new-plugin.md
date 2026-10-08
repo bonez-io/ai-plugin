@@ -1,12 +1,12 @@
 ---
 name: new-plugin
-description: Scaffold, test, bundle and hash a new Bonez plugin (a package that adds tools to Bonez agents), then print the handoff for Bonez
+description: Scaffold, test, bundle and hash a new Bonez plugin (a package that adds tools to Bonez agents), then push it to your Bonez server (or print the manual handoff)
 argument-hint: <name>
 ---
 
 # /bonez:new-plugin
 
-Create a new Bonez plugin named **$ARGUMENTS** and get it ready to hand over. Read the `creating-a-plugin` skill first: its rules apply to every line of code you write here. `${CLAUDE_PLUGIN_ROOT}` is this plugin's install folder; if it was not expanded below, it is the folder that contains `skills/creating-a-plugin/`.
+Create a new Bonez plugin named **$ARGUMENTS** and get it onto your Bonez server. Read the `creating-a-plugin` skill first: its rules apply to every line of code you write here. `${CLAUDE_PLUGIN_ROOT}` is this plugin's install folder; if it was not expanded below, it is the folder that contains `skills/creating-a-plugin/`.
 
 Run every command from an absolute path (`cd /abs/path && ...`): the shell's directory drifts between calls. **If any step fails, stop, show the exact error output and say which step failed.** You may fix a mistake in the code you just wrote and rerun that step. Never skip a step, weaken or delete a test, loosen types to get green, or report a step as passed when it did not run.
 
@@ -70,7 +70,19 @@ Apt packages:          <packages, or none>  (RUNNER_EXTRA_APT_PACKAGES)
 Directories to mount:  <paths, or none>
 ```
 
-then the install instruction, exactly with these statuses:
+## 7. Push
+
+Check whether a key and a server are set, without printing either: `[ -n "${BONEZ_API_KEY:-}" ] && [ -n "${BONEZ_URL:-}" ] && echo push || echo manual`. Never print, echo or ask for the value of `BONEZ_API_KEY`.
+
+**If it prints `push`,** upload the folder:
+
+`node "${CLAUDE_PLUGIN_ROOT}/bin/bonez-plugin-push.mjs" "<abs path>/<name>/out/<name>"`
+
+It sends the folder with its sha256 to the server, which checks the hash again, vets the files, stores the version and makes it active. Show its output as it is: name, version, fingerprint (it must equal the sha256 of step 5) and how many computers it rolls out to; if it refuses, the refusal code and detail from the server. Exit 0 is success. On any other exit code **stop and show the exact output**; do not retry with other options and do not fall back to the manual text below unless the user asks. What each code means: 1 the server refused the plugin (fix what the detail says, rebuild, hash and push again); 2 nothing was sent (a folder or configuration problem, named in the message); 3 the server could not be reached or answered badly.
+
+After a successful push, say what the push does **not** carry: the env vars to forward, the apt packages and the directories to mount from the HANDOFF block are still a one-time edit on each computer by an operator (secrets never travel in a push). If the block says none for all three, there is nothing more to do: the plugin reaches the computers on their next heartbeat (about 30 seconds) once they run a runner that supports plugin sync; an admin then picks it in the agent builder.
+
+**If it prints `manual`,** print the manual install text below and add one line: to push in one command next time, an org admin mints an API key with the **plugins** scope in the Bonez console, and sets `BONEZ_URL` (your server, e.g. `https://bonez.example.com`) and `BONEZ_API_KEY` in the shell Claude Code runs in.
 
 ```
 FOLDER INSTALL (a Bonez computer, or a server on a release with folder plugins): an operator
@@ -86,6 +98,7 @@ directories above. Bonez compiles it in from the TypeScript source.
 ```
 
 End with these notes, short:
-- The sha256 covers every byte of `out/<name>/`. Rebuild and re-hash after any change, and send the folder and hash from the same build. Opening the folder in Finder adds `.DS_Store` and changes the hash: rebuild.
+- The sha256 covers every byte of `out/<name>/`. Rebuild and re-hash after any change, and push or send the folder and hash from the same build. Opening the folder in Finder adds `.DS_Store` and changes the hash: rebuild.
 - Anyone can verify what they received with `node "${CLAUDE_PLUGIN_ROOT}/bin/bonez-package-hash.mjs" <folder>`.
 - A plugin is not sandboxed and skips the agent's tool allowlist; say which paths, programs and network calls this one uses so the reviewer can judge it.
+- Pushing needs a server release with plugin upload; an older server answers 404 and the CLI says so.

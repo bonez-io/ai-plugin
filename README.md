@@ -245,7 +245,9 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 
 | Variable | Purpose |
 | --- | --- |
-| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above; the Claude Code plugin itself never reads it. |
+| `BONEZ_API_KEY` | Personal Bonez API key (`bnz_…`). Optional — used by the Codex `bearer_token_env_var` example and the CLI snippet above, and by `bin/bonez-plugin-push.mjs` (a `plugins`-scope key, see [Pushing a plugin](#pushing-a-plugin)); the Claude Code plugin itself never reads it. |
+| `BONEZ_URL` | Your Bonez server (for example `https://bonez.example.com`, no trailing path). Read only by `bin/bonez-plugin-push.mjs`; no default, so a key is never sent to a server you did not name. |
+| `BONEZ_ALLOW_HTTP` | Set to `1` to let `bonez-plugin-push` use a plain-`http` server on a private network (the key then travels unencrypted). Not needed for `https` or `localhost`. |
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts (headless/CI runs). |
 | `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
@@ -256,7 +258,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 `read` / `read+memory` / `read+write` are nested tiers for the MCP tool surface (`/mcp`).
 `sessions` is a separate, disjoint lane for the [session capture](#session-capture) uploader's
 two calls (`/api/import/presign`, `/api/import/{id}/complete`) — it never reaches `/mcp`, and an
-MCP-scoped key never reaches the import routes. Mint the smallest one that covers what you need:
+MCP-scoped key never reaches the import routes. `plugins` is a third such lane, for [pushing a plugin](#pushing-a-plugin). Mint the smallest one that covers what you need:
 
 | Scope | Unlocks |
 | --- | --- |
@@ -264,6 +266,7 @@ MCP-scoped key never reaches the import routes. Mint the smallest one that cover
 | `read+memory` | `read`, plus `graph_write`. A read-only key gets `memory_scope_required`. |
 | `read+write` | Everything: `read+memory`, plus `rules` save/update/delete. Rules bind every session in the org — hand these keys out deliberately. |
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
+| `plugins` | Only `bonez-plugin-push.mjs` needs this. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
 **On servers released before Linear 1SI-2292, `vendor_operation` ignores the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse a vendor write without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
@@ -317,10 +320,10 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **citing-bonez-sources** — handles; never fabricate one; staleness and history.
 - **who-owns-what** — people and ownership via the graph, not commit counts.
 - **reviewing-with-org-rules** — pull the org's standing rules before reviewing.
-- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, handoff.
+- **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle and hash a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex, `/bonez-context`, `/bonez-search` and `/bonez-agents` on Cursor.
 
 The skills are shared, with one deliberate exception: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because Codex has no write gate, so the Claude/Cursor wording ("expect the harness to ask") would be false there. CI pins that divergence to exactly those two files, so any other drift fails the build.
 
@@ -467,6 +470,37 @@ off by default) on top of this plugin's own `install` gate — see the commented
 wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/`~` in
 `config.toml`, same caveat as the MCP `url` field above).
 
+## Pushing a plugin
+
+`/bonez:new-plugin <name>` builds a plugin and, as its last step, uploads it. You can also push any
+built plugin folder yourself (the `out/<name>/` of the creator: `package.json` and `dist/` only):
+
+```bash
+export BONEZ_URL=https://bonez.example.com   # your server
+export BONEZ_API_KEY=bnz_...                 # scope "plugins", minted by an org admin
+node bin/bonez-plugin-push.mjs ./my-plugin/out/my-plugin
+```
+
+Inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's `PATH`, so
+`bonez-plugin-push.mjs <folder>` works bare. It needs only Node 18+.
+
+It sends the folder as `{path: base64}` plus its tree sha256 (the algorithm of
+`bonez-package-hash.mjs`) to `$BONEZ_URL/api/admin/org/plugins`. The server recomputes the hash,
+vets the files, stores the version and makes it the active one. The command prints the plugin's
+name, version, fingerprint and how many computers it rolls out to; if the server refuses, it prints
+the refusal code and detail as sent. Exit codes: `0` uploaded, `1` refused by the server, `2` nothing
+sent (bad folder or configuration), `3` server unreachable or answer unreadable.
+
+- **The key.** Mint a key with the **plugins** scope in the console. It reaches plugin upload and
+  the plugin list only, and the server checks on every request that its owner is still an org admin.
+  The command never prints it, refuses to send it over plain `http` (except to `localhost`, or with
+  `BONEZ_ALLOW_HTTP=1`) and does not follow redirects with it.
+- **What it does not carry.** Environment variables, apt packages and host mounts are not part of an
+  upload; the creator prints them and an operator sets them once per computer.
+- **Servers.** Needs a Bonez server release with plugin upload; an older server answers 404 and the
+  command says so. Without `BONEZ_API_KEY` and `BONEZ_URL`, `/bonez:new-plugin` prints the manual
+  handoff instead.
+
 ## Layout
 
 ```
@@ -475,10 +509,11 @@ wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/
 skills/           10 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
-bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle)
+bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
+                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
 server.json       MCP registry entry for the remote server
-tests/            gate tests + session-capture tests (run in CI)
+tests/            gate tests + session-capture + plugin hash and push tests (run in CI)
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
@@ -498,6 +533,8 @@ Codex both read `SKILL.md` from `.agents/skills/`).
 claude --plugin-dir .         # load the working tree for one session
 ./tests/test_gate.sh          # hook gate tests
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
+./tests/test_package_hash.sh  # plugin tree-hash tests
+./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```

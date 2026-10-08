@@ -73,6 +73,9 @@ jobs:
       - name: Package hash tool tests
         run: ./tests/test_package_hash.sh
 
+      - name: Plugin push tests
+        run: ./tests/test_plugin_push.sh
+
       - name: Skills parity across harness legs
         run: |
           set -euo pipefail

@@ -7,9 +7,9 @@ description: Create, extend, test, bundle and hand over a Bonez plugin (a "packa
 
 A Bonez plugin is a TypeScript module whose default export calls `pi.registerTool(...)`. It adds **tools** to Bonez agents, nothing else. The long reference is `reference/SPEC.md` next to this file: read it before answering a question this page does not settle, and say "unverified" rather than guess.
 
-**To create a new plugin, follow the steps of `/bonez:new-plugin`** (`${CLAUDE_PLUGIN_ROOT}/commands/new-plugin.md`): three questions, scaffold from `templates/`, write the tools, `bun install`, `bun test`, `bun run typecheck`, `bun run build:package`, hash, handoff. Do the steps in order and stop at the first failure.
+**To create a new plugin, follow the steps of `/bonez:new-plugin`** (`${CLAUDE_PLUGIN_ROOT}/commands/new-plugin.md`): three questions, scaffold from `templates/`, write the tools, `bun install`, `bun test`, `bun run typecheck`, `bun run build:package`, hash, push (or the manual handoff). Do the steps in order and stop at the first failure.
 
-**To add a tool to an existing plugin:** one plain function per tool in `src/<tool>.ts`, a `registerTool` call in `src/index.ts`, a test in `test/`, then run the same four commands and hash again. Any change to the bundle changes the sha256, so hand over the new folder and the new hash together.
+**To add a tool to an existing plugin:** one plain function per tool in `src/<tool>.ts`, a `registerTool` call in `src/index.ts`, a test in `test/`, then run the same four commands and hash again. Any change to the bundle changes the sha256, so push or hand over the new folder and the new hash together.
 
 ## Facts that decide the design
 
@@ -34,6 +34,7 @@ A Bonez plugin is a TypeScript module whose default export calls `pi.registerToo
 
 ## Installing: be exact about status
 
+- **Push** (a server on a release with plugin upload): `node "${CLAUDE_PLUGIN_ROOT}/bin/bonez-plugin-push.mjs" <abs path>/<name>/out/<name>` uploads the built folder with its sha256 to `$BONEZ_URL`, using the `plugins`-scope API key in `$BONEZ_API_KEY` (an org admin mints it in the console; it works only while its owner is an admin and reaches nothing but plugin upload and list). The server checks the hash again, vets the files, stores the version and makes it active; the CLI prints the name, version, fingerprint and the number of computers it rolls out to, or the server's refusal code and detail as sent. Never print or ask for the key. A push does not carry env vars, apt packages or mounts: those stay a one-time edit by an operator. An older server answers 404: use the folder install or send the source. `/bonez:new-plugin` step 7 runs the push when both variables are set and prints the manual text below when they are not.
 - **Folder install** (a Bonez computer, or a server on a release with folder plugins): the folder from `bun run build:package` is copied to `/var/lib/bonez/packages/<package name with "/" as "__">/` on the machine that runs the agent, pinned by the sha256 from `bin/bonez-package-hash.mjs` in `BONEZ_PI_PACKAGES_SHA256`, named in `BONEZ_PI_PACKAGES`, and the runner is restarted (`sudo bonez-computer restart` on a computer). A wrong or missing sha256 makes the runner refuse the plugin and log the hash it saw. Do not invent options beyond the steps in the command.
 - **Older servers:** the plugin is compiled into Bonez. The user sends Bonez the source folder, plus env var names, apt packages and directories to mount.
 - `BONEZ_PI_PACKAGES` is the one switch. An agent spec's `metadata.packages` does not reach the harness.
@@ -43,3 +44,4 @@ A Bonez plugin is a TypeScript module whose default export calls `pi.registerToo
 - `templates/` — the scaffold (`package.json`, `tsconfig.json`, `src/index.ts`, `test/echo.test.ts`, `scripts/build-package.mjs`, `.gitignore`). Placeholders: `__PACKAGE_NAME__`, `__DESCRIPTION__`.
 - `reference/SPEC.md` — the full reference. Bun 1.3.14, Pi 0.87.1.
 - `${CLAUDE_PLUGIN_ROOT}/bin/bonez-package-hash.mjs <folder>` — prints the tree hash; refuses symlinks and `node_modules/`.
+- `${CLAUDE_PLUGIN_ROOT}/bin/bonez-plugin-push.mjs <folder>` — uploads the built folder to `$BONEZ_URL` with `$BONEZ_API_KEY`; exit 0 uploaded, 1 refused by the server, 2 nothing sent (bad folder or config), 3 unreachable or unreadable answer.
