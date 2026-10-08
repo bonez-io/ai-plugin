@@ -15,3 +15,5 @@ Show the org's Bonez agents. Argument (optional): **$ARGUMENTS**
 3. With an argument: call `bonez.agent.read.v1` with `{"name": "$ARGUMENTS"}` and `bonez.run.list.v1` with `{"agent": "$ARGUMENTS", "limit": 5}`. Show the agent in two lines (what it is, how it is triggered) and its recent runs (status, started, finished, who triggered). An unknown name is an error: say so and offer the list.
 
 4. Offer the next step: `bonez.run.read.v1` for a run's summary and error, or `bonez.session.list.v1` for its sessions. These are read-only; never run anything else without asking.
+
+5. To make a new agent (one a person starts, or one on a schedule), create one with the `creating-an-agent` skill.

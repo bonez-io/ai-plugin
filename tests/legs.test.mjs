@@ -6,6 +6,10 @@
 // the flow is the new-plugin skill) that runs the same steps as commands/new-plugin.md. These tests keep the
 // copies from drifting and prove a copy works alone.
 //
+// It also pins what the three legs share about skills and always-loaded guidance: the same skill set, the same
+// descriptions (a description is what makes a harness reach for a skill unasked), the two agent skills
+// (suggesting-agents, creating-an-agent) and the lines in codex/AGENTS.md, cursor/AGENTS.md and the Cursor rule.
+//
 // Offline and dependency-free (Node's built-in runner).
 // Run: node --test tests/legs.test.mjs   (or ./tests/test_legs.sh)
 import { test, describe } from "node:test"
@@ -188,4 +192,165 @@ describe("a leg copied on its own works", () => {
       mkdirSync(join(target, "out"), { recursive: true })
     })
   }
+})
+
+// ---- skills and always-loaded guidance, across the three legs ------------------------------------------------
+
+// Where each leg keeps its skills. Codex also has new-plugin, the plugin creator, as a skill (it ships no commands).
+const SKILL_ROOTS = { claude: "skills", cursor: "cursor/skills", codex: "codex/skills" }
+const skillNames = (root) => readdirSync(join(REPO, ...root.split("/"))).sort()
+const skillText = (root, name) => read(...root.split("/"), name, "SKILL.md")
+const frontmatter = (text) => text.split("\n---\n")[0]
+const descriptionOf = (text) => frontmatter(text).match(/^description: (.+)$/m)?.[1]
+const AGENT_SKILLS = ["creating-an-agent", "suggesting-agents"]
+
+describe("the skill set and the skill descriptions", () => {
+  const canonical = skillNames("skills")
+
+  test("every leg exposes the same skills (Codex also has new-plugin) and the two agent skills are among them", () => {
+    assert.deepEqual(skillNames("cursor/skills"), canonical)
+    assert.deepEqual(skillNames("codex/skills").filter((s) => s !== "new-plugin"), canonical)
+    for (const skill of AGENT_SKILLS) assert.ok(canonical.includes(skill), `skills/${skill} is missing`)
+  })
+
+  for (const skill of AGENT_SKILLS) {
+    test(`${skill} is the same file in all three legs`, () => {
+      for (const leg of ["cursor/skills", "codex/skills"]) assert.equal(skillText(leg, skill), skillText("skills", skill), `${leg}/${skill} has drifted: re-copy it`)
+    })
+  }
+
+  for (const [leg, root] of Object.entries(SKILL_ROOTS)) {
+    for (const skill of skillNames(root)) {
+      test(`${leg}: ${skill} has a name and a one-line description under 1000 characters that parses as YAML`, () => {
+        const text = skillText(root, skill)
+        assert.ok(text.startsWith("---\n"), "frontmatter")
+        assert.match(frontmatter(text), new RegExp(`^name: ${skill}$`, "m"), "name must be the folder's name")
+        const description = descriptionOf(text)
+        assert.ok(description && description.trim().length > 0, "description must not be empty")
+        // The description sits in the model's context every session; Codex refuses one over 1024 characters.
+        assert.ok(description.length < 1000, `description is ${description.length} characters`)
+        assert.doesNotMatch(description, /: | #|^["'&*!|>%@`]/, "a colon-space, a space-hash or a leading indicator breaks the YAML scalar")
+      })
+    }
+  }
+
+  test("the three legs carry the same description for every skill", () => {
+    for (const skill of canonical) {
+      for (const root of ["cursor/skills", "codex/skills"]) {
+        assert.equal(descriptionOf(skillText(root, skill)), descriptionOf(skillText("skills", skill)), `${root}/${skill}: description differs from skills/${skill}`)
+      }
+    }
+  })
+
+  test("every description states the moment to reach for the skill", () => {
+    // The old descriptions said what a skill does; the new ones say when to use it, in the user's or the agent's words.
+    const triggers = {
+      "finding-prior-art": /before you write non-trivial code/i,
+      "impact-analysis": /before you change, rename or delete/i,
+      "remembering": /something a teammate would want/i,
+      "reviewing-with-org-rules": /before you tell the user a non-trivial change is ready/i,
+      "session-context": /start of a task in an unfamiliar repo/i,
+      "who-owns-what": /who owns/i,
+      "using-the-tool-lake": /instead of guessing or asking the user to paste it/i,
+    }
+    for (const [skill, re] of Object.entries(triggers)) assert.match(descriptionOf(skillText("skills", skill)), re, skill)
+  })
+})
+
+describe("suggesting-agents", () => {
+  const text = skillText("skills", "suggesting-agents")
+  const description = descriptionOf(text)
+
+  test("its description names the moments: a recurring bug, a periodic manual task, a task to rerun", () => {
+    for (const phrase of [/come back/, /keeps happening/, /again/, /regression/, /nightly agent/]) assert.match(description, phrase, "recurring bug")
+    for (const phrase of [/by hand/, /dependency or CVE check/, /stale PRs/, /release notes/, /log or error sweep/, /docs-drift/, /post-deploy verification/, /scheduled agent/]) assert.match(description, phrase, "periodic task")
+    assert.match(description, /run again/, "a task they will rerun")
+    assert.match(description, /Never for one-off work/)
+    assert.match(description, /Never create one without a yes/)
+  })
+
+  test("its body is the etiquette: once per session, two lines with the spec, never without a yes, prefer an existing agent", () => {
+    assert.match(text, /\*\*Once per idea per session\.\*\*/)
+    assert.match(text, /\*\*Two lines, with the spec\.\*\*/)
+    assert.match(text, /\*\*Never create without a yes\.\*\*[^\n]*`creating-an-agent`/)
+    assert.match(text, /\*\*Never for one-off work\.\*\*/)
+    assert.match(text, /`bonez\.agent\.list\.v1`[^\n]*instead of proposing a twin/)
+    assert.match(text, /no `bonez\.agent\.create\.v1`[^\n]*web builder/, "a server that cannot create agents still gets the suggestion")
+    for (const example of [/nightly regression check/i, /weekly dependency audit/i, /morning digest of stale PRs/i]) assert.match(text, example)
+    assert.match(text, /`0 3 \* \* \*`/, "a cron in words and as cron")
+  })
+})
+
+describe("creating-an-agent", () => {
+  const text = skillText("skills", "creating-an-agent")
+
+  test("it checks tool_search for the operation, says the spec out loud and waits for a yes before it creates", () => {
+    assert.match(text, /`tool_search`[\s\S]*"vendor": "bonez"/)
+    assert.match(text, /only if the results show `bonez\.agent\.create\.v1`/, "an older server lacks the operation")
+    assert.match(text, /wait for a yes/i)
+    assert.ok(text.indexOf("## 2. Say it out loud") < text.indexOf("## 4. Create it"), "the question comes before the call")
+    assert.match(text, /BEFORE you call the create operation/)
+    assert.match(text, /the write gate covers `graph_write` and `rules` only/, "the skill is the guard")
+  })
+
+  test("it calls the create operation, polls the agent until ready, runs it only on request and reads the run", () => {
+    for (const op of ["bonez.agent.create.v1", "bonez.agent.read.v1", "bonez.agent.run.v1", "bonez.run.read.v1", "bonez.run.list.v1", "bonez.agent.list.v1"]) assert.ok(text.includes(op), op)
+    assert.match(text, /`deployment\.status`/)
+    assert.match(text, /`runs_manually`/)
+    assert.match(text, /Nothing asked for a test:\*\* do not run it/)
+  })
+
+  test("it teaches instructions that stand alone, with the plugins field and the scheduled-run caveat", () => {
+    assert.match(text, /A scheduled run has no caller/)
+    for (const heading of ["Goal:", "Check:", "Where:", "A problem is:", "Report:", "Do not:"]) assert.ok(text.includes(heading), heading)
+    assert.match(text, /`plugins`: names of plugins already uploaded/)
+    assert.match(text, /Never put a token, password or connection string in them/)
+  })
+})
+
+describe("always-loaded guidance", () => {
+  // The three lines every always-loaded surface carries. Claude Code has no such surface (a plugin cannot ship an
+  // instructions file), so there its skill descriptions are the always-loaded part.
+  const bullets = read("cursor", "rules", "bonez.mdc").split("\n---\n")[1].trim().split("\n")
+
+  test("the Cursor rule is always-apply and holds the three lines", () => {
+    const rule = read("cursor", "rules", "bonez.mdc")
+    assert.match(frontmatter(rule), /^alwaysApply: true$/m)
+    assert.match(frontmatter(rule), /^description: .+/m)
+    assert.equal(bullets.length, 3)
+    assert.ok(bullets.every((b) => b.startsWith("- ")))
+  })
+
+  for (const file of ["codex/AGENTS.md", "cursor/AGENTS.md"]) {
+    test(`${file} carries the same three lines`, () => {
+      const text = read(...file.split("/"))
+      assert.ok(text.includes(`## Reach for Bonez, and suggest agents\n\n${bullets.join("\n")}\n`), `${file} lacks the proactive section, or it differs from cursor/rules/bonez.mdc`)
+    })
+  }
+
+  test("the lines name the two skills, and the skills exist", () => {
+    const joined = bullets.join("\n")
+    for (const skill of AGENT_SKILLS) {
+      assert.ok(joined.includes(`\`${skill}\``))
+      assert.ok(existsSync(join(REPO, "skills", skill, "SKILL.md")))
+    }
+    assert.match(joined, /Never create one without a yes/)
+  })
+})
+
+describe("the agent pointers in the commands", () => {
+  const POINTER = "create one with the `creating-an-agent` skill."
+
+  test("the agents command in every leg ends by pointing to creating-an-agent", () => {
+    for (const file of ["commands/agents.md", "cursor/commands/bonez-agents.md", "codex/prompts/agents.md"]) {
+      assert.ok(read(...file.split("/")).trimEnd().endsWith(POINTER), `${file} must end with: ${POINTER}`)
+    }
+  })
+
+  test("the plugin creator's last step, in all three flows, hands over to creating-an-agent with the same sentence", () => {
+    const sentence = "The next step is an agent that uses the plugin: offer to create one with the `creating-an-agent` skill (its `plugins` field takes the package name)."
+    for (const file of ["commands/new-plugin.md", "cursor/commands/bonez-new-plugin.md", "codex/skills/new-plugin/SKILL.md"]) {
+      assert.ok(read(...file.split("/")).includes(sentence), `${file} lacks the creating-an-agent hand-over`)
+    }
+  })
 })

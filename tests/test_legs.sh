@@ -5,6 +5,9 @@
 # The assertions live in tests/legs.test.mjs (Node's built-in runner); this wrapper gives CI and local
 # runs the repo's one-entrypoint-per-test-file shape.
 #
+# It also holds the three legs to one skill set with identical descriptions, the two agent skills
+# (suggesting-agents, creating-an-agent) and the always-loaded guidance (AGENTS.md, the Cursor rule).
+#
 # Offline.
 #
 #     ./tests/test_legs.sh
@@ -13,5 +16,5 @@ set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Running plugin-creator leg tests..."
+echo "Running plugin-creator and skill leg tests..."
 node --test "$HERE/legs.test.mjs"

@@ -1,6 +1,6 @@
 ---
 name: reviewing-with-org-rules
-description: Review code against the org's standing rules. Use when reviewing a PR, diff, or change in a Bonez-connected org, when asked whether code follows the org's conventions, or before approving, merging, or signing off on anything non-trivial.
+description: Review code against the org's standing rules. Use when asked to review a PR, diff or change in a Bonez-connected org, when asked whether code follows the org's conventions, before you tell the user a non-trivial change is ready, and before approving, merging or signing off on anything non-trivial. Pull the rules first, then review.
 ---
 
 # Reviewing with org rules

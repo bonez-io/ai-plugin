@@ -1,6 +1,6 @@
 ---
 name: querying-the-graph
-description: Traverse the org graph with BGQ via graph_query. Use when a question is about relationships or structure — what calls, imports, tests, or depends on X, what is connected to a ticket or PR, which code touches a table — or when graph_search has found a seed and you need its neighbourhood.
+description: Traverse the org graph with BGQ via graph_query. Use when a question is about relationships or structure (what calls, imports, tests or depends on X, what is connected to a ticket or PR, which code touches a table), when you would otherwise grep across repos to trace callers or dependencies, or when graph_search has found a seed and you need its neighbourhood.
 ---
 
 # Querying the graph

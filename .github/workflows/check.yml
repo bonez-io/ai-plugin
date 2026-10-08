@@ -107,7 +107,10 @@ jobs:
           # remembering and reviewing-with-org-rules because its write prompt comes from
           # the per-tool approval_mode in codex/.mcp.json (and also fires for rules reads),
           # which the Claude wording does not say, plus the same creating-a-plugin
-          # SKILL.md; anything beyond those three is drift.
+          # SKILL.md; anything beyond those three is drift. The two agent skills
+          # (suggesting-agents, creating-an-agent) name no tool paths and no gate,
+          # so every leg holds the same bytes; tests/legs.test.mjs pins their
+          # wording and that every leg carries the same description per skill.
           test -f codex/skills/new-plugin/SKILL.md || {
             echo "::error::codex/skills/new-plugin/SKILL.md is missing — the Codex plugin has no way to create a plugin."; exit 1; }
           diff <(ls skills) <(ls cursor/skills) || {
@@ -132,7 +135,14 @@ jobs:
             echo "  found:            $actual"
             exit 1
           fi
-          echo "ok: skill sets match (codex adds new-plugin); cursor/skills identical bar creating-a-plugin/SKILL.md; codex divergence is the documented three"
+          for s in suggesting-agents creating-an-agent; do
+            test -f "skills/$s/SKILL.md" || { echo "::error::skills/$s/SKILL.md is missing — the agent skills are part of every leg."; exit 1; }
+            for leg in cursor codex; do
+              cmp -s "skills/$s/SKILL.md" "$leg/skills/$s/SKILL.md" || {
+                echo "::error::$leg/skills/$s has drifted from skills/$s — re-copy it."; exit 1; }
+            done
+          done
+          echo "ok: skill sets match (codex adds new-plugin); cursor/skills identical bar creating-a-plugin/SKILL.md; codex divergence is the documented three; agent skills identical in all legs"
 
       - name: Cursor plugin structure
         run: |
@@ -154,6 +164,10 @@ jobs:
             echo "::error::cursor/hooks/gate-write.sh has drifted from hooks/gate-write.sh — re-copy it."; exit 1; }
           test -d cursor/skills                     || { echo "::error::cursor/skills missing"; exit 1; }
           test -d cursor/commands                   || { echo "::error::cursor/commands missing"; exit 1; }
+          # Plugins can ship rules (cursor.com/docs/plugins: rules/*.mdc). The always-apply
+          # rule is what makes Cursor reach for Bonez and suggest agents unasked; without
+          # alwaysApply: true it is offered only when it looks relevant, which defeats it.
+          grep -qx 'alwaysApply: true' cursor/rules/bonez.mdc || { echo "::error::cursor/rules/bonez.mdc missing or not alwaysApply: true"; exit 1; }
 
           # The marketplace entry must point at a plugin that actually exists.
           src="$(jq -r '.plugins[] | select(.name=="bonez") | .source' .cursor-plugin/marketplace.json)"

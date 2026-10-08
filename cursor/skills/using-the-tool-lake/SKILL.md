@@ -1,6 +1,6 @@
 ---
 name: using-the-tool-lake
-description: Find, run and poll operations on the org's connected vendor systems (GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord, databases) with tool_search, vendor_operation and vendor_operation_status, acting as the signed-in user. Use when a task needs data from or an action in one of those systems (read an issue or merge request, search tickets, list CI runs, post a comment), when the user asks what Bonez can do in a vendor, when a vendor result is "unavailable" or "not connected", or when asked to list Bonez agents, runs or sessions (the `bonez` vendor).
+description: Reach the org's connected vendor systems (GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord, databases) with tool_search, vendor_operation and vendor_operation_status, as the signed-in user. Use when a task needs a ticket, PR or merge request, CI run, error, thread or table from one of them instead of guessing or asking the user to paste it, when the user asks what Bonez can do in a vendor, when a vendor result is "unavailable" or "not connected", or when asked to list or inspect Bonez agents, runs or sessions (the bonez vendor).
 ---
 
 # Using the tool lake
