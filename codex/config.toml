@@ -23,7 +23,8 @@ url = "https://gateway.bonez.io/mcp"
 # Bonez admin of your server mint a key (console -> API keys), export it, and
 # point Codex at the env var instead — do not paste the key into this file.
 #
-#   export BONEZ_API_KEY=bnz_...
+#   export BONEZ_API_KEY=bnz_...          (bash)
+#   $env:BONEZ_API_KEY = "bnz_..."        (Windows PowerShell; start codex from that window)
 #
 # [mcp_servers.bonez]
 # url = "https://gateway.bonez.io/mcp"
@@ -68,6 +69,14 @@ url = "https://gateway.bonez.io/mcp"
 # checkout of bonez-io/ai-plugin:
 #
 #   command = "node /absolute/path/to/ai-plugin/bin/bonez-session-sync.mjs hook codex session-end"
+#
+# On Windows write the path with forward slashes, or as a TOML literal (single-quoted) string: a
+# backslash inside a double-quoted TOML string starts an escape and the file stops parsing.
+#
+#   command = "node C:/Users/me/ai-plugin/bin/bonez-session-sync.mjs hook codex session-end"
+#   command = 'node C:\Users\me\ai-plugin\bin\bonez-session-sync.mjs hook codex session-end'
+#
+# (How Codex starts a hook command on Windows has not been checked here.)
 #
 # Hooks are themselves opt-in per Codex install (off by default):
 #

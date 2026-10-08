@@ -59,6 +59,29 @@ describe("line endings", () => {
   })
 })
 
+describe("file names", () => {
+  // A Windows checkout cannot hold two names that differ only by case, a reserved device name, a name with
+  // one of < > : " | ? * or one ending in a dot or space, and a symlink needs a privilege. Plugin installs
+  // copy this repo as it is, so one such file breaks the whole checkout there.
+  test("every tracked name is legal on Windows, case-unique, and no tracked file is a symlink", (t) => {
+    const ls = spawnSync("git", ["ls-files", "-s", "-z"], { cwd: REPO, encoding: "utf8" })
+    if (ls.status !== 0) return t.skip("not a git checkout")
+    const entries = ls.stdout.split("\0").filter(Boolean).map((l) => ({ mode: l.slice(0, 6), path: l.split("\t").slice(1).join("\t") }))
+    assert.ok(entries.length > 50)
+    assert.deepEqual(entries.filter((e) => e.mode === "120000").map((e) => e.path), [], "symlinks")
+    const illegal = entries.map((e) => e.path).filter((p) => p.split("/").some((seg) => /[<>:"|?*]|[ .]$|^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(seg)))
+    assert.deepEqual(illegal, [], "names Windows cannot create")
+    const seen = new Map()
+    const clashes = []
+    for (const { path } of entries) {
+      const key = path.toLowerCase()
+      if (seen.has(key)) clashes.push(`${seen.get(key)} / ${path}`)
+      else seen.set(key, path)
+    }
+    assert.deepEqual(clashes, [], "names that differ only by case")
+  })
+})
+
 describe("hook commands", () => {
   const commandsOf = (file) => Object.values(json(file).hooks).flatMap((groups) => groups.flatMap((g) => (g.hooks ?? [g]).map((h) => h.command)))
 

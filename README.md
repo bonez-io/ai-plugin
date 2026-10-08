@@ -26,7 +26,13 @@ Claude Code. Five steps:
    echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
    ```
 
-   then restart Claude Code.
+   On Windows PowerShell:
+
+   ```powershell
+   '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
+   ```
+
+   then restart Claude Code. (`claude plugin configure` needs Claude Code 2.1.285 or later.)
 
 4. **Authenticate.** Pick one:
 
@@ -49,6 +55,56 @@ Claude Code. Five steps:
    ```
 
    The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
+
+## Windows
+
+Claude Code, Codex and Cursor run on Windows 11. What differs from the text above:
+
+```powershell
+winget install --id Git.Git -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Oven-sh.Bun --exact --version 1.3.14
+```
+
+Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code runs a plugin's hook commands through Git Bash (it falls back to PowerShell only when Git Bash is missing, and then `bash` is not found and the write gate silently does not run; [hooks reference](https://code.claude.com/docs/en/hooks)). **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
+
+**Claude Code** (PowerShell). Single quotes keep the double quotes of the JSON, and the pipe sends it as stdin, so there is nothing for PowerShell or cmd to mangle:
+
+```powershell
+claude plugin marketplace add bonez-io/ai-plugin
+claude plugin install bonez@bonez
+'{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
+claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
+```
+
+The last line is only for an API key (set `$env:BONEZ_API_KEY = "bnz_..."` first); with OAuth, skip it and use `/mcp` as above.
+
+**Codex.** The config file is `$HOME\.codex\config.toml` (`%USERPROFILE%\.codex\config.toml`). The commands are the same; run them from a clone of this repo to copy the skills:
+
+```powershell
+codex mcp add bonez --url https://bonez.example.com/mcp
+codex mcp login bonez
+New-Item -ItemType Directory -Force $HOME\.agents\skills | Out-Null
+Copy-Item -Recurse -Force .\codex\skills\* $HOME\.agents\skills\
+```
+
+Inside WSL, use the Linux commands.
+
+**Cursor.** There is no `cursor --add-mcp '<json>'` line for Windows: Windows PowerShell 5.1 and cmd strip the inner double quotes of that argument (PowerShell 7 does too for a `.cmd` launcher; `tests\windows-client-checks.ps1` reproduces it with a `.cmd` shim). Use the one-click **Install in Cursor** button on `https://bonez.example.com/mcp/install`, or put the block that page shows in `%USERPROFILE%\.cursor\mcp.json` (`~/.cursor/mcp.json` in [Cursor's docs](https://cursor.com/docs/mcp)). To install this repo as a local plugin:
+
+```powershell
+git clone https://github.com/bonez-io/ai-plugin.git $HOME\bonez-ai-plugin
+New-Item -ItemType Directory -Force $HOME\.cursor\plugins\local | Out-Null
+Copy-Item -Recurse $HOME\bonez-ai-plugin\cursor $HOME\.cursor\plugins\local\bonez
+```
+
+Cursor's write gate runs `bash ./hooks/gate-write.sh`, so `bash` must be on the PATH Cursor starts with, and it must be Git Bash, not the WSL launcher in `C:\Windows\System32`. Git for Windows' default PATH option adds only Git itself; choose *Use Git and optional Unix tools from the Command Prompt* or add `C:\Program Files\Git\bin` to PATH (unverified on Windows). Without `bash`, Cursor lets writes through unprompted; reads are unaffected.
+
+**Check the machine.** From a clone of this repo, `tests\windows-client-checks.ps1` prints PASS / FAIL / SKIP, with evidence, for everything above (Git Bash, node, bun, the CLIs, the hash tool on the shared vectors, a push to a fake gateway on 127.0.0.1, the write gate under Git Bash). It makes no network call except to localhost:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\windows-client-checks.ps1
+```
 
 ## Other clients and credentials
 
@@ -233,6 +289,13 @@ claude mcp add --transport http bonez https://<your server>/mcp \
   --header "Authorization: Bearer ${BONEZ_API_KEY}"
 ```
 
+On Windows PowerShell:
+
+```powershell
+$env:BONEZ_API_KEY = "bnz_..."
+claude mcp add --transport http bonez https://<your server>/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
+```
+
 ### Raw MCP (any client, no plugin)
 
 Any MCP client that speaks OAuth discovery: point it at your server's streamable-HTTP endpoint
@@ -294,7 +357,7 @@ skills never use them.
 `hooks/gate-write.sh` is a `PreToolUse` hook: Claude Code asks you before **every `graph_write` call** (every op
 is a write; a `preflight` or `dry_run` asks too) and before `rules` `save`/`update`/`delete`. Reads pass
 through untouched. For servers that still serve the retired `memory` tool, its `save`/`update`/`delete` are
-gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs.
+gated the same way. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
 
 ### Vendor operations
 
@@ -375,7 +438,10 @@ though it sits on your disk.
 
 Run from inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's
 `PATH`, so the bare command above works; otherwise invoke it by its full path (`node
-<plugin-root>/bin/bonez-session-sync.mjs login ...`). With no `--repo` given, `login` scopes
+<plugin-root>/bin/bonez-session-sync.mjs login ...`). On Windows always use the second form, in
+PowerShell: `node "$HOME\.claude\plugins\...\bin\bonez-session-sync.mjs" login --global`
+(Windows does not read the `#!` line; the credential lives in `%USERPROFILE%\.bonez\session-sync\`,
+protected by your profile's ACLs, since `chmod` is not enforced there). With no `--repo` given, `login` scopes
 capture to whatever directory you ran it from, and prints exactly what uploads, where it
 goes, and who can read it before anything is captured.
 
@@ -481,8 +547,18 @@ export BONEZ_API_KEY=bnz_...                 # scope "plugins", minted by an org
 node bin/bonez-plugin-push.mjs ./my-plugin/out/my-plugin
 ```
 
+On Windows PowerShell (set them in the window you start Claude Code from, if `/bonez:new-plugin` is to push):
+
+```powershell
+$env:BONEZ_URL = "https://bonez.example.com"
+$env:BONEZ_API_KEY = "bnz_..."
+node bin\bonez-plugin-push.mjs .\my-plugin\out\my-plugin
+```
+
 Inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's `PATH`, so
-`bonez-plugin-push.mjs <folder>` works bare. It needs only Node 18+.
+`bonez-plugin-push.mjs <folder>` works bare on macOS and Linux; on Windows call it as `node <path>`.
+It needs only Node 18+. The tree hash is over bytes (line endings and a BOM are never normalised) and
+its paths use `/` on every OS, so a folder built on Windows gets the gateway's hash.
 
 It sends the folder as `{path: base64}` plus its tree sha256 (the algorithm of
 `bonez-package-hash.mjs`) to `$BONEZ_URL/api/admin/org/plugins`. The server recomputes the hash,
@@ -510,10 +586,13 @@ skills/           10 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
-                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload)
+                  bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin upload),
+                  lib/plugin-tree.mjs (the walk and tree hash those two share)
                   cursor/bin/ is a byte copy — a marketplace install ships only cursor/, with no repo behind it
 server.json       MCP registry entry for the remote server
-tests/            gate tests + session-capture + plugin hash and push tests (run in CI)
+tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
+                  windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
+.gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
 codex/            OpenAI Codex leg — AGENTS.md, skills/, prompts/, config.toml (see Other clients → OpenAI Codex; no write gate)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
@@ -535,8 +614,11 @@ claude --plugin-dir .         # load the working tree for one session
 ./tests/test_session_sync.sh  # session-capture tests (stub gateway, no network)
 ./tests/test_package_hash.sh  # plugin tree-hash tests
 ./tests/test_plugin_push.sh   # plugin push tests (local http server, no network)
+./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root.
+On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs`.
+
+CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), skill-set parity across all three legs with the Codex divergence pinned, and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.
