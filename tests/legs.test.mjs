@@ -46,8 +46,8 @@ const LEGS = {
     others: [/Cursor/, /Claude Code/, /(^|[\s`(])\/bonez-[a-z]/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/, /\/prompts:/, /\$ARGUMENTS/],
   },
 }
-// The tools every leg ships, as bin/ paths.
-const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs"]
+// The tools every leg ships, as bin/ paths (the push tool's helpers included: net, sign-in, MCP call).
+const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs", "lib/net.mjs", "lib/signin.mjs", "lib/mcp.mjs"]
 
 const roots = []
 process.on("exit", () => roots.forEach((d) => rmSync(d, { recursive: true, force: true })))
@@ -163,6 +163,59 @@ describe("the new-plugin flow in every leg", () => {
       }
     })
   }
+})
+
+// The creator's last step publishes through the push tool's own sign-in. The same sentences, in all three flows and the
+// three creating-a-plugin skills: a model that is told something different in one leg behaves differently in it.
+describe("the creator publishes from the tool, in all three flows", () => {
+  const FLOWS = ["commands/new-plugin.md", "cursor/commands/bonez-new-plugin.md", "codex/skills/new-plugin/SKILL.md"]
+  const SKILLS = ["skills/creating-a-plugin/SKILL.md", "cursor/skills/creating-a-plugin/SKILL.md", "codex/skills/creating-a-plugin/SKILL.md"]
+  const last = (text) => text.slice(text.indexOf("## 7. Publish"), text.indexOf("End with these notes"))
+
+  test("the last step is Publish, and it runs the push tool with the sign-in, never with a key from the environment", () => {
+    for (const file of FLOWS) {
+      const text = read(...file.split("/"))
+      assert.ok(text.includes("## 7. Publish\n"), `${file}: step 7 is Publish`)
+      assert.ok(text.includes("## 6. Prepare the HANDOFF block\n"), `${file}: the HANDOFF block is prepared, not printed, before publishing`)
+      assert.doesNotMatch(text, /'push' : 'manual'/, `${file}: it must not branch on whether a key is set`)
+      assert.doesNotMatch(last(text), /process\.env\.BONEZ_API_KEY \|\||echo .*BONEZ_API_KEY/, `${file}: it never reads the key`)
+      assert.match(last(text), /--server "<server address>" "<abs path>\/<name>\/out\/<name>"`/, file)
+    }
+  })
+
+  test("what the model tells the user at exit 4, when it waits, and what it never touches", () => {
+    const sentences = [
+      "**Never ask for, print, read or store an API key or a token**",
+      "**4, waiting for the sign-in.** The first run prints two lines, `sign in at: <address>` and `code: <code>`, and has also tried to open a browser tab.",
+      "open that address, check the page shows that code, and approve; then **wait until they say they have approved**. Run the same command again to finish",
+      "If that run exits 4 again with `denied`, `expired` or `still waiting`",
+      "\"your account is not an admin of this Bonez server\" means an org admin has to publish it",
+      "Allow this command up to 6 minutes",
+      "For CI or a machine without a browser: an org admin mints an API key with the **plugins** scope",
+      "Only when publishing cannot finish and the user wants the plugin on their server anyway",
+    ]
+    for (const file of FLOWS) for (const sentence of sentences) assert.ok(last(read(...file.split("/"))).includes(sentence), `${file} lacks: ${sentence}`)
+  })
+
+  test("the manual install text and the HANDOFF block are the fallback, and the pinned hand-over to an agent is still there", () => {
+    for (const file of FLOWS) {
+      const text = read(...file.split("/"))
+      assert.ok(text.includes("**Manual install text** (only when publishing cannot finish): print the HANDOFF block, then"), file)
+      assert.ok(text.indexOf("FOLDER INSTALL") > text.indexOf("## 7. Publish"), file)
+      assert.match(text, /Write the block down now, but do not print it yet/, file)
+    }
+  })
+
+  test("the creating-a-plugin skills describe the same publish: sign-in in two runs, exit 4, no secrets", () => {
+    for (const file of SKILLS) {
+      const text = read(...file.split("/"))
+      assert.match(text, /\*\*Publish\*\* \(a server on a release with plugin upload\)/, file)
+      assert.match(text, /prints `sign in at: <address>` and `code: <code>` and exits 4 at once/, file)
+      assert.match(text, /\*\*Never ask for, print, read or store an API key or a token\.\*\*/, file)
+      assert.match(text, /`--login` and `--logout`/, file)
+      assert.match(text, /4 waiting for the sign-in to be approved/, file)
+    }
+  })
 })
 
 // What a marketplace install gives the user: the leg's folder, copied somewhere on its own. The skill asks the

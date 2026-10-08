@@ -1,6 +1,11 @@
 // A stand-in for the gateway's plugin routes (POST /api/admin/org/plugins and GET /api/org/plugins), for the
 // push CLI's tests and for tests/lib/push-smoke.mjs. It binds 127.0.0.1 only and makes no other network call.
 //
+// With `oauth: {...}` it is also the sign-in side the CLI talks to when it has no API key, all on one origin: the
+// protected-resource metadata (RFC 9728), the authorization server's metadata and device flow (RFC 8628), and the
+// MCP endpoint (POST /mcp: initialize, notifications/initialized, tools/call of `vendor_operation` with operation
+// bonez.plugin.publish.v1, which runs the SAME vetUpload as the route). `server.signin` drives the browser's part.
+//
 // `vetUpload` is a line-for-line port of `vet()` and `_check_path()` in bonez-core's
 // services/gateway/src/bonez_gateway/computers/plugins.py, with the same order of checks, the same limits
 // and the same refusal codes and wording, so a package that passes the CLI's tests here cannot be refused by
@@ -134,13 +139,177 @@ export function vetUpload(files, { claimedSha256, claimedName, builtIn = [] } = 
 // options.key: the bearer the server accepts. options.computers: how many computers it says it rolls out to
 // (each one is listed by GET /api/org/plugins in the state options.state, "ready" unless told otherwise).
 // options.builtIn: plugin names compiled into this server, which an upload may not take.
-export function startFakePluginServer({ key, computers = 2, state = "ready", builtIn = [] } = {}) {
-  const requests = [] // what arrived, in order: { method, url, auth, paths, claimed, recomputed, outcome }
+// options.oauth (turns the sign-in side on):
+//   admin          whether the signed-in person is an org admin (default true)
+//   adminRefusal   how a non-admin is told: "error" (a tool-level isError result, default) or "failed" (status failed)
+//   grant          the scopes a sign-in is granted, whatever it asks for (default: what it asks for); server.signin.grant() changes it
+//   accessTtl      seconds an access token lives, as `expires_in` says (default 3600)
+//   rotate         a refresh gives a new refresh token and retires the old one (Auth0 with rotation on)
+//   mcp            "json" (default, the gateway) or "sse" (the answer as an event stream); session: true adds Mcp-Session-Id
+//   metadataAt     "oauth-authorization-server" (default) or "openid-configuration" (the other one answers 404)
+//   interval       the device flow's polling interval in seconds (default 0.05, so a test does not wait)
+//   noPublish      an older server: bonez.plugin.publish.v1 is an unknown operation
+//   echoToken      /mcp refuses with a body that repeats the bearer back (a proxy that reflects headers)
+export function startFakePluginServer({ key, computers = 2, state = "ready", builtIn = [], oauth } = {}) {
+  const requests = [] // what arrived, in order: { method, url, auth, paths, claimed, recomputed, outcome, rpc, tool, session }
   const held = new Map() // name -> [{ version, sha256, size, active }]
-  const reply = (res, status, body) => {
-    res.writeHead(status, { "content-type": "application/json" })
+  const idp = oauth ? newSignIn(oauth) : null
+  let origin = ""
+  const reply = (res, status, body, headers = {}) => {
+    res.writeHead(status, { "content-type": "application/json", ...headers })
     res.end(JSON.stringify(body))
   }
+  const hold = (vetted) => {
+    const versions = held.get(vetted.name) ?? []
+    const identical = versions.some((v) => v.sha256 === vetted.sha256)
+    for (const v of versions) v.active = false
+    if (identical) versions.find((v) => v.sha256 === vetted.sha256).active = true
+    else versions.push({ version: vetted.version, sha256: vetted.sha256, size: vetted.size, active: true })
+    held.set(vetted.name, versions)
+    return { name: vetted.name, version: vetted.version, sha256: vetted.sha256, size: vetted.size, active: true, identical, computers }
+  }
+
+  // ---- POST /mcp -----------------------------------------------------------------------------------
+  const mcp = (req, res, seen, raw) => {
+    const token = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1]
+    const grant = idp.tokens.get(token)
+    if (!grant || grant.invalid) {
+      seen.outcome = "unauthenticated"
+      return reply(res, 401, { code: "unauthenticated", detail: "bad or missing bearer" }, {
+        "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="bonez:read"`,
+      })
+    }
+    if (idp.opts.echoToken) return reply(res, 400, { code: "bad_request", detail: `rejected ${token} as given` })
+    let msg
+    try {
+      msg = JSON.parse(raw)
+    } catch {
+      return reply(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } })
+    }
+    seen.rpc = msg.method
+    seen.session = req.headers["mcp-session-id"] ?? null
+    seen.protocol = req.headers["mcp-protocol-version"] ?? null
+    seen.accept = req.headers.accept ?? ""
+    if (idp.opts.session && msg.method !== "initialize" && seen.session !== "fake-session-1") {
+      return reply(res, 400, { jsonrpc: "2.0", id: msg.id ?? null, error: { code: -32000, message: "missing session" } })
+    }
+    if (msg.id === undefined) {
+      res.writeHead(202)
+      return res.end()
+    }
+    const answer = (result, headers = {}) => {
+      const body = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result })
+      if (idp.opts.mcp === "sse") {
+        res.writeHead(200, { "content-type": "text/event-stream", ...headers })
+        // a notification first, as a streaming server may send one, then the answer
+        return res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: {} })}\n\nevent: message\ndata: ${body}\n\n`)
+      }
+      res.writeHead(200, { "content-type": "application/json", ...headers })
+      return res.end(body)
+    }
+    if (msg.method === "initialize") {
+      return answer({ protocolVersion: msg.params?.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "fake-bonez", version: "0" } },
+        idp.opts.session ? { "mcp-session-id": "fake-session-1" } : {})
+    }
+    if (msg.method !== "tools/call") return reply(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `method '${msg.method}' is not supported` } })
+    const text = (value, isError = false) => answer({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }], isError })
+    const { name, arguments: args = {} } = msg.params ?? {}
+    seen.tool = name
+    if (name !== "vendor_operation") return reply(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `unknown tool '${name}'` } })
+    if (args.operation_id !== "bonez.plugin.publish.v1" || idp.opts.noPublish) {
+      seen.outcome = "operation_not_found"
+      return text("[bonez] operation_not_found: unknown vendor operation", true)
+    }
+    if (!grant.scope.includes("bonez:write")) {
+      seen.outcome = "insufficient_scope"
+      return reply(res, 403, { code: "insufficient_scope", detail: "this OAuth token was not granted the bonez:write scope" }, {
+        "www-authenticate": `Bearer error="insufficient_scope", scope="bonez:write", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"`,
+      })
+    }
+    if (!idp.opts.admin) {
+      seen.outcome = "forbidden"
+      return idp.opts.adminRefusal === "failed"
+        ? text({ status: "failed", code: "forbidden", detail: "admin role required" })
+        : text("[bonez] forbidden: admin role required", true)
+    }
+    const input = args.input
+    const extra = Object.keys(input ?? {}).filter((k) => !["files", "sha256"].includes(k))
+    if (input === null || typeof input !== "object" || typeof input.files !== "object" || input.files === null || extra.length > 0) {
+      seen.outcome = "operation_input_invalid"
+      return text("[bonez] operation_input_invalid: input must be {files, sha256}", true)
+    }
+    seen.paths = Object.keys(input.files)
+    seen.claimed = input.sha256 ?? null
+    const vetted = vetUpload(input.files, { claimedSha256: input.sha256 ?? undefined, builtIn })
+    if (vetted.error) {
+      if (vetted.error.code === "plugin_hash_mismatch") seen.recomputed = /files hash to ([0-9a-f]{64})/.exec(vetted.error.detail)?.[1] ?? null
+      seen.outcome = vetted.error.code
+      return text({ status: "failed", code: vetted.error.code, detail: vetted.error.detail })
+    }
+    seen.recomputed = vetted.sha256
+    seen.outcome = "ok"
+    return text({ status: "succeeded", output: { ...hold(vetted), url: `${origin}/library/plugins` } })
+  }
+
+  // ---- the sign-in side: metadata, device flow, token endpoint ------------------------------------
+  const signIn = (req, res, seen, raw) => {
+    const path = req.url.split("?")[0]
+    const form = Object.fromEntries(new URLSearchParams(raw))
+    const meta = { issuer: `${origin}/`, device_authorization_endpoint: `${origin}/oauth/device/code`, token_endpoint: `${origin}/oauth/token` }
+    if (path === "/.well-known/oauth-protected-resource/mcp") {
+      return reply(res, 200, { resource: `${origin}/mcp`, authorization_servers: [`${origin}/`], scopes_supported: ["bonez:read", "bonez:write"] })
+    }
+    if (path === "/.well-known/oauth-authorization-server" || path === "/.well-known/openid-configuration") {
+      return path.endsWith(idp.opts.metadataAt ?? "oauth-authorization-server") ? reply(res, 200, meta) : reply(res, 404, { error: "not_found" })
+    }
+    if (path === "/oauth/device/code") {
+      idp.calls.device.push(form)
+      const n = idp.calls.device.length
+      const device = { device_code: `dc-${n}-${"d".repeat(16)}`, scope: form.scope ?? "" }
+      idp.devices.set(device.device_code, device)
+      idp.secrets.push(device.device_code)
+      return reply(res, 200, {
+        device_code: device.device_code, user_code: `WXYZ-${1000 + n}`, verification_uri: `${origin}/activate`,
+        verification_uri_complete: `${origin}/activate?user_code=WXYZ-${1000 + n}`, expires_in: 900, interval: idp.opts.interval ?? 0.05,
+      })
+    }
+    if (path === "/oauth/token") {
+      idp.calls.token.push({ grant_type: form.grant_type, client_id: form.client_id })
+      const issue = (scope, refresh) => {
+        const access = `at-${++idp.issued}-${"a".repeat(16)}`
+        idp.tokens.set(access, { scope, invalid: false })
+        idp.secrets.push(access)
+        const body = { access_token: access, token_type: "Bearer", expires_in: idp.opts.accessTtl ?? 3600, scope: scope.join(" ") }
+        if (refresh) body.refresh_token = refresh
+        return body
+      }
+      const newRefresh = () => {
+        const token = `rt-${++idp.issued}-${"r".repeat(16)}`
+        idp.refreshTokens.add(token)
+        idp.secrets.push(token)
+        return token
+      }
+      if (form.grant_type === "refresh_token") {
+        if (!idp.refreshTokens.has(form.refresh_token)) return reply(res, 403, { error: "invalid_grant", error_description: "Unknown or invalid refresh token." })
+        const scope = idp.lastScope
+        if (idp.opts.rotate) idp.refreshTokens.delete(form.refresh_token)
+        return reply(res, 200, issue(scope, idp.opts.rotate ? newRefresh() : undefined))
+      }
+      if (form.grant_type !== "urn:ietf:params:oauth:grant-type:device_code") return reply(res, 400, { error: "unsupported_grant_type" })
+      const device = idp.devices.get(form.device_code)
+      if (!device || form.client_id === undefined) return reply(res, 403, { error: "invalid_grant", error_description: "unknown device code" })
+      const scripted = idp.queue.shift()
+      const verdict = scripted ?? (idp.verdict === "approved" ? "ok" : idp.verdict ?? "authorization_pending")
+      if (verdict !== "ok") return reply(res, verdict === "slow_down" ? 429 : 403, { error: verdict })
+      const asked = device.scope.split(" ").filter(Boolean)
+      const granted = idp.granted ?? asked
+      idp.lastScope = asked.filter((s) => granted.includes(s))
+      const refresh = idp.lastScope.includes("offline_access") ? newRefresh() : undefined
+      return reply(res, 200, issue(idp.lastScope, refresh))
+    }
+    return null
+  }
+
   const server = createServer((req, res) => {
     const chunks = []
     req.on("data", (c) => chunks.push(c))
@@ -150,6 +319,10 @@ export function startFakePluginServer({ key, computers = 2, state = "ready", bui
       const refuse = (status, code, detail) => {
         seen.outcome = code
         reply(res, status, { code, detail })
+      }
+      if (idp) {
+        if (req.method === "POST" && req.url === "/mcp") return mcp(req, res, seen, Buffer.concat(chunks).toString("utf8"))
+        if (signIn(req, res, seen, Buffer.concat(chunks).toString("utf8")) !== null) return undefined
       }
       const known = (req.method === "POST" && req.url === "/api/admin/org/plugins") || (req.method === "GET" && req.url === "/api/org/plugins")
       if (!known) return refuse(404, "not_found", "Not Found")
@@ -200,22 +373,44 @@ export function startFakePluginServer({ key, computers = 2, state = "ready", bui
       }
       seen.recomputed = vetted.sha256
       seen.outcome = "ok"
-      const versions = held.get(vetted.name) ?? []
-      const identical = versions.some((v) => v.sha256 === vetted.sha256)
-      for (const v of versions) v.active = false
-      if (identical) versions.find((v) => v.sha256 === vetted.sha256).active = true
-      else versions.push({ version: vetted.version, sha256: vetted.sha256, size: vetted.size, active: true })
-      held.set(vetted.name, versions)
-      reply(res, 200, { name: vetted.name, version: vetted.version, sha256: vetted.sha256, size: vetted.size, active: true, identical, computers })
+      reply(res, 200, hold(vetted))
     })
   })
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
+      origin = `http://127.0.0.1:${server.address().port}`
       resolve({
-        url: `http://127.0.0.1:${server.address().port}`,
+        url: origin,
         requests,
+        signin: idp && {
+          calls: idp.calls, // { device: [form], token: [{grant_type, client_id}] }
+          secrets: idp.secrets, // every token and device code issued, for "never printed" checks
+          approve: () => { idp.verdict = "approved" }, // the person clicks Allow in the browser
+          deny: () => { idp.verdict = "access_denied" },
+          expire: () => { idp.verdict = "expired_token" },
+          script: (...verdicts) => idp.queue.push(...verdicts), // the next token-endpoint answers, in order ("ok" approves)
+          grant: (...scopes) => { idp.granted = scopes },
+          revokeRefresh: () => idp.refreshTokens.clear(),
+          invalidateAccess: () => { for (const g of idp.tokens.values()) g.invalid = true }, // the server no longer accepts them
+        },
         close: () => new Promise((r) => server.close(r)),
       })
     })
   })
+}
+
+function newSignIn(opts) {
+  return {
+    opts: { admin: true, ...opts },
+    calls: { device: [], token: [] },
+    secrets: [],
+    devices: new Map(),
+    tokens: new Map(), // access token -> { scope, invalid }
+    refreshTokens: new Set(),
+    queue: [],
+    verdict: undefined, // undefined = still pending
+    granted: opts.grant,
+    lastScope: [],
+    issued: 0,
+  }
 }

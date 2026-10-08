@@ -34,6 +34,8 @@ function freshDir() {
   return dir
 }
 process.on("exit", () => roots.forEach((d) => rmSync(d, { recursive: true, force: true })))
+// A home of its own, so nothing of the developer's saved sign-in (~/.bonez) is read and nothing is written to it.
+const HOME = freshDir()
 
 function put(root, rel, content) {
   const abs = join(root, ...rel.split("/"))
@@ -89,8 +91,8 @@ async function closedPort() {
 function push(args, env = {}) {
   return new Promise((resolve) => {
     // The parent's environment is inherited (a Windows child without SystemRoot cannot open a socket);
-    // the three variables the tool reads are set here, so nothing of the developer's own leaks in.
-    execFile(process.execPath, [PUSH, ...args], { env: { ...process.env, BONEZ_ALLOW_HTTP: "", BONEZ_URL: base, BONEZ_API_KEY: KEY, ...env }, encoding: "utf8" },
+    // the variables the tool reads are set here, so nothing of the developer's own leaks in.
+    execFile(process.execPath, [PUSH, ...args], { env: { ...process.env, BONEZ_ALLOW_HTTP: "", BONEZ_URL: base, BONEZ_API_KEY: KEY, BONEZ_CLIENT_ID: "", BONEZ_NO_BROWSER: "1", HOME, USERPROFILE: HOME, ...env }, encoding: "utf8" },
       (err, stdout, stderr) => resolve({ status: err ? (err.code ?? 1) : 0, stdout, stderr }))
   })
 }
@@ -415,11 +417,14 @@ describe("--status", () => {
     assert.equal((await push(["--status"])).status, 3)
   })
 
-  test("needs the same configuration, and takes at most one name", async () => {
+  test("needs a server and a key (a signed-in session cannot list plugins yet), and takes at most one name", async () => {
     reset(listing([]))
     const noKey = await push(["--status"], { BONEZ_API_KEY: "" })
     assert.equal(noKey.status, 2)
-    assert.match(noKey.stderr, /BONEZ_API_KEY is not set/)
+    assert.match(noKey.stderr, /--status needs BONEZ_API_KEY for now/)
+    const noUrl = await push(["--status"], { BONEZ_URL: "" })
+    assert.equal(noUrl.status, 2)
+    assert.match(noUrl.stderr, /BONEZ_URL is not set/)
     assert.equal((await push(["--status", "a", "b"])).status, 2)
     assert.equal(calls.length, 0, "no request may be sent")
   })
@@ -500,9 +505,19 @@ describe("nothing is sent when the input is wrong (exit 2)", () => {
     await refusedLocally([plugin(), "extra"], {}, /usage/)
   })
 
-  test("missing config", async () => {
-    await refusedLocally([plugin()], { BONEZ_API_KEY: "" }, /BONEZ_API_KEY is not set/)
+  test("missing server", async () => {
     await refusedLocally([plugin()], { BONEZ_URL: "" }, /BONEZ_URL is not set/)
+  })
+
+  test("--server names the server and wins over BONEZ_URL; without its value it is a usage error", async () => {
+    reset(ok())
+    const r = await push(["--server", base, plugin()], { BONEZ_URL: "http://127.0.0.1:1" })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(calls.map((c) => c.url), ["/api/admin/org/plugins"])
+    const after = await push([plugin(), "--server", `${base}/mcp`], { BONEZ_URL: "" })
+    assert.equal(after.status, 0, after.stderr)
+    await refusedLocally([plugin(), "--server"], {}, /usage/)
+    await refusedLocally(["--server", base], {}, /usage/)
   })
 
   test("a key that is not a bnz_ key is refused without being echoed", async () => {

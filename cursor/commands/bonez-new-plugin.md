@@ -1,5 +1,5 @@
 ---
-description: Scaffold, test, bundle and hash a new Bonez plugin (a package that adds tools to Bonez agents), then push it to your Bonez server (or print the manual handoff)
+description: Scaffold, test, bundle and hash a new Bonez plugin (a package that adds tools to Bonez agents), then publish it to your Bonez server (or print the manual handoff if that fails)
 ---
 
 # /bonez-new-plugin
@@ -63,9 +63,9 @@ Then check the output: `out/<name>/` must hold only `package.json` and `dist/ind
 
 It prints the sha256 of the folder tree, and it must equal the `sha256:` line the build printed (stop and show both if it does not). If it exits non-zero (a symlink, `node_modules/`, or a `.DS_Store`, `Thumbs.db` or `desktop.ini` that Finder or Explorer added to the folder), stop and show the message.
 
-## 6. Print the HANDOFF block
+## 6. Prepare the HANDOFF block
 
-Derive every value from files and command output, not from memory (print the folder as an absolute path in the machine's own form, `C:\...` on Windows): the package name from `out/<name>/package.json`, the sha256 from step 5, the tool names as `<prefix>_<tool>` from the package name and the registered tool names (the prefix: the package name without its scope and `pi-`, each run of characters other than letters and digits written `_`), the env var names found by searching `src/` for `process.env` or `Bun.env` followed by `.NAME` or `["NAME"]` (use your search tool with the pattern `(process|Bun)\.env(\.[A-Za-z_][A-Za-z_0-9]*|\[[^]]+\])`; in a Unix shell `grep -rnoE '<pattern>' src || true`, because grep exits 1 when nothing matches and that is not a failure; no hit means the code reads none; the template's own comments only say `process.env` bare, so they do not match) merged with answer 3 (say so if they differ). Print:
+Derive every value from files and command output, not from memory (print the folder as an absolute path in the machine's own form, `C:\...` on Windows): the package name from `out/<name>/package.json`, the sha256 from step 5, the tool names as `<prefix>_<tool>` from the package name and the registered tool names (the prefix: the package name without its scope and `pi-`, each run of characters other than letters and digits written `_`), the env var names found by searching `src/` for `process.env` or `Bun.env` followed by `.NAME` or `["NAME"]` (use your search tool with the pattern `(process|Bun)\.env(\.[A-Za-z_][A-Za-z_0-9]*|\[[^]]+\])`; in a Unix shell `grep -rnoE '<pattern>' src || true`, because grep exits 1 when nothing matches and that is not a failure; no hit means the code reads none; the template's own comments only say `process.env` bare, so they do not match) merged with answer 3 (say so if they differ). Write the block down now, but do not print it yet: step 7 shows it only if publishing cannot finish, and what it lists beyond the folder (env var names, apt packages, directories) is what a publish does not carry. It reads:
 
 ```
 HANDOFF: <package name>
@@ -77,31 +77,30 @@ Apt packages:          <packages, or none>  (RUNNER_EXTRA_APT_PACKAGES)
 Directories to mount:  <paths, or none>
 ```
 
-## 7. Push
+## 7. Publish
 
-Check whether a key and a server are set, without printing either: `node -e "console.log(process.env.BONEZ_API_KEY && process.env.BONEZ_URL ? 'push' : 'manual')"`. Never print, echo or ask for the value of `BONEZ_API_KEY`. If it prints `manual` although the user says they set both, they were set somewhere this terminal does not see (a variable set in one window or shell does not reach another): see the manual branch below.
+Publish the folder to the user's Bonez server with the push tool. The first time, it signs the user in through their browser (there is nothing to copy, paste or set up); then it sends the folder with its sha256, and the server checks the hash again, vets the files, stores the version and makes it active. **Never ask for, print, read or store an API key or a token**, and do not open `~/.bonez`.
 
-**If it prints `push`,** upload the folder:
+The server address: `node -e "console.log(process.env.BONEZ_URL || 'unset')"` prints it when the user has set `BONEZ_URL`. If it prints `unset`, ask for the address in one short question (the Bonez address they gave their AI tool, e.g. `https://bonez.example.com`; the `/mcp` address works too) and wait for the answer.
 
-`node "<skill folder>/../../bin/bonez-plugin-push.mjs" "<abs path>/<name>/out/<name>"`
+`node "<skill folder>/../../bin/bonez-plugin-push.mjs" --server "<server address>" "<abs path>/<name>/out/<name>"`
 
-It sends the folder with its sha256 to the server, which checks the hash again, vets the files, stores the version and makes it active. Show its output as it is: name, version, fingerprint (it must equal the sha256 of step 5) and how many computers it rolls out to; if it refuses, the refusal code and detail from the server. Exit 0 is success. On any other exit code **stop and show the exact output**; do not retry with other options and do not fall back to the manual text below unless the user asks. What each code means: 1 the server refused the plugin (fix what the detail says, rebuild, hash and push again); 2 nothing was sent (a folder or configuration problem, named in the message); 3 the server could not be reached or answered badly (the message names the address it tried: check `BONEZ_URL`; a self-signed certificate needs `NODE_EXTRA_CA_CERTS`).
+Leave `--server` out when `BONEZ_URL` was set. Allow this command up to 6 minutes (raise the shell tool's timeout if it has a lower one). What its exit code means:
 
-After a successful push, **verify it**: `node "<skill folder>/../../bin/bonez-plugin-push.mjs" --status "<package name>"`. It must show the active version with the same fingerprint as step 5, and each computer reads `ready` once it has the plugin: `not_delivered` until its next heartbeat (about 30 seconds), `failed` with a reason otherwise (stop and show it). Run it again after a minute if a computer is not `ready` yet; "no computers are enrolled" means nothing takes the plugin yet. Then say how it gets used: in the agent builder an admin chooses the plugin in the agent's **Plugins** field (it is listed there as soon as it is uploaded); that writes the agent's `metadata.packages`, the server copies it into the run plan's `execution.packages`, and the harness mounts exactly those plugins. An agent that must run on one of their computers also needs its **Runs on** tag. The next step is an agent that uses the plugin: offer to create one with the `creating-an-agent` skill (its `plugins` field takes the package name).
+- **0, published.** Show its output as it is: name, version, fingerprint (it must equal the sha256 of step 5) and how many computers it rolls out to.
+- **4, waiting for the sign-in.** The first run prints two lines, `sign in at: <address>` and `code: <code>`, and has also tried to open a browser tab. Tell the user in plain words: open that address, check the page shows that code, and approve; then **wait until they say they have approved**. Run the same command again to finish: it saves the sign-in (the next publish asks for nothing) and publishes. If that run exits 4 again with `denied`, `expired` or `still waiting`, show the message and offer to run it once more, which gives a new address and code.
+- **1, the server refused.** Show the refusal code and detail as the server sent them. "your account is not an admin of this Bonez server" means an org admin has to publish it (or make the user an admin): say so and offer the manual install. Otherwise fix what the detail says, rebuild, hash and publish again.
+- **2, nothing was sent** (a folder or configuration problem, named in the message), or **3, the server could not be reached or answered badly** (the message names the address it tried: check it; a self-signed certificate needs `NODE_EXTRA_CA_CERTS`).
 
-Then say what the push does **not** carry: the env vars to forward, the apt packages and the directories to mount from the HANDOFF block are still a one-time edit on each computer by an operator (secrets never travel in a push). If the block says none for all three, there is nothing more to do: the plugin reaches the computers on their next heartbeat once they run a runner that supports plugin sync.
+On 1, 2 or 3 **stop and show the exact output**; do not retry with other options. Only when publishing cannot finish and the user wants the plugin on their server anyway (an older server that answers 404 or does not know the operation, or no admin at hand), print the HANDOFF block of step 6 and the manual install text below.
 
-**If it prints `manual`,** print the manual install text below and add one line: to push in one command next time, an org admin mints an API key with the **plugins** scope in the Bonez console, and the user sets `BONEZ_URL` (your server, e.g. `https://bonez.example.com`; the `/mcp` address works too) and `BONEZ_API_KEY` in the shell they start Cursor from, then restarts Cursor from that same shell (`$env:` in PowerShell reaches only that window and the programs started from it; a Cursor started from the Start menu, the Dock or another window does not see it). Show both forms (the second one is for Windows):
+For CI or a machine without a browser: an org admin mints an API key with the **plugins** scope in the Bonez console, and `BONEZ_API_KEY` (`export BONEZ_API_KEY=bnz_...` in bash, `$env:BONEZ_API_KEY = "bnz_..."` in PowerShell) set where the tool starts uploads with it and never opens a browser. Mention this only if the user asks; never ask them to paste the key.
 
-```bash
-export BONEZ_URL=https://bonez.example.com
-export BONEZ_API_KEY=bnz_...
-```
+After a successful publish, **check it**: the Library page of the Bonez console lists the plugin with each computer's state, `ready` once that computer holds it (`not_delivered` until its next heartbeat, about 30 seconds, `failed` with a reason otherwise: stop and show it); when `BONEZ_API_KEY` is set, `node "<skill folder>/../../bin/bonez-plugin-push.mjs" --status "<package name>"` prints the same, with the active version's fingerprint (it must equal the sha256 of step 5); "no computers are enrolled" means nothing takes the plugin yet. Then say how it gets used: in the agent builder an admin chooses the plugin in the agent's **Plugins** field (it is listed there as soon as it is published); that writes the agent's `metadata.packages`, the server copies it into the run plan's `execution.packages`, and the harness mounts exactly those plugins. An agent that must run on one of their computers also needs its **Runs on** tag. The next step is an agent that uses the plugin: offer to create one with the `creating-an-agent` skill (its `plugins` field takes the package name).
 
-```powershell
-$env:BONEZ_URL = "https://bonez.example.com"
-$env:BONEZ_API_KEY = "bnz_..."
-```
+Then say what publishing does **not** carry: the env vars to forward, the apt packages and the directories to mount from the HANDOFF block are still a one-time edit on each computer by an operator (secrets never travel in a publish). If the block says none for all three, there is nothing more to do: the plugin reaches the computers on their next heartbeat once they run a runner that supports plugin sync.
+
+**Manual install text** (only when publishing cannot finish): print the HANDOFF block, then
 
 ```
 FOLDER INSTALL (a Bonez computer, or a server on a release with folder plugins): an operator
@@ -117,7 +116,7 @@ directories above. Bonez compiles it in from the TypeScript source.
 ```
 
 End with these notes, short:
-- The sha256 covers every byte of `out/<name>/`. Rebuild and re-hash after any change, and push or send the folder and hash from the same build. Opening the folder in Finder or Explorer can add `.DS_Store`, `Thumbs.db` or `desktop.ini`: the server refuses an upload that holds one (it accepts only `package.json` and files under `dist/`), and the hash and push tools stop and name the file. Delete it, or rebuild.
+- The sha256 covers every byte of `out/<name>/`. Rebuild and re-hash after any change, and publish or send the folder and hash from the same build. Opening the folder in Finder or Explorer can add `.DS_Store`, `Thumbs.db` or `desktop.ini`: the server refuses an upload that holds one (it accepts only `package.json` and files under `dist/`), and the hash and push tools stop and name the file. Delete it, or rebuild.
 - Anyone can verify what they received with `node "<skill folder>/../../bin/bonez-package-hash.mjs" <folder>`.
 - A plugin is not sandboxed and skips the agent's tool allowlist; say which paths, programs and network calls this one uses so the reviewer can judge it.
-- Pushing needs a server release with plugin upload; an older server answers 404 and the CLI says so.
+- Publishing needs a server release with plugin upload; an older server answers 404 or does not know the operation, and the tool says so.
