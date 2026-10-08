@@ -6,35 +6,17 @@ Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people in
 
 ## Install for your own Bonez server
 
-Claude Code. Five steps:
+Claude Code. Three steps:
 
-1. **Add the marketplace.**
-
-   ```bash
-   claude plugin marketplace add bonez-io/ai-plugin
-   ```
-
-2. **Install the plugin.**
+1. **Install the plugin and point it at your server.** One command, the same in every shell (replace the address with your server's, no trailing slash and no `/mcp`; on Bonez's own cloud leave `--config` off):
 
    ```bash
-   claude plugin install bonez@bonez
+   claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
    ```
 
-3. **Set your server URL.** Claude Code asks for the **Bonez server URL** when the plugin is enabled. Enter your server's address — for example `https://bonez.example.com`, with no trailing slash and no `/mcp` (the plugin adds it). On Bonez's own cloud, keep the default (`https://gateway.bonez.io`). Change it later in `/config`, or from a shell:
+   It adds the marketplace, installs the plugin and sets `bonez_url`. (`--marketplace` and `--config` need a current Claude Code; `claude update` first if it says the option is unknown.) The `https://` URL is on purpose: the `owner/repo` form clones over SSH, which a machine without a GitHub SSH key cannot do.
 
-   ```bash
-   echo '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
-   ```
-
-   On Windows PowerShell:
-
-   ```powershell
-   '{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
-   ```
-
-   then restart Claude Code. (`claude plugin configure` needs Claude Code 2.1.285 or later.)
-
-4. **Authenticate.** Pick one:
+2. **Authenticate.** Pick one:
 
    - **OAuth**, when your server has OAuth enabled: run `/mcp`, choose the Bonez server (`plugin:bonez:bonez`), then **Authenticate**, and finish the sign-in in your browser.
    - **An API key** minted by an admin of your server (no browser, or a server without OAuth). Run, with your server's URL:
@@ -45,7 +27,7 @@ Claude Code. Five steps:
 
    The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured, so the plugin's own server can only sign in with OAuth. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; per Claude Code's MCP docs a plugin server pointing at the same endpoint as one you added yourself counts as a duplicate, so keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains all of this in the session.
 
-5. **Try it.**
+3. **Try it.**
 
    ```text
    /bonez:context
@@ -68,12 +50,10 @@ winget install --id Oven-sh.Bun --exact --version 1.3.14
 
 Open a new terminal afterwards. **Git for Windows** gives Claude Code its Bash tool, and Claude Code runs a plugin's hook commands through Git Bash (it falls back to PowerShell only when Git Bash is missing, and then `bash` is not found and the write gate silently does not run; [hooks reference](https://code.claude.com/docs/en/hooks)). **Node 18+** runs the hash and push tools. **bun** is only for `/bonez:new-plugin`. Every `.sh`, `.mjs`, `.json` and `.md` in this repo is LF on Windows too (`.gitattributes`), because a CRLF shell script does not run.
 
-**Claude Code** (PowerShell). Single quotes keep the double quotes of the JSON, and the pipe sends it as stdin, so there is nothing for PowerShell or cmd to mangle:
+**Claude Code** (PowerShell). The install command is the same one as above, with nothing to quote:
 
 ```powershell
-claude plugin marketplace add bonez-io/ai-plugin
-claude plugin install bonez@bonez
-'{"bonez_url":"https://bonez.example.com"}' | claude plugin configure bonez@bonez --values-stdin
+claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin --config bonez_url=https://bonez.example.com
 claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer $env:BONEZ_API_KEY"
 ```
 
