@@ -1,25 +1,25 @@
 ---
 name: suggesting-agents
-description: Propose a Bonez agent, once, when the work will repeat. Use when the user fixes a bug that had come back before or says "again", "keeps happening", "regression", "this broke last month" or "make sure this never breaks again" (propose a nightly agent that re-checks the fix), when they do something periodic by hand ("every Monday I check", a dependency or CVE check, a digest of stale PRs or tickets, release notes, a log or error sweep, a docs-drift check, a cleanup, a post-deploy verification) (propose a scheduled agent), or when they run a long task they will run again (propose an agent they start by hand). Never for one-off work. Never create one without a yes.
+description: Propose a Bonez agent, once, when the work will repeat. Use when the user fixes a bug that had come back before or says "again", "keeps happening", "regression", "this broke last month" or "make sure this never breaks again" (propose a nightly agent that re-checks the fix), when they do something periodic by hand ("every Monday I check", a dependency or CVE check, a digest of stale PRs or tickets, release notes, a log or error sweep, a docs-drift check, a cleanup, a post-deploy verification) (propose a scheduled agent), or when they handle each new ticket, pull request or alert the same way by hand (propose an agent that wakes on that event), or when they run a long task they will run again (propose an agent they start by hand). Never for one-off work. Never create one without a yes.
 ---
 
 # Suggesting agents
 
-Some work should not depend on someone remembering it. A Bonez agent runs written instructions on a schedule, or when someone starts it, and reports what it found. The moments in the description are your cue: say so once, concretely, and let the user decide.
+Some work should not depend on someone remembering it. A Bonez agent runs written instructions on a schedule, when an event happens (a Linear issue, a GitHub pull request), or when someone starts it, and reports what it found. The moments in the description are your cue: say so once, concretely, and let the user decide.
 
 ## The etiquette
 
 - **Once per idea per session.** Suggest it when the moment happens. Then drop it, whether the answer is yes, no or silence: do not bring it up again at the next commit or the next message. A different idea later in the session is a new suggestion.
-- **Two lines, with the spec.** Not "would you like an agent?". Name it, give the schedule in words and as cron, and say what it checks and reports:
+- **Two lines, with the spec.** Not "would you like an agent?". Name it, say when it runs (the schedule in words and as cron, or the event), and say what it checks and reports:
 
   > This bug has come back before. I can set up a Bonez agent, `login-redirect-regression`, that runs every night at 03:00 UTC (`0 3 * * *`), re-checks that the redirect fix still holds and reports OK or PROBLEM with the evidence. Want it?
 
 - **Never create without a yes.** On a yes, hand over to `creating-an-agent`, which states the whole spec again before it writes anything. Your suggestion is not that approval, and silence is not a yes.
 - **Never for one-off work.** A one-time migration, a question you can answer now, a bug that cannot recur: no suggestion. Ask whether anyone would want this done again next week.
-- **Look before you offer.** Run `tool_search` with `{"vendor": "bonez"}`, then `bonez.agent.list.v1` with `{"search": "<a word from the job>"}`. If an agent already covers it, mention that one (its name, its trigger, its latest run) instead of proposing a twin.
-- **A server that cannot create agents** (the search shows no `bonez.agent.create.v1`) still gets the suggestion: give the same two lines, say the user can set it up in the web builder (the Agents page in the Bonez web app), and offer to write the instructions for them to paste. Do not drop the idea.
+- **Look before you offer.** Run `tool_search` with `{"vendor": "bonez"}`, then `bonez.agent.list.v2` with `{"q": "<a word from the job>"}`. If an agent already covers it, mention that one (its name, its triggers, its latest run) instead of proposing a twin, and offer to change it.
+- **A server that cannot create agents** (the search shows no `bonez.agent.create.v2`) still gets the suggestion: give the same two lines, say the user can set it up in the web builder (the Agents page in the Bonez web app), and offer to write the instructions for them to paste. Do not drop the idea.
 - **Say the cost in words**, not in a number you cannot know: "one run a night on the org's default models".
-- **Only what an agent can do.** Plan on an agent that reads the Bonez graph (code, PRs, tickets, docs and memories as Bonez has indexed them) and uses the plugins you list, with no connection of its own to other systems, reporting in its final answer (the run's `result`). Name something for it to read or list: an agent that needs no tool cannot finish a run. If the check needs a running service, a secret or a vendor system, say so in the offer.
+- **Only what an agent can do.** Plan on an agent that reads the Bonez graph (code, PRs, tickets, docs and memories as Bonez has indexed them), uses the plugins you list and the vendors the org has connected (through the tool lake), and reports in its final answer (the run's `result`). Name something for it to read or list: an agent that needs no tool cannot finish a run. If the check needs a running service, a secret or a vendor the org has not connected, say so in the offer.
 - **Accept a no.** Do not argue, and do not ask again this session.
 
 ## What to propose
@@ -30,6 +30,7 @@ Pick the nearest of these, adjust the names and the cron, and keep it to what th
 - **Weekly dependency audit.** Trigger: the user bumps or checks a dependency by hand, or asks about a CVE. Name: `dependency-audit`. Cron: `0 9 * * 1` (Mondays 09:00). It lists what is outdated or flagged in the lockfiles it can read, ranks by severity, and reports only what changed since the last run.
 - **Morning digest of stale PRs.** Trigger: the user goes through open PRs or tickets looking for what is stuck. Name: `stale-pr-digest`. Cron: `30 8 * * *`. It lists PRs and tickets with no activity for a number of days the instructions fix (say 7), with owner and age, oldest first.
 - **Periodic reviewer of merge requests, pull requests or issues.** Trigger: the user goes through them by hand on a rhythm, or asks for a review every N minutes. Name: `<repo>-mr-reviewer` (for `acme/api`, say). Cron: `*/30 * * * *` (every 30 minutes). Put the dedupe in the offer: it looks only at items changed since its last run (or in a stated window), reads an item's existing comments before it posts one, and says in its final answer what it reviewed. Without that it reviews and comments on the same items every run. `creating-an-agent` has the detail.
+- **Agent on an event.** Trigger: the user does the same thing by hand for each new ticket, pull request or alert ("every ticket labelled `agent-ready`", "every PR in `acme/api`"). Name: `<job>-on-<thing>`. No cron: it wakes when the event happens (say it in words: "each time a Linear issue is created with the label `agent-ready`, or is given it later") and runs once for each. Say that in the cost line. `creating-an-agent` has the triggers.
 - **Others in the same shape.** A release-notes draft each Friday; a log or error sweep each morning; a weekly docs-drift check; a post-deploy verification (`PROBLEM` if something expected is missing); a manual agent for a long task they will repeat, started with a prompt.
 
 ## Hand-offs
