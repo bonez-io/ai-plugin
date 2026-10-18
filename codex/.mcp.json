@@ -3,7 +3,7 @@
     "bonez": {
       "type": "streamable-http",
       "url": "https://gateway.bonez.io/mcp",
-      "http_headers": { "x-bonez-mcp-consumer": "codex-plugin" },
+      "http_headers": { "x-bonez-mcp-consumer": "codex-plugin", "x-bonez-plugin-version": "0.10.7" },
       "scopes": ["bonez:read", "bonez:memory", "bonez:write"],
       "oauth": {
         "client_id": "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm",
