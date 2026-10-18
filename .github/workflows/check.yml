@@ -53,6 +53,21 @@ jobs:
             exit 1
           fi
 
+      - name: Plugin-version header matches the version
+        run: |
+          set -euo pipefail
+          # The gateway reads x-bonez-plugin-version to tell a user their plugin is behind.
+          # A release that bumps the manifests but not these headers would report itself as old.
+          v="$(jq -r '.version' .claude-plugin/plugin.json)"
+          for spec in '.mcp.json|.mcpServers.bonez.headers' \
+                      'codex/.mcp.json|.mcpServers.bonez.http_headers' \
+                      'cursor/mcp.json|.mcpServers.bonez.headers'; do
+            f="${spec%%|*}"; path="${spec##*|}"
+            got="$(jq -r "$path[\"x-bonez-plugin-version\"]" "$f")"
+            [ "$got" = "$v" ] || { echo "::error::$f sends x-bonez-plugin-version $got, plugin is $v"; exit 1; }
+            echo "ok: $f $got"
+          done
+
       - name: Hook scripts parse (bash -n)
         run: |
           set -euo pipefail

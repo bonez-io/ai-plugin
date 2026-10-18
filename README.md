@@ -40,8 +40,8 @@ The last one saves a memory; the plugin asks you to approve every `graph_write` 
 Each tool installs the plugin natively and points at `gateway.bonez.io` by default:
 
 ```bash
-claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin
-codex plugin marketplace add bonez-io/ai-plugin && codex plugin add bonez@bonez
+claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin#stable
+codex plugin marketplace add bonez-io/ai-plugin --ref stable && codex plugin add bonez@bonez
 ```
 
 Cursor: copy [`cursor/`](cursor/) to `~/.cursor/plugins/local/bonez` (`%USERPROFILE%\.cursor\plugins\local\bonez` on Windows) and reload the window.
@@ -57,6 +57,25 @@ claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Au
 ```
 
 The plugin ships its server **without** an `Authorization` header on purpose: Claude Code will not fall back to OAuth once any `Authorization` header is configured. If you use a key as well, you may see a second server named `plugin:bonez:bonez` that shows "needs authentication"; keep `bonez_url` equal to the URL in your `claude mcp add`. `/bonez:connect` explains this in the session.
+
+## Updates
+
+`stable` is the branch every install follows. A release is a tag (`v0.10.7`); promoting it moves `stable`
+to that tag, and only after the gateway that serves its tools is live in prod:
+
+```bash
+gh workflow run promote.yml --repo bonez-io/ai-plugin -f version=0.10.7   # rollback: promote an older version
+```
+
+| Tool | How it picks up a new `stable` |
+|---|---|
+| Claude Code | The install script turns on auto-update for the `bonez` marketplace (`extraKnownMarketplaces.bonez.autoUpdate` in `~/.claude/settings.json`). Claude Code refreshes it within ten minutes of your first message and prints `Plugin updated: bonez · Run /reload-plugins to apply`. Without the script: `/plugin`, **Marketplaces**, `bonez`, **Enable auto-update**. |
+| Codex (CLI and app) | The marketplace is a git source, and Codex re-fetches git marketplaces on every start and reinstalls the plugins from them. Start a new session to use the update. By hand: `codex plugin marketplace upgrade bonez`. |
+| Cursor | A copy in `~/.cursor/plugins/local/bonez` is never refreshed by Cursor. Re-run the install command. A plugin listed on the Cursor Marketplace, or on a team marketplace with Auto Refresh, is updated by Cursor itself. |
+
+Every plugin config sends its version in an `x-bonez-plugin-version` header (CI holds it equal to the plugin
+version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
+update signal for a tool that cannot update itself.
 
 ## Windows
 
@@ -89,7 +108,7 @@ The Codex and Cursor legs ship pointing at Bonez's own cloud (`gateway.bonez.io`
 Codex installs this as a plugin (skills and the MCP server together), from the CLI or the ChatGPT desktop app, which share `~/.codex`:
 
 ```bash
-codex plugin marketplace add bonez-io/ai-plugin
+codex plugin marketplace add bonez-io/ai-plugin --ref stable
 codex plugin add bonez@bonez
 codex mcp login bonez
 ```

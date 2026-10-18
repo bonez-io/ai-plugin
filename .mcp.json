@@ -4,7 +4,8 @@
       "type": "http",
       "url": "${user_config.bonez_url}/mcp",
       "headers": {
-        "x-bonez-mcp-consumer": "claude-code-plugin"
+        "x-bonez-mcp-consumer": "claude-code-plugin",
+        "x-bonez-plugin-version": "0.10.7"
       }
     }
   }

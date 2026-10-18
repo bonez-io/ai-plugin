@@ -1,0 +1,36 @@
+name: promote
+
+# `stable` is the one ref new installs and auto-updates follow: the Bonez install scripts add the
+# marketplace at #stable, and Claude Code and Codex then re-read it on their own. Promote a version
+# only after the gateway that serves its tools is live in prod, so no plugin outruns its server.
+#
+#   gh workflow run promote.yml -f version=0.10.7     (rollback: promote an older version)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version to promote, e.g. 0.10.7 (the tag v<version> must exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+
+      - name: The tag carries the version it is named for
+        run: |
+          set -euo pipefail
+          got="$(jq -r '.version' .claude-plugin/plugin.json)"
+          [ "$got" = "$VERSION" ] || { echo "::error::tag v$VERSION holds plugin $got"; exit 1; }
+
+      - name: Move stable
+        run: git push --force origin "HEAD:refs/heads/stable"
