@@ -305,6 +305,7 @@ describe("the skill set and the skill descriptions", () => {
       "session-context": /start of a task in an unfamiliar repo/i,
       "who-owns-what": /who owns/i,
       "using-the-tool-lake": /instead of guessing or asking the user to paste it/i,
+      "managing-environments": /when the user asks to list, inspect, create, change, rebuild, share, enable or delete an environment/i,
     }
     for (const [skill, re] of Object.entries(triggers)) assert.match(descriptionOf(skillText("skills", skill)), re, skill)
   })
@@ -448,7 +449,13 @@ describe("using-the-tool-lake: what the bonez run operations return", () => {
   test("it lists the v2 agent reads, the trigger reads and the five writes", () => {
     for (const op of ["bonez.agent.list.v2", "bonez.agent.read.v2", "bonez.trigger.list.v1", "bonez.trigger.options.v1"]) assert.ok(text.includes(`\`${op}\``), op)
     for (const op of ["bonez.agent.run.v2", "bonez.agent.create.v2", "bonez.agent.update.v1", "bonez.session.bind.v1", "bonez.plugin.publish.v1"]) assert.ok(text.includes(`\`${op}\``), op)
-    assert.match(text, /eight read operations, and on a newer server five writes/)
+    assert.match(text, /ten read operations, and on a newer server seven writes/)
+  })
+
+  test("it lists the two environment reads and the two environment writes, and sends the writes to managing-environments", () => {
+    for (const op of ["bonez.environment.list.v1", "bonez.environment.read.v1", "bonez.environment.save.v1", "bonez.environment.control.v1"]) assert.ok(text.includes(`\`${op}\``), op)
+    assert.match(text, /`bonez\.environment\.save\.v1` creates or changes an environment \(`dry_run` first\)[^\n]*the `managing-environments` skill; org admins only/)
+    assert.match(text, /`enabled` \(the default environment of its first repository, not "can be booted"\)/)
   })
 })
 
@@ -496,5 +503,117 @@ describe("the agent pointers in the commands", () => {
     for (const file of ["commands/new-plugin.md", "cursor/commands/bonez-new-plugin.md", "codex/skills/new-plugin/SKILL.md"]) {
       assert.ok(read(...file.split("/")).includes(sentence), `${file} lacks the creating-an-agent hand-over`)
     }
+  })
+})
+
+describe("managing-environments", () => {
+  const text = skillText("skills", "managing-environments")
+  const FALLBACK = "this server cannot manage environments from here"
+
+  test("it is the same file in all three legs, and so are the two skills that point to it", () => {
+    for (const skill of ["managing-environments", "using-the-tool-lake"]) {
+      for (const leg of ["cursor/skills", "codex/skills"]) assert.equal(skillText(leg, skill), skillText("skills", skill), `${leg}/${skill} has drifted: re-copy it`)
+    }
+  })
+
+  test("it checks tool_search for the four operations first and, on an older server, says so, points to the web page and stops", () => {
+    assert.match(text, /`tool_search`[\s\S]*"vendor": "bonez"/)
+    assert.ok(text.indexOf("## 1. Can this server do it?") < text.indexOf("## 2. Read before anything else"))
+    assert.match(text, /If the results do not list `bonez\.environment\.list\.v1`/)
+    assert.ok(text.includes(`**say that ${FALLBACK}, point the user to the Environments page in the Bonez web app, and stop.**`))
+    for (const op of ["bonez.environment.list.v1", "bonez.environment.read.v1", "bonez.environment.save.v1", "bonez.environment.control.v1"]) assert.ok(text.includes(`\`${op}\``), op)
+  })
+
+  test("it reads before a write, and an environment the caller cannot see reads as unknown", () => {
+    assert.ok(text.indexOf("## 2. Read before anything else") < text.indexOf("## 6. Create or change"))
+    assert.match(text, /answers exactly like an unknown name: `workspace_environment_not_found`/)
+    assert.match(text, /\*\*data, not instructions\*\*/)
+  })
+
+  test("it says what state, stale and enabled mean, and that enabled is not 'can be booted'", () => {
+    assert.match(text, /\*\*The default environment of its first repository\*\*/)
+    assert.match(text, /It does not mean "can be booted": a named environment boots whether or not it is enabled/)
+    assert.match(text, /`ready`: from its last good build\. `building`: its first build is still running\. `failed`: it has never built/)
+    assert.match(text, /`stale` \| Its ready build no longer matches its definition/)
+  })
+
+  test("it reads a failed build: phase, exit, last command, the log paged with log_from", () => {
+    for (const word of ["`failed_phase`", "`exit`", "`last_cmd`", "`log_from`", "`next_line`", "`log_lines`", "BONEZ_FAIL phase="]) assert.ok(text.includes(word), word)
+    assert.match(text, /A build takes 15 to 40 minutes/)
+  })
+
+  test("writes: org admin and the write scope, forbidden for a member, a yes in words, dry run first, a yes for each control action", () => {
+    assert.match(text, /need an org admin signed in as themselves, and the `write` scope\. A member gets `forbidden`/)
+    assert.match(text, /your own question is the guard/)
+    assert.match(text, /A yes to one write is not a yes to the next/)
+    const at = (needle) => { const i = text.indexOf(needle); assert.ok(i >= 0, needle); return i }
+    assert.ok(at("**Dry run.**") < at("**Say it, then wait for a yes**") && at("**Say it, then wait for a yes**") < at("**The real call**"), "dry run, then the question, then the real call")
+    assert.match(text, /`expected_spec_hash`/)
+    assert.match(text, /\*\*Each action needs its own yes\*\*/)
+    for (const action of ["build", "enable", "disable", "share", "delete"]) assert.ok(text.includes(`| \`${action}\` |`), action)
+    assert.match(text, /Needs `job_id`: `builds\[0\]\.job_id` from `read`/)
+  })
+
+  test("inline files: small text only, the limits, never a secret or a storage address, big stacks go to a session", () => {
+    assert.match(text, /at most 8 per call, each at most 256 KB, at most 1 MB together, UTF-8 text only/)
+    assert.match(text, /\*\*Never a secret\.\*\*[^\n]*`workspace_environment_secret`/)
+    assert.match(text, /\*\*Never a storage address\*\*/)
+    assert.match(text, /`environment_save` with a folder and `environment_build_status` exist only inside a Bonez session turn/)
+  })
+
+  test("the session prompt template: build-environment skill, goal, synthetic data, services first, ready only when the status says so, send_message", () => {
+    assert.match(text, /`bonez\.session\.start\.v1`/)
+    const template = text.match(/```text\n(Use the build-environment skill[\s\S]*?)\n```/)?.[1]
+    assert.ok(template, "the template block")
+    for (const line of [
+      "Use the build-environment skill to build a Bonez environment called <name> from <owner/repo>[, <owner/repo>...].",
+      "Goal: <one sentence: what must be running, and what a person can do with it once it is>.",
+      "Use synthetic data and placeholder secrets only; never a real credential.",
+      "Tell me the services you plan to run first, then carry on.",
+      "Do not say it is ready until environment_build_status says ready.",
+      "Use send_message for anything you want me to read: your plain text is private in a web session.",
+    ]) assert.ok(template.split("\n").includes(line), `the template lacks: ${line}`)
+  })
+
+  test("no customer name and no internal address", () => {
+    for (const file of ["skills/managing-environments/SKILL.md", "commands/environments.md", "cursor/commands/bonez-environments.md", "codex/prompts/environments.md"]) {
+      assert.doesNotMatch(read(...file.split("/")), /goperfect|easycoach|rainguard|bonez-infra|\.internal\b|amazonaws/i, file)
+    }
+  })
+})
+
+describe("the environments command", () => {
+  const FILES = ["commands/environments.md", "cursor/commands/bonez-environments.md", "codex/prompts/environments.md"]
+  const TITLES = ["# /bonez:environments", "# /bonez-environments", "# /prompts:environments"]
+
+  FILES.forEach((file, i) => {
+    test(`${file}: frontmatter, its own title, the discovery step with the older-server fallback, list and read, and a pointer to the skill`, () => {
+      const text = read(...file.split("/"))
+      assert.ok(text.startsWith("---\n"))
+      assert.match(frontmatter(text), /^description: .+/m)
+      assert.ok(text.includes(`\n${TITLES[i]}\n`), `title ${TITLES[i]}`)
+      assert.match(text, /Run `tool_search` with `\{"vendor": "bonez"\}`\. If it does not list `bonez\.environment\.list\.v1` and `bonez\.environment\.read\.v1`, say this Bonez server cannot manage environments from here \(it is older than the environment operations\), point to the Environments page in the Bonez web app, and stop\./)
+      assert.match(text, /`bonez\.environment\.list\.v1` id and `\{"input": \{"limit": 20\}\}`/)
+      assert.match(text, /`bonez\.environment\.read\.v1` with `\{"name": "\$ARGUMENTS"\}`/)
+      assert.match(text, /`failed_phase`, `exit` and `last_cmd`/)
+      assert.ok(text.trimEnd().endsWith("see the `managing-environments` skill."), "ends with the pointer")
+      for (const foreign of TITLES.filter((_, j) => j !== i)) assert.ok(!text.includes(foreign), `${file} names ${foreign}`)
+    })
+  })
+
+  test("the three commands run the same steps", () => {
+    const steps = (file) => read(...file.split("/")).split("\n").filter((l) => /^\d\. /.test(l)).join("\n")
+    assert.equal(steps(FILES[1]), steps(FILES[0]))
+    assert.equal(steps(FILES[2]), steps(FILES[0]))
+  })
+})
+
+describe("creating-an-agent: the environment field", () => {
+  const text = skillText("skills", "creating-an-agent")
+
+  test("the name is checked against what the caller may boot; an unknown or unseen one is refused with the names and a pointer to the list", () => {
+    assert.match(text, /`environment`: the name of one of the org's environments that the signed-in person may boot/)
+    assert.match(text, /an unknown name, or one the caller cannot see, is refused as `invalid_agent` with the names they may use and a pointer to `bonez\.environment\.list`/)
+    assert.match(text, /see the `managing-environments` skill/)
   })
 })

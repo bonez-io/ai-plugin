@@ -123,7 +123,7 @@ Guidance ports:
   but `creating-a-plugin` and `new-plugin`) compressed into always-in-context guidance. Copy to `~/.codex/AGENTS.md` (global) or
   `<repo>/AGENTS.md` (one repo); Codex concatenates whichever it finds up the
   directory tree.
-- [`codex/skills/`](codex/skills/) — the same 12 skills, ported ~verbatim, plus
+- [`codex/skills/`](codex/skills/) — the same 13 skills, ported ~verbatim, plus
   `new-plugin` (the plugin creator, see below), because Codex turns out to support the same on-demand `SKILL.md` format
   Claude Code does. Copy the directory to `~/.agents/skills/` (user-wide) or
   `<repo>/.agents/skills/` (checked into a repo) — **not** `~/.codex/skills`,
@@ -135,7 +135,7 @@ Guidance ports:
   (the same steps, the same HANDOFF block; CI pins it against `commands/new-plugin.md`), and it takes its scaffold
   from the `creating-a-plugin` folder beside it.
 - [`codex/prompts/`](codex/prompts/) — `/prompts:context`,
-  `/prompts:search` and `/prompts:agents`, ported from `commands/`. A plugin install does not register them as
+  `/prompts:search`, `/prompts:agents` and `/prompts:environments`, ported from `commands/`. A plugin install does not register them as
   commands: copy to `~/.codex/prompts/` (top-level `.md` files only). Upstream marks custom prompts deprecated in
   favor of skills; included anyway since they still work today.
 
@@ -161,8 +161,8 @@ added by hand from `codex/config.toml` has no prompts until you uncomment the st
 ### Cursor
 
 Cursor has its own plugin marketplace, and this repo is a Cursor plugin — one
-install brings the MCP server, the 12 skills, an always-apply rule, the commands (`/bonez-context`, `/bonez-search`,
-`/bonez-agents`, `/bonez-new-plugin`), and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
+install brings the MCP server, the 13 skills, an always-apply rule, the commands (`/bonez-context`, `/bonez-search`,
+`/bonez-agents`, `/bonez-environments`, `/bonez-new-plugin`), and the write gate. `cursor/mcp.json` carries a literal `https://gateway.bonez.io/mcp` URL and pins Bonez's own OAuth client (Cursor expands no `${VAR}`); to use your own Bonez server edit its `url` — that path has not been tested here.
 
 **From the marketplace** (once listed): Command Palette -> `Cursor: Open Plugin
 Marketplace`, search **bonez**, Install. Or `/add-plugin` in Agent chat, or
@@ -190,9 +190,9 @@ every part is discovered without configuration:
 | --- | --- | --- |
 | Manifest | `cursor/.cursor-plugin/plugin.json` | name, version, author |
 | MCP server | `cursor/mcp.json` | OAuth by default |
-| Skills | `cursor/skills/` | the same 12 `SKILL.md` files, byte-identical to `skills/` (CI-enforced), except `creating-a-plugin/SKILL.md`, whose tool paths are relative to the skill folder because Cursor has no plugin-root variable |
+| Skills | `cursor/skills/` | the same 13 `SKILL.md` files, byte-identical to `skills/` (CI-enforced), except `creating-a-plugin/SKILL.md`, whose tool paths are relative to the skill folder because Cursor has no plugin-root variable |
 | Rule | `cursor/rules/bonez.mdc` | an always-apply rule (`alwaysApply: true`): reach for Bonez before non-trivial work, suggest agents for recurring work (see [Proactive use](#proactive-use)) |
-| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search`, `/bonez-agents`, `/bonez-new-plugin` |
+| Commands | `cursor/commands/` | `/bonez-context`, `/bonez-search`, `/bonez-agents`, `/bonez-environments`, `/bonez-new-plugin` |
 | Tools | `cursor/bin/` | byte copies of `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs` and `bin/lib/` (for `/bonez-new-plugin`), and of the session-capture helper (CI-enforced) |
 | Write gate | `cursor/hooks/hooks.json` | `beforeMCPExecution` -> `bash ./hooks/gate-write.sh` |
 | Logo | `cursor/assets/logo.svg` | the bonez mark, declared as `"logo"` in the manifest |
@@ -379,6 +379,8 @@ Codex has no hook for this and does not need one: its plugin sets `approval_mode
 
 **Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them in the same lake. Reads: `bonez.agent.list.v2`, `bonez.agent.read.v2`, `bonez.trigger.list.v1`, `bonez.trigger.options.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`; `/bonez:agents` lists the agents. Writes (they need the `write` scope; the skills ask first): `bonez.agent.create.v2` (with triggers: a schedule, a Linear or GitHub event, a person), `bonez.agent.update.v1` (edit, pause, retire), `bonez.agent.run.v2` and `bonez.session.bind.v1`. On an older server `tool_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
+**Environments.** An environment is a set of repositories plus a folder of setup files, built into a warm image that a session or an agent boots ready to work. A server that serves the environment operations lists them in the same `bonez` vendor. Reads: `bonez.environment.list.v1` and `bonez.environment.read.v1` (the definition, the state, the newest build's log and the last ten builds); `/bonez:environments` lists the environments or shows one and why its build failed. Writes (an org admin signed in as themselves, and the `write` scope; the `managing-environments` skill asks first, runs `save` with `dry_run` first, and wants a yes for each `control` action): `bonez.environment.save.v1` (create or change one, with small text files inline) and `bonez.environment.control.v1` (`build`, `enable`, `disable`, `share`, `delete`). Large stacks and binary data cannot be saved from outside a session; the skill has the client start a Bonez session with `bonez.session.start.v1` and a prompt that names the session's `build-environment` skill. A server before the environment operations lists none of these, and the skill and the command then say the server cannot manage environments from here and point to the web app's Environments page.
+
 ## Skills
 
 Judgment for using the graph well — traps, defaults, when to stop:
@@ -394,9 +396,10 @@ Judgment for using the graph well — traps, defaults, when to stop:
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **suggesting-agents** — propose a Bonez agent, once, when work will repeat (a bug that came back, a chore done by hand): its description is the trigger, its body the etiquette.
 - **creating-an-agent** — create or change a Bonez agent (manual, scheduled, or woken by a Linear or GitHub event) from the session with `bonez.agent.create.v2` and `bonez.agent.update.v1`: say the spec and wait for a yes, find the trigger and its real ids, dry-run, instructions that stand alone, poll until ready, run once on request.
-- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
+- **managing-environments** — list, inspect, create, change, rebuild, share, enable or delete a Bonez environment with `bonez.environment.list/read/save/control`: read before writing, `save` with `dry_run` first and a yes before the real call, a yes for each `control` action, what `state`, `stale` and `enabled` mean, how to read a failed build, small text files inline and never a secret, and a prompt to hand a Bonez session for a big stack.
+- **using-the-tool-lake** — find (`tool_search`), run (`vendor_operation`) and poll (`vendor_operation_status`) vendor operations: discover first and never guess an id, read `side_effect`, ask the user in words before anything that is not a read, what to say when a vendor is not connected, and how to list Bonez agents, runs, sessions and environments through the `bonez` vendor.
 
-Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
+Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]`, `/bonez:environments [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search`, `/prompts:agents` and `/prompts:environments` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents`, `/bonez-environments` and `/bonez-new-plugin <name>` on Cursor.
 
 The skills are shared, with deliberate exceptions: `codex/skills/` forks `remembering` and `reviewing-with-org-rules` because on Codex the prompt comes from the plugin's per-tool `approval_mode`, not from the hook, and `rules` asks for reads too, which the Claude/Cursor wording ("expect the harness to ask" on writes) does not say; `codex/skills/` also has `new-plugin`, the plugin creator, because a Codex plugin cannot ship the command that Claude Code and Cursor have; and `creating-a-plugin/SKILL.md` is rewritten in `cursor/` and `codex/` because it names the plugin's tools by `${CLAUDE_PLUGIN_ROOT}`, a variable only Claude Code expands (the other legs use `<skill folder>/../../bin/…`). CI pins that divergence to exactly those files, so any other drift fails the build.
 
@@ -616,8 +619,8 @@ its paths use `/` on every OS, so a folder built on Windows gets the gateway's h
 ```
 .claude-plugin/   plugin.json + marketplace.json (this repo IS its marketplace)
 .mcp.json         the bonez MCP server (URL from the plugin's bonez_url option, OAuth by default)
-skills/           12 skills
-commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
+skills/           13 skills
+commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:environments, /bonez:new-plugin
 hooks/            PreToolUse write gate (graph_write / rules) + SessionEnd session-capture hook
 bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
                   bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin publish: browser sign-in or API key),
@@ -628,10 +631,10 @@ server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
                   windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
 .gitattributes    LF for every text file, so a Windows clone (core.autocrlf=true) still runs the shell scripts
-codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), .mcp.json (the server, sign-in and `approval_mode = "prompt"` on `graph_write` and `rules`), config.toml (see Other clients → OpenAI Codex; native prompts, no write hook)
+codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents, environments), bin/ (plugin tools), .mcp.json (the server, sign-in and `approval_mode = "prompt"` on `graph_write` and `rules`), config.toml (see Other clients → OpenAI Codex; native prompts, no write hook)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
-cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, rules/ (the always-apply rule), commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, rules/ (the always-apply rule), commands/ (incl. bonez-environments and bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
 ```
 
 One gate script, two hook harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`

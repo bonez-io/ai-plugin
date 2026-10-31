@@ -23,7 +23,7 @@ Nothing in this plugin gates `vendor_operation` on any harness (the write gate c
 
 - the **name**: lowercase letters, digits and hyphens, starting with a letter, at most 59. Never overwritten: a taken name, a retired agent's too, is refused;
 - **what starts it**, in words: "only when someone starts it"; a schedule in words and as cron (`every night at 03:00 UTC`, `0 3 * * *`; the timezone is UTC unless the user names one); or an event ("each time a Linear issue is created with the label `agent-ready`, or is given it later");
-- the **plugins** it will use, by name, if any, its **environment** if it needs one, and whether it may **write memories** (`graph:write`);
+- the **plugins** it will use, by name, if any, its **environment** if it needs one (a name from `bonez.environment.list.v1`), and whether it may **write memories** (`graph:write`);
 - what the **instructions** will say, in two or three lines (the full text if they ask);
 - the **model** only if the user names one, and what a run costs in words ("one run per night on the org's default models", "one run for each matching ticket"), never a number you cannot know.
 
@@ -87,7 +87,7 @@ Only `name` and `instructions` are required. The rest:
 
 - `description`: one line (default: the first sentence of the instructions). `display_name`: default is the name, title-cased.
 - `plugins`: names of plugins already uploaded to the org's Library, as the Library lists them (the package name, like `@acme/pi-hello-check`; right after the plugin creator it is the package name in its HANDOFF block). At most 20. An unknown name is refused as `unknown_plugin` with the names that exist: choose from those, never invent one.
-- `environment`: the name of one of the org's environments; the run's machine boots from it, in its repository. A name the org does not have is refused with the ones it has. Leave it out otherwise.
+- `environment`: the name of one of the org's environments that the signed-in person may boot; the run's machine boots from it, in its repository. `bonez.environment.list.v1` lists the names (an agent's unshared image is not one for a member). A server that has the environment operations checks the name against what the caller may boot: an unknown name, or one the caller cannot see, is refused as `invalid_agent` with the names they may use and a pointer to `bonez.environment.list`. To make or change an environment, see the `managing-environments` skill. Leave it out otherwise.
 - `capabilities_opt_in`: `["graph:write"]` lets the agent write memories (typed `graph_write` operations, never arbitrary graph edits). The other opt-ins are `datadog:read` and `datadog:write`. Everything else is granted already. Name it in section 2 when you include it.
 - `model`: leave it out for the org's default (`{"mode": "auto"}`). When the user asks for a model tier, `{"mode": "rig", "rig": "<id or name of one of the org's rigs>"}`; an unknown one is refused with the list of rigs, so pick from that. `{"mode": "pinned", "catalog_alias": "<alias>"}` only when the user names that model: create does not check the alias against the org's models, so one the org lacks is refused when the first run starts.
 - `limits`: `timeout_seconds` (at most 86400), `max_steps`, `max_concurrency`; unset ones keep the defaults (an hour, 200 steps, one run at a time). Only when the job needs more.
@@ -102,7 +102,7 @@ Success: `{agent, revision, deployments: [{trigger_id, deployment_id, enabled, s
 | --- | --- |
 | `agent_exists` | The name is taken (a retired agent counts). Propose another name and ask again, or read the existing agent and change it (section 8). |
 | `unknown_plugin` | Pick from the plugin names the error lists, or tell the user the plugin is not uploaded. |
-| `invalid_agent` | Show the server's text, fix the field it names, and ask again only if the spec changed. A cron the server rejects, a trigger `config` that does not fit its `config_schema`, a repository or environment the org does not have: this error too. |
+| `invalid_agent` | Show the server's text, fix the field it names, and ask again only if the spec changed. A cron the server rejects, a trigger `config` that does not fit its `config_schema`, a repository the org does not have, an `environment` that does not exist or that the caller may not boot (it lists the names they may use and points to `bonez.environment.list`): this error too. |
 | `connection_required` | The org has no active connection of the trigger's vendor, or several (pass `bindings.connection`, one of those listed). An admin connects it in the web app: say so; do not retry. |
 | `tool_operation_forbidden` | The signed-in person may not author agents (an org admin or flow author may). Say so; do not retry. |
 | `write_scope_required` (or an insufficient-scope challenge) | The key or sign-in has no write scope. An admin mints a key with read+write, or the user signs in again with write. |
