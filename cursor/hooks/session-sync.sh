@@ -57,6 +57,12 @@ if [ -z "$NODE_BIN" ]; then
 fi
 [ -n "$NODE_BIN" ] || exit 0
 
+# Only recall produces agent context. Capture stays quiet.
+if [ "$EVENT" = recall ]; then
+  "$NODE_BIN" "$HERE/../bin/bonez-recall-hook.mjs" cursor
+  exit 0
+fi
+
 # stdin (the hook payload JSON) passes straight through.
 "$NODE_BIN" "$SYNC" hook cursor "$EVENT" >/dev/null 2>&1
 exit 0

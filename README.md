@@ -546,11 +546,9 @@ location outright.
   `CURSOR_TRANSCRIPT_PATH` and then to a walk of `~/.cursor/projects/*/agent-transcripts/`, but
   if Cursor has written nothing there is nothing to capture and the hook is a silent no-op.
 
-**Codex leg:** hooks are opt-in per Codex install (`[features] hooks = true` in `config.toml`,
-off by default) on top of this plugin's own `install` gate — see the commented-out block in
-[`codex/config.toml`](codex/config.toml), which needs its `command` path edited to point at
-wherever you placed `bin/bonez-session-sync.mjs` (Codex doesn't expand `${VAR}`/`~` in
-`config.toml`, same caveat as the MCP `url` field above).
+**Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
+
+**Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Claude and Codex also request the seed directly when their MCP connection is ready. Claude’s Read/Edit/Write hook passes the touched file path to the signed-in server and injects matching records. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
 
 ## Publishing a plugin
 

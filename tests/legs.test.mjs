@@ -498,3 +498,40 @@ describe("the agent pointers in the commands", () => {
     }
   })
 })
+
+describe("standalone capture and memory hooks", () => {
+  for (const leg of ["codex", "cursor"]) {
+    for (const file of ["bin/bonez-session-sync.mjs", "bin/vendor/agent-import.bundle.mjs", "bin/bonez-recall-hook.mjs"]) {
+      test(leg + " ships " + file, () => assert.equal(read(leg, file), read(file)))
+    }
+  }
+
+  for (const [leg, dir] of [["claude", ""], ["codex", "codex"], ["cursor", "cursor"]]) {
+    test(leg + " registered hook returns recall context and ignores unrelated tools", () => {
+      const root = join(REPO, dir)
+      const hooks = JSON.parse(read(dir, "hooks/hooks.json")).hooks
+      const cursor = leg === "cursor"
+      const run = (name, tool) => {
+        const entries = hooks[name]
+        const handlers = cursor ? entries : entries.flatMap((e) => e.hooks)
+        const cmd = handlers.find((h) => /recall-hook|session-sync.sh recall/.test(h.command || "")).command
+        const result = spawnSync("bash", ["-c", cmd], {
+          cwd: root, encoding: "utf8",
+          env: { ...process.env, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root },
+          input: JSON.stringify({ hook_event_name: name, tool_name: tool, tool_input: { command: "PRIVATE" } }),
+        })
+        assert.equal(result.status, 0, result.stderr)
+        if (!result.stdout) return ""
+        const reply = JSON.parse(result.stdout)
+        const context = cursor ? reply.additional_context : reply.hookSpecificOutput.additionalContext
+        assert.ok(!context.includes("PRIVATE"))
+        return context
+      }
+      assert.match(run(cursor ? "sessionStart" : "SessionStart"), /memory_recall/)
+      assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
+      assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
+      if (cursor) assert.match(hooks.stop[0].command, /turn-end/)
+      else assert.match(hooks.SessionEnd[0].hooks[0].command, /session-end/)
+    })
+  }
+})
