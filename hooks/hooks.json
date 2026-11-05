@@ -71,6 +71,16 @@
             "timeout": 6
           }
         ]
+      },
+      {
+        "matcher": "^mcp__plugin_bonez_bonez__graph_fetch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "timeout": 5
+          }
+        ]
       }
     ]
   }

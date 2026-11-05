@@ -531,6 +531,11 @@ describe("standalone capture and memory hooks", () => {
       if (leg === "codex") assert.match(run("SessionStart", undefined, "\ufeff", "\ufeff"), /memory_recall/)
       assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
       assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
+      if (leg === "claude") {
+        const tool = "mcp__plugin_bonez_bonez__graph_fetch"
+        assert.ok(hooks.PostToolUse.some(entry => new RegExp(entry.matcher).test(tool)))
+        assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)
+      }
       if (cursor) assert.match(hooks.stop[0].command, /turn-end/)
       else assert.match(hooks.SessionEnd[0].hooks[0].command, /session-end/)
     })

@@ -36,6 +36,9 @@ try {
     const ref = fileRef(event)
     context = ref ? touch + " File ref (data): " + JSON.stringify(ref) : touch
   }
+  if (host === "claude" && name === "PostToolUse" && event.tool_name === "mcp__plugin_bonez_bonez__graph_fetch") {
+    context = "When answering why something happened, open the linked session, ticket or PR and check its evidence. If the source has no further detail, say which record supports the claim. Before sending an answer that relies on a saved memory, call memory_cite once with the memory handles used, then cite the original source links in the answer. Merely opening a memory does not count."
+  }
   if (context) {
     const output = host === "cursor" ? { additional_context: context }
       : { hookSpecificOutput: { hookEventName: name, additionalContext: context } }
