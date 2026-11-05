@@ -1303,18 +1303,13 @@ function parseInstallArgs(rest) {
 // What `status` says about the credential. Never the token, and never the key beyond its
 // display prefix — this output routinely ends up pasted into an issue.
 function describeCredential(cfg) {
-  if (cfg.apiKey) return `API key ${maskKey(cfg.apiKey)}`
+  if (cfg.apiKey) return "API key configured"
   const oauth = cfg.oauth
   if (!oauth) return "(none — run `login`)"
   if (!oauth.expiresAt) return "OAuth"
   const mins = Math.round((oauth.expiresAt - Date.now()) / 60_000)
   const freshness = mins > 0 ? `token valid ${mins}m` : "token expired, refreshes on next upload"
   return `OAuth${oauth.refreshToken ? "" : " (no refresh token)"} — ${freshness}`
-}
-
-function maskKey(key) {
-  if (!key) return "(none)"
-  return key.length <= 10 ? "****" : `${key.slice(0, 10)}${"*".repeat(Math.min(24, key.length - 10))}`
 }
 
 function consentText(cfg) {

@@ -211,7 +211,7 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
 // ---------------------------------------------------------------------------- install / status / disable
 
 describe("install / status / disable / enable", () => {
-  test("round-trips config, masks the key, never echoes it back raw in status", async () => {
+  test("round-trips config without exposing any API key characters in status", async () => {
     const dataDir = freshDir("cfg")
     const res = await install(dataDir, ["--repo", "/tmp/some-repo"])
     assert.match(res.stdout, /installed and ENABLED/)
@@ -219,7 +219,8 @@ describe("install / status / disable / enable", () => {
 
     const status = await runCli(["status"], { env: { CLAUDE_PLUGIN_DATA: dataDir } })
     assert.equal(status.status, 0)
-    assert.doesNotMatch(status.stdout, new RegExp(TEST_KEY))
+    assert.match(status.stdout, /sign-in:\s+API key configured/im)
+    assert.doesNotMatch(status.stdout, new RegExp(TEST_KEY.slice(0, 10)))
     assert.match(status.stdout, /enabled/)
     assert.match(status.stdout, /\/tmp\/some-repo/)
 
