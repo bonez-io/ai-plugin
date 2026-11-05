@@ -171,7 +171,7 @@ try {
   # checks run from here.
   $Spaced = P $Tmp @('Jane Doe', 'plug in')
   New-Item -ItemType Directory -Force -Path $Spaced | Out-Null
-  foreach ($d in @('bin', 'hooks', 'cursor', 'tests')) { Copy-Item -LiteralPath (P $Root @($d)) -Destination (P $Spaced @($d)) -Recurse -Force }
+  foreach ($d in @('bin', 'hooks', 'codex', 'cursor', 'tests')) { Copy-Item -LiteralPath (P $Root @($d)) -Destination (P $Spaced @($d)) -Recurse -Force }
 
   # ---- the machine ----------------------------------------------------------------------------------
 
@@ -347,6 +347,15 @@ try {
 
   $claudeWrite = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__graph_write","tool_input":{"op":"remember","content":"x"}}'
   $claudeRead = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__graph_search","tool_input":{"query":"x"}}'
+  Check 'Codex SessionStart command injects recall guidance from an installed path with spaces' {
+    $codexRoot = P $Spaced @('codex')
+    $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (P $codexRoot @('hooks', 'hooks.json')) | ConvertFrom-Json
+    $cmd = ($manifest.hooks.SessionStart[0].hooks | Where-Object { $_.commandWindows -like '*bonez-recall-hook*' }).commandWindows
+    $r = Invoke-Native 'cmd.exe' -RawArgs ('/d /s /c "' + $cmd + '"') -EnvVars @{ PLUGIN_ROOT = $codexRoot } -InputText '{"hook_event_name":"SessionStart"}'
+    if ($r.ExitCode -ne 0 -or $r.Out -notmatch 'memory_recall') { return (Fail "Codex hook failed: $(Show-Text $r.Err 4)") }
+    return (Pass 'received memory recall guidance')
+  }
+
   $hooksJson = Get-Content -Raw -Encoding UTF8 -LiteralPath (P $Root @('hooks', 'hooks.json')) | ConvertFrom-Json
   $gateCommand = $hooksJson.hooks.PreToolUse[0].hooks[0].command
 
