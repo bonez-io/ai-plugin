@@ -14,13 +14,6 @@
             "command": "node \"$PLUGIN_ROOT/bin/bonez-recall-hook.mjs\" codex",
             "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-recall-hook.mjs\" codex",
             "timeout": 5
-          },
-          {
-            "type": "mcp_tool",
-            "server": "bonez",
-            "tool": "memory_recall",
-            "input": {},
-            "timeout": 8
           }
         ]
       }

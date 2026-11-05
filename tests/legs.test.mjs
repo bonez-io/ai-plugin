@@ -511,14 +511,14 @@ describe("standalone capture and memory hooks", () => {
       const root = join(REPO, dir)
       const hooks = JSON.parse(read(dir, "hooks/hooks.json")).hooks
       const cursor = leg === "cursor"
-      const run = (name, tool, prefix = "", suffix = "", prompt) => {
+      const run = (name, tool, prefix = "", suffix = "", prompt, file_path) => {
         const entries = hooks[name]
         const handlers = cursor ? entries : entries.flatMap((e) => e.hooks)
         const cmd = handlers.find((h) => /recall-hook|session-sync.sh recall/.test(h.command || "")).command
         const result = spawnSync("bash", ["-c", cmd], {
           cwd: root, encoding: "utf8",
           env: { ...process.env, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root },
-          input: prefix + JSON.stringify({ hook_event_name: name, tool_name: tool, prompt, tool_input: { command: "PRIVATE" } }) + suffix,
+          input: prefix + JSON.stringify({ hook_event_name: name, tool_name: tool, prompt, tool_input: { command: "PRIVATE", file_path } }) + suffix,
         })
         assert.equal(result.status, 0, result.stderr)
         if (!result.stdout) return ""
@@ -529,13 +529,28 @@ describe("standalone capture and memory hooks", () => {
       }
       assert.match(run(cursor ? "sessionStart" : "SessionStart"), /memory_recall/)
       if (leg === "codex") assert.match(run("SessionStart", undefined, "\ufeff", "\ufeff"), /memory_recall/)
-      assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
+      if (leg !== "claude") assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
       assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
+      if (!cursor) {
+        assert.ok(hooks.SessionStart.every(group => group.hooks.every(hook => hook.type !== "mcp_tool")),
+          "Opening an idle host must not perform a graph read")
+      }
       if (leg === "claude") {
+        const scratch = mkdtempSync(join(tmpdir(), "bonez-file-hook-"))
+        try {
+          const readFile = () => run("PostToolUse", "Read", "", "", undefined, join(scratch, "note.txt"))
+          assert.equal(readFile(), "")
+          for (const args of [["init", "-q"], ["remote", "add", "origin", "https://github.com/acme/api.git"]]) {
+            assert.equal(spawnSync("git", args, { cwd: scratch }).status, 0)
+          }
+          assert.match(readFile(), /acme\/api\/note\.txt/)
+          assert.ok(hooks.PostToolUse.filter(group => new RegExp(group.matcher).test("Read"))
+            .every(group => group.hooks.every(hook => hook.type !== "mcp_tool")))
+        } finally {
+          rmSync(scratch, { recursive: true, force: true })
+        }
         assert.match(run("UserPromptSubmit", undefined, "", "", "Plan a change to acme/api/src/refund.py"), /memory_recall/)
         assert.equal(run("UserPromptSubmit", undefined, "", "", "Thanks!"), "")
-        assert.ok(hooks.SessionStart.every(entry => entry.hooks.every(hook => hook.type !== "mcp_tool")),
-          "Claude has no MCP client context during SessionStart")
         const tool = "mcp__plugin_bonez_bonez__graph_fetch"
         assert.ok(hooks.PostToolUse.some(entry => new RegExp(entry.matcher).test(tool)))
         assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)

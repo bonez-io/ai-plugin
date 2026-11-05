@@ -548,7 +548,7 @@ location outright.
 
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
 
-**Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Claude and Codex also request the seed directly when their MCP connection is ready. Claude’s Read/Edit/Write hook passes the touched file path to the signed-in server and injects matching records. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
+**Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Simple questions can finish without a seed read. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its graph ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
 
 ## Publishing a plugin
 
@@ -654,6 +654,15 @@ claude --plugin-dir .         # load the working tree for one session
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
+
+To measure simple sessions on a running local Bonez cluster, set `CLUSTER_CLI` to the absolute path of bonez-core's `dev/cluster/bonez-cluster`. Use Python 3.10+, the signed-in Codex CLI and a Claude provider credential (the test uses Sonnet through OpenRouter when `OPENROUTER_API_KEY` is set). Each command needs a new output directory.
+
+```bash
+python3 tests/manual/simple_sessions.py --cluster-cli "$CLUSTER_CLI" --cluster memory-handoff --pairs 12 --out /tmp/bonez-simple-turns
+python3 tests/manual/simple_sessions.py --cluster-cli "$CLUSTER_CLI" --cluster memory-handoff --scenario file-read --pairs 4 --out /tmp/bonez-scratch-reads
+```
+
+The benchmark alternates installed and absent profiles and discards one warm-up pair per client. Each turn starts a fresh CLI process. Installation and hook trust happen before timing, and transcript capture is off. A local recorder counts MCP tool calls including calls from hooks. The test checks answer correctness, reported permission denials and errors, successful plugin discovery and zero Bonez tool calls. The JSONL and summary include first visible text and process completion in milliseconds. No latency threshold is assumed.
 
 On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/plugin_signin.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs`.
 
