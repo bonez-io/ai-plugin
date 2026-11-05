@@ -17,6 +17,23 @@
       {
         "command": "bash ./hooks/session-sync.sh session-start",
         "timeout": 10
+      },
+      {
+        "command": "bash ./hooks/session-sync.sh recall",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "bash ./hooks/session-sync.sh turn-end",
+        "timeout": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "^(Read|Write|Edit)$",
+        "command": "bash ./hooks/session-sync.sh recall",
+        "timeout": 5
       }
     ]
   }

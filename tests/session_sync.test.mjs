@@ -211,7 +211,7 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
 // ---------------------------------------------------------------------------- install / status / disable
 
 describe("install / status / disable / enable", () => {
-  test("round-trips config, masks the key, never echoes it back raw in status", async () => {
+  test("round-trips config without exposing any API key characters in status", async () => {
     const dataDir = freshDir("cfg")
     const res = await install(dataDir, ["--repo", "/tmp/some-repo"])
     assert.match(res.stdout, /installed and ENABLED/)
@@ -219,7 +219,8 @@ describe("install / status / disable / enable", () => {
 
     const status = await runCli(["status"], { env: { CLAUDE_PLUGIN_DATA: dataDir } })
     assert.equal(status.status, 0)
-    assert.doesNotMatch(status.stdout, new RegExp(TEST_KEY))
+    assert.match(status.stdout, /sign-in:\s+API key configured/im)
+    assert.doesNotMatch(status.stdout, new RegExp(TEST_KEY.slice(0, 10)))
     assert.match(status.stdout, /enabled/)
     assert.match(status.stdout, /\/tmp\/some-repo/)
 
@@ -1275,6 +1276,7 @@ describe("login / install refuse a gateway Bonez does not operate", () => {
   for (const [label, env] of [
     ["BONEZ_GATEWAY_URL", { BONEZ_GATEWAY_URL: "https://bonez.example.com" }],
     ["BONEZ_MCP_URL", { BONEZ_MCP_URL: "https://bonez.example.com/mcp" }],
+    ["Claude plugin option", { CLAUDE_PLUGIN_OPTION_BONEZ_URL: "https://bonez.example.com", BONEZ_GATEWAY_URL: "https://gateway.bonez.io" }],
   ]) {
     test(`install refuses a customer box set via ${label}, and writes nothing`, async () => {
       const dataDir = freshDir("guard-install")
@@ -1736,4 +1738,22 @@ describe("hook — wall time and invisibility", () => {
 
     rmSync(dataDir, { recursive: true, force: true })
   })
+})
+
+test("an empty host data directory uses the configured shared store, while a host opt-out wins", async () => {
+  const home = freshDir("shared-login")
+  const host = join(home, "empty-host")
+  const shared = join(home, ".bonez", "session-sync")
+  mkdirSync(host, { recursive: true })
+  const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: host, BONEZ_SESSION_SYNC_DATA: "" }
+  try {
+    assert.equal((await runCli(["install", TEST_KEY, "--global"], {
+      env: { ...env, CLAUDE_PLUGIN_DATA: "" },
+    })).status, 0)
+    assert.ok((await runCli(["status"], { env })).stdout.includes(shared))
+    writeFileSync(join(host, "config.json"), JSON.stringify({ enabled: false }))
+    assert.match((await runCli(["status"], { env })).stdout, /disabled/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
 })

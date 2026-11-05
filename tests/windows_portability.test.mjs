@@ -83,7 +83,7 @@ describe("file names", () => {
 })
 
 describe("hook commands", () => {
-  const commandsOf = (file) => Object.values(json(file).hooks).flatMap((groups) => groups.flatMap((g) => (g.hooks ?? [g]).map((h) => h.command)))
+  const commandsOf = (file) => Object.values(json(file).hooks).flatMap((groups) => groups.flatMap((g) => (g.hooks ?? [g]).filter((h) => h.type !== "mcp_tool").map((h) => h.command)))
 
   test("Claude Code: the plugin root is always quoted, so a path with a space stays one word", () => {
     const commands = commandsOf("hooks/hooks.json")

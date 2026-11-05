@@ -104,25 +104,6 @@ const OAUTH_CLIENT_ID_BUILTIN = "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm"
 
 // -------------------------------------------------------------------------------- data dir
 
-// ${CLAUDE_PLUGIN_DATA} is the writable, per-plugin, per-user directory Claude Code sets for
-// every hook process: `~/.claude/plugins/data/{id}/`, where `{id}` is `{plugin-name}-
-// {marketplace-name}` (non `[A-Za-z0-9_-]` characters replaced with `-`) — e.g. `formatter@my-
-// marketplace` resolves to `.../data/formatter-my-marketplace/` (verified against
-// code.claude.com/docs/en/plugins-reference.md; it is NOT simply the plugin's bare manifest
-// `name`, which is what an earlier draft of this file wrongly assumed). This plugin ships as
-// both plugin name AND marketplace name "bonez" (`.claude-plugin/plugin.json` /
-// `marketplace.json`), so the documented `marketplace add bonez-io/ai-plugin` + `install
-// bonez@bonez` flow resolves to `.../data/bonez-bonez/` — the fallback below.
-//
-// Two processes need to agree on this path WITHOUT the env var necessarily being set: a human
-// running `install` from their own shell (unless they run it via a Claude Code session's Bash
-// tool while this plugin is enabled — bin/ is on that PATH per docs/en/plugins.md, and that
-// subprocess DOES inherit the real CLAUDE_PLUGIN_DATA, so the recommended install path in the
-// README already gets the exact right value for free), and the Codex hook process (Codex has
-// no CLAUDE_PLUGIN_DATA of its own — its config.toml install here is a manual paste, not a real
-// plugin load, so it always hits this fallback). A key installed one way must be visible to a
-// hook firing the other way, so the fallback has to be this same computed path, not some
-// unrelated directory of our own choosing.
 // What we can honestly claim about the stored key's protection. `chmod 0o600` is not a
 // permission model on Windows — Node maps it onto the read-only flag, so the file stays
 // readable by every account on the machine. Saying "mode 600" there would be a false
@@ -186,15 +167,20 @@ function dataDir() {
   if (_dataDir) return _dataDir
   // An explicit override always wins — tests rely on this, and it is the escape hatch for
   // anyone with an unusual layout.
-  const explicit = process.env.BONEZ_SESSION_SYNC_DATA || process.env.CLAUDE_PLUGIN_DATA
+  const explicit = process.env.BONEZ_SESSION_SYNC_DATA
+  const hostDir = process.env.CLAUDE_PLUGIN_DATA
   if (explicit) {
     _dataDir = explicit
     return _dataDir
   }
+  // Preserve a host-specific choice (including disabled), but an empty host-created
+  // directory must not hide a configured shared store.
+  if (hostDir && existsSync(join(hostDir, "config.json"))) return (_dataDir = hostDir)
   if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) {
     _dataDir = CANONICAL_DATA_DIR
     return _dataDir
   }
+  if (hostDir) return (_dataDir = hostDir)
   for (const d of legacyDataDirs()) {
     if (existsSync(join(d, "config.json"))) {
       _dataDir = d
@@ -382,6 +368,8 @@ async function log(line) {
 const disabledByEnv = () => process.env.BONEZ_SESSION_SYNC === "0"
 
 function gatewayBaseUrl() {
+  const hostOption = process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL
+  if (hostOption) return hostOption.replace(/\/+$/, "")
   if (process.env.BONEZ_GATEWAY_URL) return process.env.BONEZ_GATEWAY_URL.replace(/\/+$/, "")
   const mcpUrl = process.env.BONEZ_MCP_URL
   if (mcpUrl) return mcpUrl.replace(/\/mcp\/?$/, "")
@@ -395,16 +383,23 @@ function gatewayBaseUrl() {
 // host. Loopback is allowed so a local gateway (and this repo's stub-gateway tests) still work.
 const OUR_GATEWAY_HOSTS = new Set(["gateway.bonez.io", "qa.gateway.bonez.io", "localhost", "127.0.0.1", "[::1]"])
 
+function captureGatewayAllowed(base) {
+  try {
+    const url = new URL(base)
+    const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    return !url.username && !url.password && OUR_GATEWAY_HOSTS.has(url.hostname) &&
+      (url.protocol === "https:" || (local && url.protocol === "http:"))
+  } catch {
+    return false
+  }
+}
+
 // Returns true (after saying why on stderr) when the configured gateway is not one of ours.
 function refuseForeignGateway(command) {
   const base = gatewayBaseUrl()
-  let host = ""
-  try {
-    host = new URL(base).hostname.toLowerCase()
-  } catch {
-    /* an unparseable URL is not one of ours either */
-  }
-  if (OUR_GATEWAY_HOSTS.has(host)) return false
+  if (captureGatewayAllowed(base)) return false
+  let host = "unparseable"
+  try { host = new URL(base).hostname } catch { /* omit malformed URL */ }
   console.error(
     `bonez session capture: refusing \`${command}\` — the configured Bonez URL (${host || "unparseable"}) is not a\n` +
       "Bonez-operated gateway (gateway.bonez.io, qa.gateway.bonez.io). Session capture signs in to Bonez's own\n" +
@@ -1118,6 +1113,10 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   const gatewayUrl = gatewayBaseUrl()
   const wireAgent = wireAgentFor(agent)
 
+  if (!captureGatewayAllowed(gatewayUrl)) {
+    await log("upload: skipped — session capture requires a Bonez-operated gateway")
+    return
+  }
   let bearer
   try {
     bearer = await resolveBearer(cfg, gatewayUrl)
@@ -1304,18 +1303,13 @@ function parseInstallArgs(rest) {
 // What `status` says about the credential. Never the token, and never the key beyond its
 // display prefix — this output routinely ends up pasted into an issue.
 function describeCredential(cfg) {
-  if (cfg.apiKey) return `API key ${maskKey(cfg.apiKey)}`
+  if (cfg.apiKey) return "API key configured"
   const oauth = cfg.oauth
   if (!oauth) return "(none — run `login`)"
   if (!oauth.expiresAt) return "OAuth"
   const mins = Math.round((oauth.expiresAt - Date.now()) / 60_000)
   const freshness = mins > 0 ? `token valid ${mins}m` : "token expired, refreshes on next upload"
   return `OAuth${oauth.refreshToken ? "" : " (no refresh token)"} — ${freshness}`
-}
-
-function maskKey(key) {
-  if (!key) return "(none)"
-  return key.length <= 10 ? "****" : `${key.slice(0, 10)}${"*".repeat(Math.min(24, key.length - 10))}`
 }
 
 function consentText(cfg) {

@@ -1,0 +1,47 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/bin/bonez-session-sync.mjs\" hook codex session-start",
+            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-session-sync.mjs\" hook codex session-start",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/bin/bonez-recall-hook.mjs\" codex",
+            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-recall-hook.mjs\" codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/bin/bonez-session-sync.mjs\" hook codex session-end",
+            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-session-sync.mjs\" hook codex session-end",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^apply_patch$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/bin/bonez-recall-hook.mjs\" codex",
+            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-recall-hook.mjs\" codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
