@@ -38,13 +38,6 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
             "timeout": 5
-          },
-          {
-            "type": "mcp_tool",
-            "server": "plugin:bonez:bonez",
-            "tool": "memory_recall",
-            "input": {},
-            "timeout": 8
           }
         ]
       }

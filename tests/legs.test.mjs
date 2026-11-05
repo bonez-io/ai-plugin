@@ -532,6 +532,8 @@ describe("standalone capture and memory hooks", () => {
       assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
       assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
       if (leg === "claude") {
+        assert.ok(hooks.SessionStart.every(entry => entry.hooks.every(hook => hook.type !== "mcp_tool")),
+          "Claude has no MCP client context during SessionStart")
         const tool = "mcp__plugin_bonez_bonez__graph_fetch"
         assert.ok(hooks.PostToolUse.some(entry => new RegExp(entry.matcher).test(tool)))
         assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)
