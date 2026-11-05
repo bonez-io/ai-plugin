@@ -115,7 +115,9 @@ def trust(home, work, env):
     )
 
     def request(i, method, params):
-        proc.stdin.write(json.dumps(dict(id=i, method=method, params=params)) + "\n")
+        proc.stdin.write(
+            json.dumps({"id": i, "method": method, "params": params}) + "\n"
+        )
         proc.stdin.flush()
         for line in proc.stdout:
             reply = json.loads(line)
@@ -296,15 +298,15 @@ def turn(client, setup_data, prompt):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    return dict(
-        first_ms=first,
-        total_ms=round((time.monotonic() - start) * 1000),
-        answer=answer.strip(),
-        tools=tools,
-        errors=errors,
-        exit=code,
-        usage=tokens,
-    )
+    return {
+        "first_ms": first,
+        "total_ms": round((time.monotonic() - start) * 1000),
+        "answer": answer.strip(),
+        "tools": tools,
+        "errors": errors,
+        "exit": code,
+        "usage": tokens,
+    }
 
 
 def bench(client, pairs, target, key, out, scenario):
@@ -397,15 +399,17 @@ def report(out):
                         b[key] - a[key] for a, b in zip(off, on)
                     ),
                 }
-        summary[path.stem] = dict(
-            pairs=len(off),
-            timings=metrics,
-            tool_calls=len(memory_calls),
-            on_sessions_with_discovery=discovery,
-            failed_sessions=errors,
-            standalone_turns_with_model_tools=unexpected,
+        summary[path.stem] = {
+            "pairs": len(off),
+            "timings": metrics,
+            "tool_calls": len(memory_calls),
+            "on_sessions_with_discovery": discovery,
+            "failed_sessions": errors,
+            "standalone_turns_with_model_tools": unexpected,
+        }
+        passed &= (
+            not errors and not memory_calls and not unexpected and discovery == len(on)
         )
-        passed &= not errors and not memory_calls and not unexpected and discovery == len(on)
     rendered = json.dumps(summary, indent=2)
     print(rendered)
     (out / "summary.json").write_text(rendered + "\n")
