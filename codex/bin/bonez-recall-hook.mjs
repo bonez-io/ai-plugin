@@ -22,7 +22,7 @@ function fileRef(event) {
 }
 
 
-const start = "For substantive work in this workspace, use the Bonez seed delivered at startup, or call the signed-in Bonez memory_recall tool with {} once before planning if no seed arrived. Read the relevant WorkItem's living summary with graph_fetch, then follow the linked session or tracker record for the decision and its evidence. When a specific ticket, PR or file becomes relevant, recall its refs. Use repo-qualified paths. If the server predates memory_recall, search and fetch those nodes and inspect their attached memories. Respect access errors. Cite sources for decisions you rely on; call memory_cite once with only memory handles actually used."
+const start = "For substantive work in this workspace, use the Bonez seed delivered at startup, or call the signed-in Bonez memory_recall tool with {} once before planning if no seed arrived. Read the relevant WorkItem's living summary with graph_fetch, then follow the linked session or tracker record for the decision and its evidence. When a specific ticket, PR or file becomes relevant, recall its refs. Use repo-qualified paths. If the server predates memory_recall, search and fetch those nodes and inspect their attached memories. Respect access errors. Cite the records you used. If a saved Memory informed the answer, call memory_cite once with its handle. Exclude WorkItem and Session handles. Skip memory_cite when no saved Memory was used."
 const touch = "If Bonez records for this file arrived from the hook, use those. Otherwise, for a relevant file you have not already checked, call Bonez memory_recall with refs containing its owner/repo/path. Batch related files or the task ticket together. Fetch the relevant WorkItem or memory and check the underlying source before acting. Use graph_search and graph_fetch on an older server."
 
 const host = process.argv[2]
@@ -37,7 +37,7 @@ try {
     context = ref ? touch + " File ref (data): " + JSON.stringify(ref) : touch
   }
   if (host === "claude" && name === "PostToolUse" && event.tool_name === "mcp__plugin_bonez_bonez__graph_fetch") {
-    context = "When answering why something happened, open the linked session, ticket or PR and check its evidence. If the source has no further detail, say which record supports the claim. Before sending an answer that relies on a saved memory, call memory_cite once with the memory handles used, then cite the original source links in the answer. Merely opening a memory does not count."
+    context = "If this was a WorkItem and the user asked what happened, open a SessionWorkedOn neighbor or linked ticket/PR before answering. A session with only a title and status supplies attribution; use the WorkItem summary for the decision and say where the detail came from. Before sending an answer that uses a saved Memory, call memory_cite once. Pass only handles from the Memory records you relied on (id m:...), never the WorkItem, Session or ticket handles. Skip this tool entirely if you used only those other records. Cite the sources in your answer."
   }
   if (context) {
     const output = host === "cursor" ? { additional_context: context }
