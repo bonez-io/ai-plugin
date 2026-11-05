@@ -27,7 +27,7 @@ const touch = "If Bonez records for this file arrived from the hook, use those. 
 
 const host = process.argv[2]
 try {
-  const event = JSON.parse(readFileSync(0, "utf8"))
+  const event = JSON.parse(readFileSync(0, "utf8").trim())
   const name = event.hook_event_name
   let context
   if (name === "SessionStart" || name === "sessionStart") context = start

@@ -352,7 +352,7 @@ try {
     $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (P $codexRoot @('hooks', 'hooks.json')) | ConvertFrom-Json
     $cmd = ($manifest.hooks.SessionStart[0].hooks | Where-Object { $_.commandWindows -like '*bonez-recall-hook*' }).commandWindows
     $r = Invoke-Native 'cmd.exe' -RawArgs ('/d /s /c "' + $cmd + '"') -EnvVars @{ PLUGIN_ROOT = $codexRoot } -InputText '{"hook_event_name":"SessionStart"}'
-    if ($r.ExitCode -ne 0 -or $r.Out -notmatch 'memory_recall') { return (Fail "Codex hook failed: $(Show-Text $r.Err 4)") }
+    if ($r.ExitCode -ne 0 -or $r.Out -notmatch 'memory_recall') { return (Fail "Codex hook exited $($r.ExitCode), stdout '$($r.Out)', stderr: $(Show-Text $r.Err 4)") }
     return (Pass 'received memory recall guidance')
   }
 
