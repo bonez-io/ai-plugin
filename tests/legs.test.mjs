@@ -511,14 +511,14 @@ describe("standalone capture and memory hooks", () => {
       const root = join(REPO, dir)
       const hooks = JSON.parse(read(dir, "hooks/hooks.json")).hooks
       const cursor = leg === "cursor"
-      const run = (name, tool, prefix = "", suffix = "") => {
+      const run = (name, tool, prefix = "", suffix = "", prompt) => {
         const entries = hooks[name]
         const handlers = cursor ? entries : entries.flatMap((e) => e.hooks)
         const cmd = handlers.find((h) => /recall-hook|session-sync.sh recall/.test(h.command || "")).command
         const result = spawnSync("bash", ["-c", cmd], {
           cwd: root, encoding: "utf8",
           env: { ...process.env, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root },
-          input: prefix + JSON.stringify({ hook_event_name: name, tool_name: tool, tool_input: { command: "PRIVATE" } }) + suffix,
+          input: prefix + JSON.stringify({ hook_event_name: name, tool_name: tool, prompt, tool_input: { command: "PRIVATE" } }) + suffix,
         })
         assert.equal(result.status, 0, result.stderr)
         if (!result.stdout) return ""
@@ -532,6 +532,8 @@ describe("standalone capture and memory hooks", () => {
       assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
       assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
       if (leg === "claude") {
+        assert.match(run("UserPromptSubmit", undefined, "", "", "Plan a change to acme/api/src/refund.py"), /memory_recall/)
+        assert.equal(run("UserPromptSubmit", undefined, "", "", "Thanks!"), "")
         assert.ok(hooks.SessionStart.every(entry => entry.hooks.every(hook => hook.type !== "mcp_tool")),
           "Claude has no MCP client context during SessionStart")
         const tool = "mcp__plugin_bonez_bonez__graph_fetch"

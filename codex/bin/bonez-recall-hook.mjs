@@ -31,6 +31,12 @@ try {
   const name = event.hook_event_name
   let context
   if (name === "SessionStart" || name === "sessionStart") context = start
+  // A plan can finish before the first Read. Give concrete path mentions an opportunity
+  // to retrieve their symbol constraints, without copying prompt content into hook output.
+  if (host === "claude" && name === "UserPromptSubmit" && typeof event.prompt === "string" &&
+      /(?:^|[\s`(])(?:[\w.-]+\/)+[\w.-]+\.[a-z0-9]{1,12}\b/i.test(event.prompt)) {
+    context = "This turn names a code file. Before planning or editing, use the signed-in Bonez memory_recall tool with refs for that file and the named symbol when known. Reuse records already supplied for the same target. Open relevant saved Memory handles with graph_fetch. In the plan, account for constraints and any session_activity on that exact file. Cite a saved Memory with memory_cite once if you used it."
+  }
   if ((name === "PostToolUse" || name === "postToolUse") &&
       ["Read", "Edit", "Write", "MultiEdit", "apply_patch"].includes(event.tool_name)) {
     const ref = fileRef(event)
