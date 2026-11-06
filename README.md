@@ -115,7 +115,7 @@ codex mcp login bonez
 
 To build a Bonez plugin afterwards, ask Codex: `Use the new-plugin skill to create the Bonez plugin <name>`. The skill ships in the plugin, together with the hash and push tools it runs; a Codex plugin cannot ship custom prompts, which is why it is a skill and not a `/prompts:` command.
 
-The plugin's [`codex/.mcp.json`](codex/.mcp.json) pins the sign-in to the Bonez CLI app with the `bonez:*` scopes: Codex asks only for OpenID scopes unless told, and its own client is not one every Bonez server's login knows. To add only the server by hand, paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml` (`$HOME\.codex\config.toml` on Windows).
+The plugin's [`codex/.mcp.json`](codex/.mcp.json) uses [Codex's official OAuth identity](https://chatgpt.com/oauth/codex/client.json) with explicit `bonez:read`, `bonez:memory` and `bonez:write` scopes. Consent identifies Codex with its icon. Your authorization server must support and register that client metadata document (CIMD); advertising CIMD alone does not register the client. Bonez cloud has this registration. After upgrading from the shared Bonez CLI identity, run `codex mcp login bonez` to authorize Codex, then restart the host. To add only the server by hand, paste [`codex/config.toml`](codex/config.toml) into `~/.codex/config.toml` (`$HOME\.codex\config.toml` on Windows).
 
 Guidance ports:
 
