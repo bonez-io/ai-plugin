@@ -35,6 +35,12 @@
         "command": "bash ./hooks/session-sync.sh recall",
         "timeout": 5
       }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "bash ./hooks/session-sync.sh recall",
+        "timeout": 5
+      }
     ]
   }
 }

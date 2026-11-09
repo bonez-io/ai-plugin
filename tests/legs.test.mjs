@@ -560,3 +560,67 @@ describe("standalone capture and memory hooks", () => {
     })
   }
 })
+
+describe("first-prompt seed (1SI-3585)", () => {
+  test("Claude fetches it with an mcp_tool hook on its own sign-in, once, within three seconds", () => {
+    const hooks = JSON.parse(read("", "hooks/hooks.json")).hooks
+    const seed = hooks.UserPromptSubmit.flatMap((g) => g.hooks).filter((h) => h.type === "mcp_tool")
+    assert.deepEqual(seed.map((h) => [h.server, h.tool, h.input, h.once, h.timeout <= 3]),
+      [["plugin:bonez:bonez", "memory_recall", { message: "${prompt}", format: "claude_user_prompt_submit" }, true, true]])
+  })
+
+  for (const [leg, event, field] of [["codex", "UserPromptSubmit", "session_id"], ["cursor", "beforeSubmitPrompt", "conversation_id"]]) {
+    test(leg + " fetches it on the first prompt with repo and prompt, and fails open", async () => {
+      const { createServer } = await import("node:http")
+      const { spawn } = await import("node:child_process")
+      const { writeFileSync } = await import("node:fs")
+      const calls = []
+      let delay = 0
+      const server = createServer((req, res) => {
+        let body = ""
+        req.on("data", (c) => (body += c))
+        req.on("end", () => setTimeout(() => {
+          const msg = JSON.parse(body)
+          if (msg.method === "tools/call") calls.push({ auth: req.headers.authorization, consumer: req.headers["x-bonez-mcp-consumer"], ...msg.params })
+          res.writeHead(msg.id ? 200 : 202, { "content-type": "application/json" })
+          res.end(msg.id ? JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: msg.method === "initialize"
+            ? { protocolVersion: "2025-06-18" } : { content: [{ type: "text", text: "Work in flight: refund ledger" }] } }) : "")
+        }, delay))
+      })
+      await new Promise((r) => server.listen(0, "127.0.0.1", r))
+      const scratch = mkdtempSync(join(tmpdir(), "bonez-seed-"))
+      try {
+        for (const args of [["init", "-q"], ["remote", "add", "origin", "git@github.com:acme/api.git"]]) spawnSync("git", args, { cwd: scratch })
+        writeFileSync(join(scratch, "config.json"), JSON.stringify({ apiKey: "bnz_test_key" }))
+        const cmd = leg === "cursor" ? ["bash", [join(REPO, "cursor/hooks/session-sync.sh"), "recall"]]
+          : ["node", [join(REPO, "codex/bin/bonez-recall-hook.mjs"), "codex"]]
+        const run = (session, extra = {}) => new Promise((done) => {
+          const child = spawn(cmd[0], cmd[1], { cwd: scratch, env: { ...process.env, HOME: scratch, BONEZ_SESSION_SYNC_DATA: scratch,
+            BONEZ_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`, ...extra } })
+          let out = ""
+          const started = Date.now()
+          child.stdout.on("data", (c) => (out += c))
+          child.on("close", () => done({ out, ms: Date.now() - started }))
+          child.stdin.end(JSON.stringify({ hook_event_name: event, [field]: session, cwd: scratch, workspace_roots: [scratch], prompt: "Fix the refund" }))
+        })
+        const session = "s-" + process.pid + "-" + leg + "-" + Date.now()
+        const first = JSON.parse((await run(session)).out)
+        assert.match(leg === "cursor" ? first.additional_context : first.hookSpecificOutput.additionalContext, /refund ledger/)
+        assert.deepEqual(calls, [{ auth: "Bearer bnz_test_key", consumer: leg + "-plugin", name: "memory_recall",
+          arguments: { message: "Fix the refund", repo: "acme/api" } }])
+        assert.equal((await run(session)).out, "", "later prompts do not re-fetch")
+        assert.equal(calls.length, 1)
+        delay = 10_000
+        const slow = await run(session + "-slow")
+        assert.equal(slow.out, "")
+        assert.ok(slow.ms < 4500, `fail open took ${slow.ms} ms`)
+        const foreign = await run(session + "-foreign", { BONEZ_GATEWAY_URL: "https://bonez.example.com" })
+        assert.equal(foreign.out, "", "the capture key never leaves Bonez-operated servers")
+      } finally {
+        server.closeAllConnections()
+        server.close()
+        rmSync(scratch, { recursive: true, force: true })
+      }
+    })
+  }
+})

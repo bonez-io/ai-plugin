@@ -71,6 +71,18 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
             "timeout": 5
+          },
+          {
+            "type": "mcp_tool",
+            "server": "plugin:bonez:bonez",
+            "tool": "memory_recall",
+            "input": {
+              "message": "${prompt}",
+              "format": "claude_user_prompt_submit"
+            },
+            "timeout": 3,
+            "once": true,
+            "statusMessage": "Loading Bonez context"
           }
         ]
       }
