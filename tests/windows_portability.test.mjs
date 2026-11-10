@@ -97,7 +97,7 @@ describe("hook commands", () => {
 
   test("Claude Code: the write gate is run through bash (Git Bash on Windows), never as a bare script", () => {
     const gate = json("hooks/hooks.json").hooks.PreToolUse[0].hooks[0].command
-    assert.match(gate, /^bash "\$\{CLAUDE_PLUGIN_ROOT:-\$PLUGIN_ROOT\}\/hooks\/gate-write\.sh"$/)
+    assert.match(gate, /^bash "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/gate-write\.sh"$/)
   })
 
   test("Cursor: every hook names its interpreter (a bare .sh is opened by the Windows file association)", () => {

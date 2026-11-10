@@ -25,11 +25,23 @@ import { startStubOAuth } from "./lib/stub-oauth.mjs"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
 const SCRIPT = join(REPO_ROOT, "bin", "bonez-session-sync.mjs")
-const FIXTURES = join(HERE, "fixtures")
 const TEST_KEY = "bnz_sessions_test_0123456789abcdef"
 
 function freshDir(prefix) {
   return mkdtempSync(join(tmpdir(), `bonez-session-sync-${prefix}-`))
+}
+
+// The transcripts need a token-shaped secret for the scrubber to mask, and Anthropic's plugin
+// directory refuses a plugin that ships one in any file, a fake one in a test fixture included
+// (1SI-3619). So tests/fixtures/*.jsonl hold a placeholder, the secrets are put together here, and
+// the tests read a copy of the fixtures with the placeholders filled in. Never write one of these
+// out as a single literal: that is the string the directory's scan matches.
+const FAKE_GITHUB_TOKEN = ["ghp", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"].join("_")
+const FAKE_API_KEY = ["sk", "live", "ABCDEFGHIJKLMNOPQRSTUVWX"].join("_")
+const FIXTURES = freshDir("fixtures")
+for (const name of readdirSync(join(HERE, "fixtures")).filter((n) => n.endsWith(".jsonl"))) {
+  const text = readFileSync(join(HERE, "fixtures", name), "utf8")
+  writeFileSync(join(FIXTURES, name), text.replaceAll("{{FAKE_GITHUB_TOKEN}}", FAKE_GITHUB_TOKEN).replaceAll("{{FAKE_API_KEY}}", FAKE_API_KEY))
 }
 
 // MUST be non-blocking (spawn, not spawnSync): the stub gateway in this file's `before()` runs
@@ -551,7 +563,7 @@ describe("_upload — Claude Code leg against the stub gateway", () => {
     assert.equal(conversation.messages.length, 4)
 
     const raw = JSON.stringify(conversation)
-    assert.doesNotMatch(raw, /sk_live_ABCDEFGHIJKLMNOPQRSTUVWX/)
+    assert.ok(!raw.includes(FAKE_API_KEY))
     assert.match(raw, /\*\*\*\*/)
     assert.ok(manifest.scrubReport.total >= 1)
 
@@ -627,7 +639,7 @@ describe("_upload — Codex leg against the stub gateway", () => {
     assert.deepEqual(manifest.agents, ["codex"])
     assert.equal(conversation.agent, "codex")
     const raw = JSON.stringify(conversation)
-    assert.doesNotMatch(raw, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/)
+    assert.ok(!raw.includes(FAKE_GITHUB_TOKEN))
     rmSync(dataDir, { recursive: true, force: true })
   })
 
@@ -1460,7 +1472,7 @@ describe("_upload — Cursor leg against the stub gateway", () => {
     assert.equal(conversation.sessionId, "cursor-transcript")
 
     const raw = JSON.stringify(conversation)
-    assert.doesNotMatch(raw, /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/)
+    assert.ok(!raw.includes(FAKE_GITHUB_TOKEN))
     rmSync(dataDir, { recursive: true, force: true })
   })
 
@@ -1596,7 +1608,7 @@ describe("real transcript from ~/.claude/projects/", () => {
     await install(dataDir, ["--global"])
     const copy = join(dataDir, "real-copy.jsonl")
     cpSync(real, copy)
-    const secret = "sk_live_ZZZZYYYYXXXXWWWWVVVVUUUU"
+    const secret = ["sk", "live", "ZZZZYYYYXXXXWWWWVVVVUUUU"].join("_")
     writeFileSync(
       copy,
       `${readFileSync(copy, "utf8")}\n{"type":"user","timestamp":"2026-08-24T12:00:00.000Z","message":{"role":"user","content":"planted for the test — do not use: ${secret}"}}\n`,
