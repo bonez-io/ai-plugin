@@ -30,6 +30,7 @@
 // 198fa2cba90c) at bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install
 // needed. Do not hand-edit that file; re-vendor it verbatim when harness-ui's source changes.
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -40,11 +41,12 @@ import {
   renameSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { hostname, homedir, platform } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import { gzipSync } from "node:zlib"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -60,6 +62,7 @@ import {
   repoFor,
   walkFiles,
 } from "./vendor/agent-import.bundle.mjs"
+import { git, originRepo } from "./lib/git.mjs"
 
 const SELF_PATH = fileURLToPath(import.meta.url)
 
@@ -427,7 +430,7 @@ function readStdinSync() {
 async function cmdHook(agent, event) {
   if (disabledByEnv()) return
   if (agent !== "claude" && agent !== "codex" && agent !== "cursor") return
-  if (event !== "session-end" && event !== "session-start" && event !== "turn-end") return
+  if (event !== "session-end" && event !== "session-start" && event !== "turn-end" && event !== "tool-use") return
 
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) return // never installed, or explicitly disabled
@@ -441,6 +444,7 @@ async function cmdHook(agent, event) {
     return
   }
   if (!payload || typeof payload !== "object") return
+  if (event === "tool-use") return recordTouch(agent, payload)
 
   ensureDataDir()
   const payloadFile = join(dataDir(), `.pending-${agent}-${event}-${process.pid}-${Date.now()}.json`)
@@ -454,8 +458,18 @@ async function cmdHook(agent, event) {
   // is what lets the parent hook process report "done" immediately instead of the harness
   // waiting on a pipe the child still holds open. `unref()` on top keeps the child from
   // pinning the parent's event loop for the brief window before it exits.
+  if (!spawnWorker(["_upload", agent, event, payloadFile])) {
+    try {
+      unlinkSync(payloadFile)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function spawnWorker(args) {
   try {
-    const child = spawn(process.execPath, [SELF_PATH, "_upload", agent, event, payloadFile], {
+    const child = spawn(process.execPath, [SELF_PATH, ...args], {
       detached: true,
       stdio: "ignore",
       // On Windows `detached` means "own console", and without this the user gets a console
@@ -463,12 +477,9 @@ async function cmdHook(agent, event) {
       windowsHide: true,
     })
     child.unref()
+    return true
   } catch {
-    try {
-      unlinkSync(payloadFile)
-    } catch {
-      /* ignore */
-    }
+    return false
   }
 }
 
@@ -1064,14 +1075,24 @@ function sessionIdFromTranscriptPath(p) {
   return leaf.replace(/\.jsonl$/, "") || p
 }
 
+// The capture scope: `global`, or the local repository directories given to `login`/`install`.
+// A directory is in scope when it is one of those directories or inside one (the parsers' rule).
+function captureScope(cfg) {
+  const scope = cfg.scope === "global" ? "global" : "repo"
+  return { scope, repos: scope === "repo" ? normalizeRepos(cfg.repos ?? []) : [] }
+}
+function inCaptureScope(cfg, dir) {
+  const { scope, repos } = captureScope(cfg)
+  return scope === "global" || Boolean(repoFor(dir, repos))
+}
+
 async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   if (!transcriptPath || !existsSync(transcriptPath)) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — transcript not found (${transcriptPath ?? "unresolved"})`)
     return
   }
 
-  const scope = cfg.scope === "global" ? "global" : "repo"
-  const repos = scope === "repo" ? normalizeRepos(cfg.repos ?? []) : []
+  const { scope, repos } = captureScope(cfg)
   const scrubber = new Scrubber()
   // Cursor's records carry no cwd of their own, so the workspace root arrives from the hook
   // payload instead and has to be threaded in — hence the separate call rather than one
@@ -1181,6 +1202,7 @@ async function cmdUpload(agent, event, payloadFile) {
 
   if (agent === "cursor" && event === "session-start") {
     const root = workspaceRootFrom(payload)
+    await announceSession(agent, cfg, payload, root)
     // loadState() is re-read inside uploadOne per conversation, so the list is computed once
     // here against a consistent snapshot and each upload then re-checks under its own read.
     const targets = findCursorCatchupTargets(payload.conversation_id ?? payload.session_id ?? "", root, loadState())
@@ -1211,6 +1233,7 @@ async function cmdUpload(agent, event, payloadFile) {
     // Claude Code's SessionStart payload carries `cwd`; workspaceRootFrom reads Cursor's
     // `workspace_roots` shape, so it is the fallback here rather than the other way round.
     const root = typeof payload.cwd === "string" && payload.cwd ? payload.cwd : workspaceRootFrom(payload)
+    await announceSession(agent, cfg, payload, root)
     const targets = findClaudeCatchupTargets(payload.session_id ?? "", root, loadState())
     if (!targets.length) {
       await log("upload: claude session-start — nothing stale in this workspace")
@@ -1236,9 +1259,7 @@ async function cmdUpload(agent, event, payloadFile) {
   // is filed under `conversation_id` — "Stable ID of the conversation across many turns" — and
   // the two are not documented to be equal, so the conversation id leads on that leg. It is
   // also the better dedup key regardless: it is what survives a resume.
-  const sessionId =
-    (agent === "cursor" && typeof payload.conversation_id === "string" ? payload.conversation_id : undefined) ??
-    payload.session_id
+  const sessionId = hostSessionId(agent, payload)
   if (!sessionId || typeof sessionId !== "string") {
     await log(`upload: ${agent} ${event} skipped — payload has no session_id`)
     return
@@ -1279,6 +1300,191 @@ function workspaceRootFrom(payload) {
     if (typeof v === "string" && v) return v.replace(/^file:\/\//, "")
   }
   return process.env.CURSOR_PROJECT_DIR || undefined
+}
+
+// -------------------------------------------------------------------------------- live session
+//
+// While capture is on and the session's repository is in the capture scope, the gateway is told
+// that the session is running and which of the repository's files it reads and edits, so
+// teammates see it live (1SI-3763). What is sent: the host's session id, the repository as
+// `owner/name`, the surface, and repository-relative file paths. Never content, a prompt, a
+// command, a title or a laptop path. There is no end call: the transcript upload ends it.
+//
+// Claude Code and Cursor only. Codex's transcript id (the rollout file stem) is not its hook
+// session id, so an announced Codex session would never meet its own upload.
+//
+// Files under <data>/presence/, per host session id:
+//   <id>.json    written by the start worker: {repo, root} once announced, {refused} after a
+//                403/409. No file = not announced = the tool hook sends nothing.
+//   <id>.ndjson  the tool hook's spool of touches.
+//   <id>.lock    a drain worker is running. The tool hook spawns one only when it takes this, so
+//                a burst of tool calls costs one background process, not one per call.
+// ponytail: presence files are never pruned; a few bytes per session. Sweep them if that grows.
+
+// The gateway's own rule for the x-bonez-session header. Also keeps the id safe as a file name.
+const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
+const PRESENCE_TOOLS = { Read: "read", Write: "write", Edit: "edit", MultiEdit: "edit" }
+const PRESENCE_BATCH_MS = 1_000
+const PRESENCE_LOCK_STALE_MS = 60_000
+const MAX_EVENTS_PER_CALL = 200 // the gateway's MAX_EVENTS
+const presencePath = (id, ext) => join(dataDir(), "presence", `${id}.${ext}`)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// Claude Code and Codex key on `session_id`; Cursor files its transcript under `conversation_id`.
+function hostSessionId(agent, payload) {
+  return (agent === "cursor" && typeof payload.conversation_id === "string" ? payload.conversation_id : undefined) ??
+    payload.session_id
+}
+
+function writePresence(id, value) {
+  mkdirSync(join(dataDir(), "presence"), { recursive: true, mode: 0o700 })
+  writeJsonAtomic(presencePath(id, "json"), value, 0o600)
+}
+
+async function sessionsCall(cfg, gatewayUrl, id, route, body) {
+  try {
+    const bearer = await resolveBearer(cfg, gatewayUrl)
+    const res = await fetch(`${gatewayUrl}/graph/sessions/${route}`, {
+      method: "POST",
+      headers: httpHeaders(bearer, { "content-type": "application/json", "x-bonez-session": id }),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    })
+    return { ok: res.ok, status: res.status }
+  } catch (err) {
+    return { ok: false, status: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// Runs in the session-start worker, never in the hook.
+async function announceSession(agent, cfg, payload, cwd) {
+  if (agent !== "claude" && agent !== "cursor") return
+  const id = hostSessionId(agent, payload)
+  if (typeof id !== "string" || !SESSION_ID_RE.test(id) || !cwd || !inCaptureScope(cfg, cwd)) return
+  if (existsSync(presencePath(id, "json"))) return // announced before (a resume), or refused
+  const gatewayUrl = gatewayBaseUrl()
+  if (!captureGatewayAllowed(gatewayUrl)) return
+  let root
+  let repo
+  try {
+    root = realpathSync.native(git(cwd, "rev-parse", "--show-toplevel"))
+    repo = originRepo(cwd)
+  } catch {
+    return // not a Git checkout
+  }
+  if (!repo) return
+  for (let attempt = 1; ; attempt++) {
+    const res = await sessionsCall(cfg, gatewayUrl, id, "start", { surface: wireAgentFor(agent), repo })
+    if (res.status === 503 && attempt < 3) {
+      await sleep(2_000)
+      continue
+    }
+    // 403: a gateway without this route. 409: an id this credential cannot use. Neither retries.
+    if (res.ok) writePresence(id, { repo, root })
+    else if (res.status === 403 || res.status === 409) writePresence(id, { refused: res.status })
+    await log(`presence: start session=${id} agent=${agent} ${res.ok ? "OK" : `failed — HTTP ${res.status}`}`)
+    return
+  }
+}
+
+// The tool hook's whole job: local reads, one append, at most one spawn. No Git, no network.
+function recordTouch(agent, payload) {
+  if (agent !== "claude" && agent !== "cursor") return
+  const tool = PRESENCE_TOOLS[payload.tool_name]
+  const id = hostSessionId(agent, payload)
+  if (!tool || typeof id !== "string" || !SESSION_ID_RE.test(id)) return
+  const announced = readJsonSafe(presencePath(id, "json"), null)
+  if (typeof announced?.repo !== "string" || typeof announced.root !== "string") return
+  const given = payload.tool_input?.file_path ?? payload.tool_input?.path
+  const base = (typeof payload.cwd === "string" && payload.cwd) || workspaceRootFrom(payload)
+  if (typeof given !== "string" || !given || (!isAbsolute(given) && !base)) return
+  let file = resolve(base || "", given)
+  try {
+    file = realpathSync.native(file)
+  } catch {
+    /* a file deleted since keeps the path it was given */
+  }
+  const rel = relative(announced.root, file)
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || /[\x00-\x1f\x7f]/.test(rel)) return
+  const path = `${announced.repo}/${rel.split(sep).join("/")}`
+  appendFileSync(presencePath(id, "ndjson"), `${JSON.stringify({ tool, args: { path }, at: new Date().toISOString() })}\n`, { mode: 0o600 })
+  if (takePresenceLock(id)) spawnWorker(["_presence", id])
+}
+
+function takePresenceLock(id) {
+  const lock = presencePath(id, "lock")
+  for (let i = 0; i < 2; i++) {
+    try {
+      closeSync(openSync(lock, "wx"))
+      return true
+    } catch {
+      // A crashed drain worker must not stop the session's touches for good.
+      try {
+        if (Date.now() - statSync(lock).mtimeMs < PRESENCE_LOCK_STALE_MS) return false
+        unlinkSync(lock)
+      } catch {
+        /* gone already: try again */
+      }
+    }
+  }
+  return false
+}
+
+// The drain worker: waits a moment so a burst lands in one call, sends the spool, repeats while
+// touches keep coming, then releases the lock. A touch appended between the last drain and the
+// release is picked up by re-taking the lock rather than waiting for the next tool call.
+async function cmdPresence(id) {
+  if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return
+  const lock = presencePath(id, "lock")
+  do {
+    while (await drainPresence(id)) {
+      try {
+        utimesSync(lock, new Date(), new Date())
+      } catch {
+        /* lock gone: the loop ends with the next empty drain */
+      }
+    }
+    try {
+      unlinkSync(lock)
+    } catch {
+      /* already gone */
+    }
+  } while (existsSync(presencePath(id, "ndjson")) && takePresenceLock(id))
+}
+
+async function drainPresence(id) {
+  await sleep(PRESENCE_BATCH_MS)
+  const spool = presencePath(id, "ndjson")
+  const sending = `${spool}.sending-${process.pid}`
+  try {
+    renameSync(spool, sending)
+  } catch {
+    return false // nothing spooled
+  }
+  let events
+  try {
+    events = readFileSync(sending, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+  } catch {
+    events = []
+  }
+  try {
+    unlinkSync(sending)
+  } catch {
+    /* ignore */
+  }
+  const cfg = loadConfig()
+  const announced = readJsonSafe(presencePath(id, "json"), null)
+  if (disabledByEnv() || !cfg?.enabled || !hasCredential(cfg) || !announced?.repo) return true
+  const gatewayUrl = gatewayBaseUrl()
+  if (!captureGatewayAllowed(gatewayUrl)) return true
+  for (let i = 0; i < events.length; i += MAX_EVENTS_PER_CALL) {
+    const res = await sessionsCall(cfg, gatewayUrl, id, "events", { events: events.slice(i, i + MAX_EVENTS_PER_CALL) })
+    if (res.ok) continue
+    if (res.status === 403) writePresence(id, { refused: 403 })
+    await log(`presence: events session=${id} failed — HTTP ${res.status}`)
+    break
+  }
+  return true
 }
 
 // -------------------------------------------------------------------------------- human-facing commands
@@ -1564,6 +1770,14 @@ async function main() {
       }
       process.exit(0)
       break
+    case "_presence":
+      try {
+        await cmdPresence(rest[0])
+      } catch (err) {
+        await log(`presence: uncaught error: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      process.exit(0)
+      break
     case "login":
       await cmdLogin(rest)
       return
@@ -1622,7 +1836,9 @@ const isMain = (() => {
 if (isMain) await main()
 
 export {
+  announceSession,
   buildBundle,
+  inCaptureScope,
   cmdHook,
   cursorTitleFrom,
   describeCredential,

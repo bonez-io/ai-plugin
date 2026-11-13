@@ -1,20 +1,16 @@
 // Hooks run before the host's OAuth MCP connection is necessarily ready. Hand the lookup
 // to the agent on that connection. This command handles no network access or credentials.
 import { readFileSync } from "node:fs"
-import { execFileSync } from "node:child_process"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { git, originRepo } from "./lib/git.mjs"
 
 function fileRef(event) {
   const path = event.tool_input?.file_path ?? event.tool_input?.path
   if (typeof path !== "string" || !path || (!isAbsolute(path) && !event.cwd)) return
   const file = resolve(event.cwd || ".", path)
-  const git = (...args) => execFileSync("git", ["-C", dirname(file), ...args], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 600, maxBuffer: 8192,
-  }).trim()
   try {
-    const suffix = git("rev-parse", "--show-prefix") + basename(file)
-    const origin = git("config", "--get", "remote.origin.url").replace(/\/$/, "").replace(/\.git$/, "")
-    const repo = /^(?:https:\/\/|ssh:\/\/git@|git@)[a-zA-Z0-9.-]+[:/]([\w.-]+(?:\/[\w.-]+)+)$/.exec(origin)?.[1]
+    const suffix = git(dirname(file), "rev-parse", "--show-prefix") + basename(file)
+    const repo = originRepo(dirname(file))
     if (repo && suffix && !suffix.startsWith("../") && !/[\x00-\x1f\x7f]/.test(suffix)) return repo + "/" + suffix
   } catch {
     // A scratch file or unavailable Git cannot supply a verified graph ref.

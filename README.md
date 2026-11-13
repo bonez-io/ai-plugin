@@ -546,6 +546,25 @@ location outright.
   `CURSOR_TRANSCRIPT_PATH` and then to a walk of `~/.cursor/projects/*/agent-transcripts/`, but
   if Cursor has written nothing there is nothing to capture and the hook is a silent no-op.
 
+**Live sessions (Claude Code and Cursor).** While capture is on, and only for a session whose
+repository is inside your capture scope, the plugin also tells Bonez that the session is running,
+so teammates can see "working here now, edited `src/x.py`". It sends:
+
+- when the session starts: the session's id, the repository's name as `owner/name` (from the Git
+  origin), and which tool it is (`claude-code` or `cursor`);
+- after a Read, Edit or Write: whether the file was read or changed, its path **inside the
+  repository** (`owner/name/src/x.py`), and the time.
+
+Nothing else: no file content, no prompt, no command line, no title, no path on your laptop. A
+file outside the repository sends nothing. Teammates see the files you changed; a file you only
+read just keeps the session marked as working and is never shown. There is no end message: the
+session leaves teammates' lists when its transcript upload is imported, or after 30 quiet
+minutes. Capture off (`disable`, `logout`, `BONEZ_SESSION_SYNC=0`) or a repository out of scope
+sends nothing at all. The hooks only write a line to a local file; a background process sends it,
+and a failure is one line in `sync.log`. A Bonez server without this feature refuses the first
+call, and the plugin stops trying for that session. Codex is not announced: its transcript id is
+not its hook's session id, so the announcement would never meet its own upload.
+
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
 
 **Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Simple questions can finish without a seed read. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its graph ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.

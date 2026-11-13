@@ -12,7 +12,7 @@
 // Run: node --test tests/session_sync.test.mjs   (or ./tests/test_session_sync.sh)
 import { test, describe, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync, cpSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
@@ -1768,4 +1768,120 @@ test("an empty host data directory uses the configured shared store, while a hos
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------- live session (1SI-3763)
+
+describe("live session: start once, then repository-relative reads and edits", () => {
+  // A Git checkout whose origin is acme/api, with two files in it and one file outside it.
+  const makeRepo = () => {
+    const repo = freshDir("live-repo")
+    for (const args of [["init", "-q"], ["remote", "add", "origin", "https://github.com/acme/api.git"]]) {
+      assert.equal(spawnSync("git", args, { cwd: repo }).status, 0)
+    }
+    mkdirSync(join(repo, "src"))
+    writeFileSync(join(repo, "src", "a.py"), "a = 1\n")
+    writeFileSync(join(repo, "src", "b.py"), "b = 1\n")
+    const outside = join(freshDir("live-outside"), "notes.txt")
+    writeFileSync(outside, "private\n")
+    return { repo, outside }
+  }
+  const forId = (route, id) => gateway.calls[route].filter((c) => c.headers["x-bonez-session"] === id)
+  const logOf = (dataDir) => (existsSync(join(dataDir, "sync.log")) ? readFileSync(join(dataDir, "sync.log"), "utf8") : "")
+  const hook = (dataDir, agent, event, payload) =>
+    runCli(["hook", agent, event], { env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url }, input: JSON.stringify(payload) })
+  // The start worker has finished once its catch-up line is logged (announce runs before it).
+  const started = (dataDir, agent) => waitFor(() => logOf(dataDir).includes(`upload: ${agent} session-start`))
+  // The drain worker has finished once its lock is gone and nothing is left spooled.
+  const drained = (dataDir, id) => waitFor(() => !existsSync(join(dataDir, "presence", `${id}.lock`)) &&
+    !existsSync(join(dataDir, "presence", `${id}.ndjson`)))
+
+  test("claude: one start with the header, the repository and no title; a read and an edit; nothing for a file outside", async () => {
+    const { repo, outside } = makeRepo()
+    const dataDir = freshDir("live-claude")
+    await install(dataDir, ["--repo", repo])
+    const id = "live-claude-1"
+    const start = { hook_event_name: "SessionStart", session_id: id, cwd: repo, source: "startup" }
+    await hook(dataDir, "claude", "session-start", start)
+    await started(dataDir, "claude")
+    await hook(dataDir, "claude", "session-start", { ...start, source: "resume" })
+    await waitFor(() => logOf(dataDir).split("upload: claude session-start").length === 3)
+
+    const starts = forId("start", id)
+    assert.equal(starts.length, 1)
+    assert.deepEqual(starts[0].body, { surface: "claude-code", repo: "acme/api" })
+    assert.equal(starts[0].headers.authorization, `Bearer ${TEST_KEY}`)
+
+    const touch = (tool_name, file_path) =>
+      hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name, tool_input: { file_path, content: "SECRET" } })
+    for (const [tool, file] of [["Read", join(repo, "src", "a.py")], ["Edit", "src/b.py"], ["Read", outside]]) {
+      const res = await touch(tool, file)
+      assert.equal(res.status, 0)
+      assert.equal(res.stdout, "")
+      assert.equal(res.stderr, "")
+      assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    }
+    await waitFor(() => forId("events", id).length)
+    await drained(dataDir, id)
+    const events = forId("events", id).flatMap((c) => c.body.events)
+    assert.deepEqual(events.map((e) => [e.tool, e.args]), [["read", { path: "acme/api/src/a.py" }], ["edit", { path: "acme/api/src/b.py" }]])
+    assert.ok(events.every((e) => !Number.isNaN(Date.parse(e.at))))
+    assert.doesNotMatch(JSON.stringify(forId("events", id)), /SECRET|private|notes\.txt/)
+  })
+
+  test("cursor: start with surface cursor and the conversation id; a relative edit resolves against the workspace", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-cursor")
+    await install(dataDir, ["--global"])
+    const id = "live-cursor-convo"
+    await hook(dataDir, "cursor", "session-start", { hook_event_name: "sessionStart", conversation_id: id, session_id: "other", workspace_roots: [repo] })
+    await started(dataDir, "cursor")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "cursor", repo: "acme/api" }])
+    await hook(dataDir, "cursor", "tool-use", { hook_event_name: "postToolUse", conversation_id: id, workspace_roots: [repo], tool_name: "Write", tool_input: { file_path: "src/a.py" } })
+    await waitFor(() => forId("events", id).length)
+    assert.deepEqual(forId("events", id)[0].body.events.map((e) => [e.tool, e.args.path]), [["write", "acme/api/src/a.py"]])
+  })
+
+  test("capture off, or the repository out of scope: nothing is sent", async () => {
+    const { repo } = makeRepo()
+    const off = freshDir("live-off")
+    await install(off, ["--global"])
+    assert.equal((await runCli(["disable"], { env: { CLAUDE_PLUGIN_DATA: off } })).status, 0)
+    const elsewhere = freshDir("live-scope")
+    await install(elsewhere, ["--repo", freshDir("live-other-repo")])
+
+    for (const [dataDir, id] of [[off, "live-off-1"], [elsewhere, "live-scope-1"]]) {
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } })
+    }
+    await started(elsewhere, "claude") // the disabled install never spawns a worker at all
+    await new Promise((r) => setTimeout(r, 1500)) // longer than a drain's batch wait
+    for (const id of ["live-off-1", "live-scope-1"]) {
+      assert.equal(forId("start", id).length, 0, id)
+      assert.equal(forId("events", id).length, 0, id)
+    }
+    assert.ok(!existsSync(join(off, "presence")) && !existsSync(join(elsewhere, "presence")))
+  })
+
+  test("a 403 on start (an older gateway) stops every further call for that session", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-403")
+    await install(dataDir, ["--global"])
+    const id = "live-403-1"
+    gateway.answers.start = 403
+    try {
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await started(dataDir, "claude")
+    } finally {
+      gateway.answers.start = 200
+    }
+    assert.equal(forId("start", id).length, 1)
+    assert.match(logOf(dataDir), /presence: start session=live-403-1 agent=claude failed — HTTP 403/)
+    await hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Read", tool_input: { file_path: join(repo, "src", "a.py") } })
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo, source: "resume" })
+    await waitFor(() => logOf(dataDir).split("upload: claude session-start").length === 3)
+    await new Promise((r) => setTimeout(r, 1500))
+    assert.equal(forId("start", id).length, 1)
+    assert.equal(forId("events", id).length, 0)
+  })
 })
