@@ -1,5 +1,5 @@
 {
-  "description": "Permission gate for bonez writes (prompts before the bonez MCP `graph_write` tool runs any op, and before `rules` save/update/delete \u2014 reads pass through untouched), plus opt-in session capture: at SessionEnd it hands the transcript to bonez-session-sync.mjs, and at SessionStart it flushes any session in this workspace whose SessionEnd never fired (a crash, a kill, or the plugin having been disabled). Both are a silent no-op until `login` (or, headless, `install`) has been run (see README \u2014 Session capture).",
+  "description": "Permission gate for bonez writes (prompts before the bonez MCP `graph_write` tool runs any op, and before `rules` save/update/delete \u2014 reads pass through untouched), plus opt-in session capture: at SessionEnd it hands the transcript to bonez-session-sync.mjs; at SessionStart it flushes any session in this workspace whose SessionEnd never fired (a crash, a kill, or the plugin having been disabled) and announces the session to Bonez, and after Read/Edit/Write it records the repository-relative path of the file touched (README \u2014 Live sessions). Both are a silent no-op until `login` (or, headless, `install`) has been run (see README \u2014 Session capture).",
   "hooks": {
     "PreToolUse": [
       {
@@ -49,6 +49,11 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-session-sync.mjs\" hook claude tool-use",
             "timeout": 5
           }
         ]

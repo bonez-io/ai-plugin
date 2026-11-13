@@ -34,6 +34,11 @@
         "matcher": "^(Read|Write|Edit)$",
         "command": "bash ./hooks/session-sync.sh recall",
         "timeout": 5
+      },
+      {
+        "matcher": "^(Read|Write|Edit)$",
+        "command": "bash ./hooks/session-sync.sh tool-use",
+        "timeout": 5
       }
     ]
   }
