@@ -13,7 +13,7 @@
 import { test, describe, before, after } from "node:test"
 import assert from "node:assert/strict"
 import { spawn, spawnSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync, cpSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync, cpSync, rmSync, existsSync, symlinkSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -1774,9 +1774,9 @@ test("an empty host data directory uses the configured shared store, while a hos
 
 describe("live session: start once, then repository-relative reads and edits", () => {
   // A Git checkout whose origin is acme/api, with two files in it and one file outside it.
-  const makeRepo = () => {
+  const makeRepo = (origin = "https://github.com/acme/api.git") => {
     const repo = freshDir("live-repo")
-    for (const args of [["init", "-q"], ["remote", "add", "origin", "https://github.com/acme/api.git"]]) {
+    for (const args of [["init", "-q"], ["remote", "add", "origin", origin]]) {
       assert.equal(spawnSync("git", args, { cwd: repo }).status, 0)
     }
     mkdirSync(join(repo, "src"))
@@ -1814,7 +1814,9 @@ describe("live session: start once, then repository-relative reads and edits", (
 
     const touch = (tool_name, file_path) =>
       hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name, tool_input: { file_path, content: "SECRET" } })
-    for (const [tool, file] of [["Read", join(repo, "src", "a.py")], ["Edit", "src/b.py"], ["Read", outside]]) {
+    symlinkSync(outside, join(repo, "src", "link.txt"))
+    const escapes = [["Read", outside], ["Read", join(repo, "src", "link.txt")], ["Edit", "src/../../escape.py"], ["Read", join(repo, "..", "x.py")]]
+    for (const [tool, file] of [["Read", join(repo, "src", "a.py")], ["Edit", "src/b.py"], ...escapes]) {
       const res = await touch(tool, file)
       assert.equal(res.status, 0)
       assert.equal(res.stdout, "")
@@ -1883,5 +1885,150 @@ describe("live session: start once, then repository-relative reads and edits", (
     await new Promise((r) => setTimeout(r, 1500))
     assert.equal(forId("start", id).length, 1)
     assert.equal(forId("events", id).length, 0)
+  })
+
+  const recall = (dataDir, host, payload) => {
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, "bin", "bonez-recall-hook.mjs"), host], {
+      encoding: "utf8", input: JSON.stringify(payload),
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+    })
+    assert.equal(r.status, 0, r.stderr)
+    const out = JSON.parse(r.stdout)
+    return host === "cursor" ? out.additional_context : out.hookSpecificOutput.additionalContext
+  }
+
+  test("recall text names the session only once its start succeeded; otherwise it is unchanged", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-recall")
+    await install(dataDir, ["--global"])
+    const cases = [
+      ["claude", { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }],
+      ["claude", { hook_event_name: "PostToolUse", session_id: "live-recall-1", cwd: repo, tool_name: "Read", tool_input: { file_path: join(repo, "src", "a.py") } }],
+      ["cursor", { hook_event_name: "postToolUse", conversation_id: "live-recall-1", workspace_roots: [repo], tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } }],
+    ]
+    const before = cases.map(([host, payload]) => recall(dataDir, host, payload))
+    for (const text of before) assert.doesNotMatch(text, /live-recall-1|"session"/)
+    gateway.answers.start = 403
+    try {
+      await hook(dataDir, "claude", "session-start", cases[0][1])
+      await started(dataDir, "claude")
+    } finally {
+      gateway.answers.start = 200
+    }
+    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before, "a refused start keeps the text")
+
+    rmSync(join(dataDir, "presence"), { recursive: true, force: true })
+    await hook(dataDir, "claude", "session-start", { ...cases[0][1], source: "resume" })
+    await waitFor(() => existsSync(join(dataDir, "presence", "live-recall-1.json")))
+    const note = ' This session\'s id is "live-recall-1". Pass "session": "live-recall-1" to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.'
+    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => t + note))
+    // Codex is never announced, so its text never changes.
+    const codex = { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }
+    assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
+  })
+
+  test("a 404 or 409 on events refuses the session: one failed call, not one per burst", async () => {
+    for (const status of [404, 409]) {
+      const { repo } = makeRepo()
+      const dataDir = freshDir(`live-${status}`)
+      await install(dataDir, ["--global"])
+      const id = `live-events-${status}`
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await started(dataDir, "claude")
+      gateway.answers.events = status
+      try {
+        const touch = () => hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } })
+        await touch()
+        await waitFor(() => forId("events", id).length)
+        await drained(dataDir, id)
+        await touch()
+        await new Promise((r) => setTimeout(r, 1500))
+      } finally {
+        gateway.answers.events = 200
+      }
+      assert.equal(forId("events", id).length, 1, String(status))
+      assert.deepEqual(JSON.parse(readFileSync(join(dataDir, "presence", `${id}.json`), "utf8")), { refused: status })
+    }
+  })
+
+  test("origin: an ssh URL with a port gives owner/name; a URL with credentials announces nothing", async () => {
+    const dataDir = freshDir("live-origin")
+    await install(dataDir, ["--global"])
+    for (const [origin, id, want] of [
+      ["ssh://git@git.example.com:2222/acme/api.git", "live-origin-port", [{ surface: "claude-code", repo: "acme/api" }]],
+      ["https://github.com:8443/acme/api.git", "live-origin-https-port", [{ surface: "claude-code", repo: "acme/api" }]],
+      ["https://someone:tok@github.com/acme/api.git", "live-origin-creds", []],
+    ]) {
+      const { repo } = makeRepo(origin)
+      const lines = logOf(dataDir).split("upload: claude session-start").length
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await waitFor(() => logOf(dataDir).split("upload: claude session-start").length > lines)
+      assert.deepEqual(forId("start", id).map((c) => c.body), want, origin)
+    }
+  })
+
+  test("a gateway Bonez does not operate gets neither call", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-foreign")
+    await install(dataDir, ["--global"])
+    const fetchLog = join(dataDir, "fetch.log")
+    writeFileSync(fetchLog, "")
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: "https://bonez.example.com",
+      NODE_OPTIONS: `--import=${join(HERE, "lib", "record-fetch.mjs")}`, BONEZ_TEST_FETCH_LOG: fetchLog,
+    }
+    const id = "live-foreign-1"
+    await runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: id, cwd: repo }) })
+    await started(dataDir, "claude")
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    // An announced session whose gateway setting then changes: the drain worker refuses too.
+    mkdirSync(join(dataDir, "presence"), { recursive: true })
+    writeFileSync(join(dataDir, "presence", `${id}.json`), JSON.stringify({ repo: "acme/api", root: realpathSync(repo) }))
+    await runCli(["hook", "claude", "tool-use"], { env, input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } }) })
+    await drained(dataDir, id)
+    assert.equal(readFileSync(fetchLog, "utf8"), "")
+  })
+
+  test("the drain lock: one holder at a time, a stale one is taken over, two workers at once send each touch once", async () => {
+    const dataDir = freshDir("live-lock")
+    mkdirSync(join(dataDir, "presence"), { recursive: true })
+    const probe = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { utimesSync } from "node:fs"
+      const { takePresenceLock } = await import(${JSON.stringify(SCRIPT)})
+      const a = takePresenceLock("lk"), b = takePresenceLock("lk")
+      const old = new Date(Date.now() - 120_000)
+      utimesSync(${JSON.stringify(join(dataDir, "presence", "lk.lock"))}, old, old)
+      console.log(JSON.stringify([a, b, takePresenceLock("lk")]))`], {
+      encoding: "utf8", env: { ...process.env, HOME: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+    })
+    assert.deepEqual(JSON.parse(probe.stdout), [true, false, true], probe.stderr)
+
+    await install(dataDir, ["--global"])
+    const id = "live-lock-2"
+    writeFileSync(join(dataDir, "presence", `${id}.json`), JSON.stringify({ repo: "acme/api", root: "/nowhere" }))
+    const at = new Date().toISOString()
+    writeFileSync(join(dataDir, "presence", `${id}.ndjson`),
+      ["a", "b", "c"].map((f) => JSON.stringify({ tool: "edit", args: { path: `acme/api/${f}.py` }, at })).join("\n") + "\n")
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url }
+    await Promise.all([runCli(["_presence", id], { env }), runCli(["_presence", id], { env })])
+    assert.deepEqual(forId("events", id).flatMap((c) => c.body.events.map((e) => e.args.path)).sort(),
+      ["acme/api/a.py", "acme/api/b.py", "acme/api/c.py"])
+  })
+
+  test("session end forgets the session; session start sweeps presence files older than three days", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-end")
+    await install(dataDir, ["--global"])
+    const id = "live-end-1"
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+    await waitFor(() => existsSync(join(dataDir, "presence", `${id}.json`)))
+    const old = join(dataDir, "presence", "crashed-long-ago.json")
+    writeFileSync(old, "{}")
+    utimesSync(old, new Date(Date.now() - 4 * 86_400_000), new Date(Date.now() - 4 * 86_400_000))
+    await hook(dataDir, "claude", "session-end", { hook_event_name: "SessionEnd", session_id: id, cwd: repo, transcript_path: join(FIXTURES, "claude-transcript.jsonl") })
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: "live-end-2", cwd: repo })
+    await waitFor(() => existsSync(join(dataDir, "presence", "live-end-2.json")))
+    assert.ok(!existsSync(old))
   })
 })

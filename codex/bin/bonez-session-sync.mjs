@@ -465,6 +465,9 @@ async function cmdHook(agent, event) {
       /* ignore */
     }
   }
+  // The upload ends the session for teammates; its presence is no longer needed.
+  const id = hostSessionId(agent, payload)
+  if (event === "session-end" && typeof id === "string" && SESSION_ID_RE.test(id)) forgetPresence(id)
 }
 
 function spawnWorker(args) {
@@ -1315,11 +1318,12 @@ function workspaceRootFrom(payload) {
 //
 // Files under <data>/presence/, per host session id:
 //   <id>.json    written by the start worker: {repo, root} once announced, {refused} after a
-//                403/409. No file = not announced = the tool hook sends nothing.
+//                403/409 on start or a 403/404/409 on events. No file or refused = the tool hook
+//                sends nothing, and the recall hook does not name the session.
 //   <id>.ndjson  the tool hook's spool of touches.
 //   <id>.lock    a drain worker is running. The tool hook spawns one only when it takes this, so
 //                a burst of tool calls costs one background process, not one per call.
-// ponytail: presence files are never pruned; a few bytes per session. Sweep them if that grows.
+// A session's files go at its end; a session start sweeps any older than three days.
 
 // The gateway's own rule for the x-bonez-session header. Also keeps the id safe as a file name.
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
@@ -1334,6 +1338,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 function hostSessionId(agent, payload) {
   return (agent === "cursor" && typeof payload.conversation_id === "string" ? payload.conversation_id : undefined) ??
     payload.session_id
+}
+
+// The host session id, when capture's start succeeded for it (the recall hook names it to the model).
+function announcedSessionId(agent, payload) {
+  const id = hostSessionId(agent, payload)
+  if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return undefined
+  return typeof readJsonSafe(presencePath(id, "json"), null)?.repo === "string" ? id : undefined
+}
+
+// Forget the session's presence at its end, and sweep what crashed sessions left behind.
+function forgetPresence(id) {
+  for (const ext of ["json", "ndjson", "lock"]) {
+    try {
+      unlinkSync(presencePath(id, ext))
+    } catch {
+      /* not there */
+    }
+  }
+}
+const PRESENCE_MAX_AGE_MS = 3 * 24 * 3600_000
+function prunePresence() {
+  try {
+    const dir = join(dataDir(), "presence")
+    for (const name of readdirSync(dir)) {
+      const file = join(dir, name)
+      if (Date.now() - statSync(file).mtimeMs > PRESENCE_MAX_AGE_MS) unlinkSync(file)
+    }
+  } catch {
+    /* no presence yet */
+  }
 }
 
 function writePresence(id, value) {
@@ -1360,6 +1394,7 @@ async function sessionsCall(cfg, gatewayUrl, id, route, body) {
 async function announceSession(agent, cfg, payload, cwd) {
   if (agent !== "claude" && agent !== "cursor") return
   const id = hostSessionId(agent, payload)
+  prunePresence()
   if (typeof id !== "string" || !SESSION_ID_RE.test(id) || !cwd || !inCaptureScope(cfg, cwd)) return
   if (existsSync(presencePath(id, "json"))) return // announced before (a resume), or refused
   const gatewayUrl = gatewayBaseUrl()
@@ -1480,7 +1515,8 @@ async function drainPresence(id) {
   for (let i = 0; i < events.length; i += MAX_EVENTS_PER_CALL) {
     const res = await sessionsCall(cfg, gatewayUrl, id, "events", { events: events.slice(i, i + MAX_EVENTS_PER_CALL) })
     if (res.ok) continue
-    if (res.status === 403) writePresence(id, { refused: 403 })
+    // 403: a gateway without the route. 404/409: a session this credential cannot write to.
+    if ([403, 404, 409].includes(res.status)) writePresence(id, { refused: res.status })
     await log(`presence: events session=${id} failed — HTTP ${res.status}`)
     break
   }
@@ -1837,6 +1873,8 @@ if (isMain) await main()
 
 export {
   announceSession,
+  announcedSessionId,
+  takePresenceLock,
   buildBundle,
   inCaptureScope,
   cmdHook,

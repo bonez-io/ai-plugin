@@ -9,5 +9,6 @@ export const git = (dir, ...args) => execFileSync("git", ["-C", dir, ...args], {
 // `owner/name` (or `group/sub/name`) from the origin remote of the repository holding `dir`.
 export function originRepo(dir) {
   const origin = git(dir, "config", "--get", "remote.origin.url").replace(/\/$/, "").replace(/\.git$/, "")
-  return /^(?:https:\/\/|ssh:\/\/git@|git@)[a-zA-Z0-9.-]+[:/]([\w.-]+(?:\/[\w.-]+)+)$/.exec(origin)?.[1]
+  // https://host[:port]/o/n, ssh://git@host[:port]/o/n, or scp-style git@host:o/n. Credentials in the URL do not match.
+  return /^(?:(?:https:\/\/|ssh:\/\/git@)[a-zA-Z0-9.-]+(?::\d+)?\/|git@[a-zA-Z0-9.-]+:)([\w.-]+(?:\/[\w.-]+)+)$/.exec(origin)?.[1]
 }

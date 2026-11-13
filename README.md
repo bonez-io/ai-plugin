@@ -562,7 +562,12 @@ session leaves teammates' lists when its transcript upload is imported, or after
 minutes. Capture off (`disable`, `logout`, `BONEZ_SESSION_SYNC=0`) or a repository out of scope
 sends nothing at all. The hooks only write a line to a local file; a background process sends it,
 and a failure is one line in `sync.log`. A Bonez server without this feature refuses the first
-call, and the plugin stops trying for that session. Codex is not announced: its transcript id is
+call, and the plugin stops trying for that session. Once a session is announced, the recall hints
+the plugin gives the model name the session's id and ask it to pass it as `session` to
+`memory_recall`, so the session's own reads and edits are not shown back to it as someone else's
+work; before that, or when the server refused, the hints are unchanged. A session's local
+bookkeeping (under `presence/` beside the credential) is removed at its end, and anything older
+than three days is swept at the next start. Codex is not announced: its transcript id is
 not its hook's session id, so the announcement would never meet its own upload.
 
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
