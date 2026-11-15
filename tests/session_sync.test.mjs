@@ -67,7 +67,9 @@ function runCli(args, { env = {}, input = "" } = {}) {
     const t0 = performance.now()
     const child = spawn(process.execPath, [SCRIPT, ...args], {
       cwd: REPO_ROOT,
-      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, ...env },
+      // The catch-up's quiet period would hold back the transcripts these tests just wrote. The
+      // in-process check below runs with the real ten minutes.
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -1781,16 +1783,18 @@ describe("catch-up: never a sub-agent transcript, and newest first", () => {
     utimesSync(path, t, t)
   }
 
-  test("sub-agent transcripts are not candidates; the rest come newest first", async () => {
+  test("sub-agent and still-running transcripts are not candidates; the quiet ones come newest first", async () => {
     const mod = await import("../bin/bonez-session-sync.mjs")
     const root = freshDir("catchup-order")
     writeAt(join(root, "old.jsonl"), `${line(false, "old work")}\n`, 600)
-    writeAt(join(root, "new.jsonl"), `${line(false, "new work")}\n`, 5)
+    writeAt(join(root, "new.jsonl"), `${line(false, "new work")}\n`, 15)
+    // Written a minute ago: probably still running, so not a candidate yet.
+    writeAt(join(root, "live.jsonl"), `${line(false, "still running")}\n`, 1)
     writeAt(join(root, "middle.jsonl"), `${JSON.stringify({ type: "summary", summary: "s" })}\n${line(false, "middle")}\n`, 60)
     // Where Claude Code files a sub-agent's transcript, and what it marks on its lines.
-    writeAt(join(root, "new", "subagents", "agent-a1.jsonl"), `${line(true, "brief from the lead agent")}\n`, 1)
+    writeAt(join(root, "new", "subagents", "agent-a1.jsonl"), `${line(true, "brief from the lead agent")}\n`, 20)
     // The marker alone is enough, wherever the file is.
-    writeAt(join(root, "agent-b2.jsonl"), `${line(true, "brief from the lead agent")}\n`, 2)
+    writeAt(join(root, "agent-b2.jsonl"), `${line(true, "brief from the lead agent")}\n`, 25)
     // A message that merely quotes the key is not a sub-agent.
     writeAt(join(root, "quotes.jsonl"), `${line(false, 'it said "isSidechain":true')}\n`, 30)
 

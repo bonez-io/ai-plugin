@@ -88,6 +88,15 @@ const CURSOR_CATCHUP_MAX = 20
 // the start of a session feel like it stalled; `backfill` exists for real volume.
 const CLAUDE_CATCHUP_MAX = 5
 
+// A transcript written within this long is probably a session still running (people run several
+// at once in one workspace). It is not a catch-up or backfill candidate: its own SessionEnd sends
+// it, or a later start once it has gone quiet. Ten minutes: long enough that an active session
+// is not caught between turns, short enough that one left open but idle is captured the same
+// hour. Without it, newest-first would spend every start re-uploading the live sessions.
+// Overridable only so the test suite can flush transcripts it just wrote, as with the debounce.
+const _parsedQuietMs = Number.parseInt(process.env.BONEZ_SESSION_SYNC_QUIET_MS ?? "", 10)
+const CATCHUP_QUIET_MS = Number.isFinite(_parsedQuietMs) && _parsedQuietMs >= 0 ? _parsedQuietMs : 10 * 60_000
+
 // `backfill` is a human sweeping YEARS of local history, not a hook. It still runs in bounded
 // batches so it can be interrupted and resumed rather than becoming one unkillable upload
 // storm — each batch leaves sync-state consistent, so re-running continues where it stopped.
@@ -602,6 +611,7 @@ function staleTranscriptTargets(root, { excludeId, state, cap }) {
       // come back as often as it actually changes; uploadOne's own content-hash check then
       // drops the ones where the mtime moved but the content did not.
       if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      if (Date.now() - mtime < CATCHUP_QUIET_MS) return null // probably still running
       if (isSidechainTranscript(p)) return null // read only for the stale ones
       return { transcriptPath: p, sessionId: id, mtime }
     })

@@ -483,7 +483,8 @@ fires — a crash, a kill, or the plugin having been disabled for a while — th
 started in the same directory flushes what was stranded there, so an ordinary gap heals on its
 own. That per-workspace catch-up is deliberately capped, so it drains a session or two at a
 time rather than stalling the start of your work. It goes newest first, so current work arrives
-before old history. A sub-agent's transcript (under `<session>/subagents/`, its lines marked
+before old history, and skips a transcript written in the last 10 minutes: that session is
+probably still running, and its own end (or a later start) sends it. A sub-agent's transcript (under `<session>/subagents/`, its lines marked
 `isSidechain`) is part of its lead session and is never uploaded as a session of its own.
 
 It is not a way to import a year of history. For that, `backfill` sweeps every project
