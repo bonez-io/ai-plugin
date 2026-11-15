@@ -344,13 +344,13 @@ describe("suggesting-agents", () => {
 describe("creating-an-agent", () => {
   const text = skillText("skills", "creating-an-agent")
 
-  test("it checks tool_search for the operation, says the spec out loud and waits for a yes before it creates", () => {
-    assert.match(text, /`tool_search`[\s\S]*"vendor": "bonez"/)
+  test("it checks vendor_search for the operation, says the spec out loud and waits for a yes before it creates", () => {
+    assert.match(text, /`vendor_search`[\s\S]*"vendor": "bonez"/)
     assert.match(text, /only if the results show `bonez\.agent\.create\.v2`/, "an older server lacks the operation")
     assert.match(text, /wait for a yes/i)
     assert.ok(text.indexOf("## 2. Say it out loud") < text.indexOf("## 4. Create it"), "the question comes before the call")
     assert.match(text, /BEFORE you call the create operation/)
-    assert.match(text, /the write gate covers `graph_write` and `rules` only/, "the skill is the guard")
+    assert.match(text, /the write gate covers `memory_save` and `rules_write` only/, "the skill is the guard")
   })
 
   test("it calls the create operation, polls the agent until ready, runs it only on request and reads the run", () => {
@@ -378,7 +378,7 @@ describe("creating-an-agent", () => {
     assert.match(text, /changed since its last run/)
     assert.match(text, /reads an item's existing comments before it posts one/)
     assert.match(text, /`gitlab\.note\.list`[^\n]*`noteable_type`[^\n]*`merge_request`[^\n]*`issue`[^\n]*`noteable_iid`/)
-    assert.match(text, /another vendor[^\n]*`tool_search`/)
+    assert.match(text, /another vendor[^\n]*`vendor_search`/)
     assert.match(text, /says in its final answer what it reviewed/)
   })
 
