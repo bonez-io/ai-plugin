@@ -1782,6 +1782,7 @@ describe("capture says when it is set up but not working", () => {
   const start = (env, cwd = "/tmp/bonez-capture-health") =>
     runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "now", cwd, source: "startup" }) })
   const store = (home) => join(home, ".bonez", "session-sync")
+  const readJsonOr = (path) => JSON.parse(readFileSync(path, "utf8"))
   const installed = async (home, env, extra = {}) => {
     mkdirSync(store(home), { recursive: true })
     writeFileSync(join(store(home), "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-01T00:00:00Z", ...extra }))
@@ -1844,20 +1845,69 @@ describe("capture says when it is set up but not working", () => {
     assert.equal((await start(env)).stdout, "")
   })
 
-  test("nothing uploaded for three days though sessions ran: one line, then none that day", async () => {
+  test("nothing uploaded for three days and the last attempt failed: one line, then none that day", async () => {
     const { home, env } = homeWith("stale")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.now() - 5 * 86_400_000 } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now() - 4 * 86_400_000, ok: true }, { at: Date.now(), ok: false, short: "server not found" }] }))
+    const first = await start(env)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /has not uploaded since .*, though sessions ran after that \(server not found\)\./)
+    assert.equal((await start(env)).stdout, "")
+  })
+
+  test("no false warning: an empty session and one still open in another window are not missed uploads", async () => {
+    const { home, env } = homeWith("quiet-weekend")
     await installed(home, env)
     const cwd = join(home, "work", "api")
     mkdirSync(cwd, { recursive: true })
     writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.now() - 5 * 86_400_000 } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now() - 5 * 86_400_000, ok: true }] }))
     const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
     mkdirSync(project, { recursive: true })
-    writeFileSync(join(project, "missed.jsonl"), "")
-    utimesSync(join(project, "missed.jsonl"), new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000))
-    const first = await start(env, cwd)
-    assert.match(first.stdout, PERSON)
-    assert.match(JSON.parse(first.stdout).systemMessage, /has not uploaded since .*, though sessions ran after that\./)
+    const day = new Date(Date.now() - 86_400_000)
+    // Opened and closed with nothing said: the uploader skips it on purpose.
+    writeFileSync(join(project, "empty.jsonl"), "")
+    utimesSync(join(project, "empty.jsonl"), day, day)
+    // Still open in another window: real messages, but its end has not come yet.
+    cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, "still-open.jsonl"))
+    utimesSync(join(project, "still-open.jsonl"), day, day)
     assert.equal((await start(env, cwd)).stdout, "")
+    // The catch-up this start ran handled both without a failed attempt, so the next start is quiet too.
+    await waitFor(() => existsSync(join(store(home), "sync.log")) && /claude session-start/.test(readFileSync(join(store(home), "sync.log"), "utf8")))
+    await waitFor(() => /still-open|claude-transcript/.test(readFileSync(join(store(home), "sync.log"), "utf8")))
+    assert.equal((await start(env, cwd)).stdout, "")
+    assert.ok((readJsonOr(join(store(home), "health.json")).attempts ?? []).every((a) => a.ok))
+  })
+
+  test("the notice takes the uploader's lock, so an attempt recorded meanwhile is kept", async () => {
+    const { home, env } = homeWith("lock")
+    await installed(home, env)
+    const failed = { ok: false, short: "server not found" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed] }))
+    const lock = join(store(home), "sync-state.json.lock")
+    writeFileSync(lock, "")
+    const hookRun = start(env)
+    await new Promise((r) => setTimeout(r, 150))
+    // The uploader, holding the lock, records one more attempt, then lets go.
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, { ...failed, at: 42 }] }))
+    rmSync(lock)
+    const res = await hookRun
+    assert.match(res.stdout, PERSON)
+    const health = readJsonOr(join(store(home), "health.json"))
+    assert.equal(health.attempts.at(-1).at, 42, "the attempt written under the lock survives")
+    assert.ok(health.notified.failing)
+  })
+
+  test("the hook writes down its folder only for someone who set capture up", async () => {
+    const { home, env } = homeWith("no-capture")
+    const hostDir = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(hostDir, { recursive: true })
+    assert.equal((await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })).stdout, "")
+    assert.ok(!existsSync(join(home, ".bonez")), "nothing written for a person without capture")
+    writeFileSync(join(hostDir, "config.json"), JSON.stringify({ enabled: false }))
+    await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })
+    assert.deepEqual(readJsonOr(join(home, ".bonez", "session-sync", "hook-folder.json")), { claude: hostDir })
   })
 
   test("settings in an older folder the hook does not read: one line, then none that day", async () => {

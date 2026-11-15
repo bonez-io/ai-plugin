@@ -191,9 +191,11 @@ const hookFolderPath = () => join(CANONICAL_DATA_DIR, "hook-folder.json")
 function rememberHookFolder() {
   const hostDir = process.env.CLAUDE_PLUGIN_DATA
   if (!hostDir || readJsonSafe(hookFolderPath(), null)?.claude === hostDir) return
+  // Only for someone who set capture up: settings exist somewhere.
+  if (![hostDir, CANONICAL_DATA_DIR, ...legacyDataDirs()].some((d) => existsSync(join(d, "config.json")))) return
   try {
     mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
-    writeFileSync(hookFolderPath(), `${JSON.stringify({ claude: hostDir })}\n`, { mode: 0o600 })
+    copyAtomic(`${JSON.stringify({ claude: hostDir })}\n`, hookFolderPath())
   } catch {
     /* status then answers for this shell's own resolution */
   }
@@ -229,14 +231,22 @@ function migrateLegacyData() {
   if (!from || from === CANONICAL_DATA_DIR) return null
   try {
     mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
-    for (const f of ["config.json", "sync-state.json"]) {
-      if (existsSync(join(from, f))) writeFileSync(join(CANONICAL_DATA_DIR, f), readFileSync(join(from, f)), { mode: 0o600 })
+    // State first, config last: the config is what makes the folder count, so a crash in between
+    // never leaves a config without its record of what already uploaded.
+    for (const f of ["sync-state.json", "config.json"]) {
+      if (existsSync(join(from, f))) copyAtomic(readFileSync(join(from, f)), join(CANONICAL_DATA_DIR, f))
     }
     _dataDir = CANONICAL_DATA_DIR
     return from
   } catch {
     return null // migration is best-effort; the legacy path still resolves and still works
   }
+}
+
+function copyAtomic(data, path) {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, data, { mode: 0o600 })
+  renameSync(tmp, path)
 }
 
 function ensureDataDir() {
@@ -316,9 +326,9 @@ function sleepSync(ms) {
   }
 }
 
-function withStateLock(fn) {
+function withStateLock(fn, timeoutMs = STATE_LOCK_TIMEOUT_MS) {
   const lock = `${statePath()}.lock`
-  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS
+  const deadline = Date.now() + timeoutMs
   let held = false
   for (;;) {
     try {
@@ -453,12 +463,8 @@ async function cmdHook(agent, event) {
   const raw = readStdinSync()
   if (!raw || !raw.trim()) return
   if (claudeStart) {
-    try {
-      const notice = captureNotice(cfg, JSON.parse(raw))
-      if (notice) notifyOnce(notice.reason, notice.text)
-    } catch {
-      /* a malformed payload is handled below */
-    }
+    const notice = captureNotice(cfg)
+    if (notice) notifyOnce(notice.reason, notice.text)
   }
   let payload
   try {
@@ -1147,6 +1153,7 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   const wireAgent = wireAgentFor(agent)
 
   if (!captureGatewayAllowed(gatewayUrl)) {
+    recordAttempt({ ok: false, step: "presign", host: "", detail: "not a Bonez-operated gateway", short: "the configured server is not a Bonez one" })
     await log("upload: skipped — session capture requires a Bonez-operated gateway")
     return
   }
@@ -1368,22 +1375,23 @@ function strandedSettings() {
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 const shortDate = (ms) => `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}`
 
-// Capture is on: is it working? The last three attempts all failed, or nothing has uploaded for
-// three days although sessions in this (captured) workspace ran since and were not uploaded.
-function captureNotice(cfg, payload) {
-  const health = readJsonSafe(healthPath(), {})
-  const attempts = health.attempts ?? []
+// Capture is on: is it working? Decided only from what the uploader recorded. An attempt is a
+// session it meant to send (it had messages, in scope, changed); one it skips on purpose (empty,
+// unchanged, out of scope) or has not reached yet (a session still open) is not an attempt, so it
+// never counts. Either the last three attempts all failed, or the last one failed and nothing has
+// uploaded for three days.
+function captureNotice(cfg) {
+  const attempts = readJsonSafe(healthPath(), {}).attempts ?? []
+  const last = attempts.at(-1)
+  if (!last || last.ok) return null
   const lastOk = lastSuccessAt()
   const since = lastOk ? `since ${shortDate(lastOk)}` : "yet"
   if (attempts.length >= 3 && attempts.every((a) => !a.ok)) {
-    return { reason: "failing", text: `Bonez session capture has not uploaded ${since} (${attempts.at(-1).short}).` }
+    return { reason: "failing", text: `Bonez session capture has not uploaded ${since} (${last.short}).` }
   }
-  const cwd = typeof payload?.cwd === "string" ? payload.cwd : undefined
   const baseline = lastOk ?? Date.parse(cfg.installedAt ?? "")
-  const inScope = cfg.scope === "global" || repoFor(cwd, normalizeRepos(cfg.repos ?? []))
-  if (!cwd || !inScope || !(Date.now() - baseline > 3 * DAY_MS)) return null
-  const missed = findClaudeCatchupTargets(payload.session_id ?? "", cwd, loadState()).some((t) => t.mtime > baseline)
-  return missed ? { reason: "stale", text: `Bonez session capture has not uploaded ${since}, though sessions ran after that.` } : null
+  if (!(Date.now() - baseline > 3 * DAY_MS)) return null
+  return { reason: "stale", text: `Bonez session capture has not uploaded ${since}, though sessions ran after that (${last.short}).` }
 }
 
 // The one line the PERSON sees: Claude Code shows a hook's `systemMessage` to the user and does
@@ -1391,11 +1399,17 @@ function captureNotice(cfg, payload) {
 // session-start hooks have no such field, so they never print one.
 function notifyOnce(reason, text) {
   try {
-    const health = readJsonSafe(healthPath(), {})
-    const today = new Date().toISOString().slice(0, 10)
-    if (health.notified?.[reason] === today) return
-    health.notified = { ...health.notified, [reason]: today }
-    writeJsonAtomic(healthPath(), health, 0o600)
+    // The same lock as recordAttempt, so a background upload's record is never overwritten. A
+    // short wait: the uploader holds it for one small write, and the hook must stay fast.
+    const shown = withStateLock(() => {
+      const health = readJsonSafe(healthPath(), {})
+      const today = new Date().toISOString().slice(0, 10)
+      if (health.notified?.[reason] === today) return false
+      health.notified = { ...health.notified, [reason]: today }
+      writeJsonAtomic(healthPath(), health, 0o600)
+      return true
+    }, 500)
+    if (!shown) return
     process.stdout.write(JSON.stringify({ systemMessage: `${text} Run \`node "${SELF_PATH}" status\` for details.` }))
   } catch {
     /* never fail the hook */

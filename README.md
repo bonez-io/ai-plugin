@@ -499,10 +499,11 @@ so interrupting it is safe and re-running continues where it stopped.
 **When capture is set up but not working,** Claude Code shows you one line at the start of a
 session, at most once a day per reason, for example: "Bonez session capture has not uploaded since
 1 Sep (certificate check failed). Run `node ".../bonez-session-sync.mjs" status` for details." It
-appears when the last three upload attempts all failed, when nothing has uploaded for three days
-although sessions in a captured workspace ran since, or when the settings sit in an older folder
+appears when the last three upload attempts all failed, when the last attempt failed and nothing
+has uploaded for three days, or when the settings sit in an older folder
 the hook no longer reads (running `status` moves them). The line is shown to you, not added to the
-model's context. It is worked out from local files only. Cursor's and Codex's session-start hooks
+model's context. It is worked out from what the uploader recorded, locally: a session it skips on purpose (empty,
+unchanged, out of scope) or has not reached yet (still open) never counts. Cursor's and Codex's session-start hooks
 have no field for a message to the person, so they show nothing; `status` works the same there. A
 failed upload also writes its cause to `sync.log`: the step (token refresh, presign, upload,
 complete), the host, and the error code and message.
