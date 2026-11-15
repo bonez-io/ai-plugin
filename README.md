@@ -476,13 +476,16 @@ bonez-session-sync.mjs install bnz_... --global
 | `install <bnz_...key> [--repo <path>]... [--global]` | The headless lane: store a sessions-scoped key (mode 600) and turn capture on. Same scope options. |
 | `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far, the folder the Claude Code hook reads its settings from (and whether they were found there or through the fallback), and the time and result of the last upload attempt and of the last successful one. The same answer from a plain shell as under the hook. Never prints a key or token. |
 | `disable` / `enable` | Turn capture off/on without discarding the credential. |
-| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Oldest first, in bounded batches; re-run to continue. Start with `--dry-run` to see the volume first. |
+| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Newest first, in bounded batches; sub-agent transcripts are part of their lead session and are never uploaded on their own; re-run to continue. Start with `--dry-run` to see the volume first. |
 
 **Catching up on what was missed.** Capture normally happens at `SessionEnd`. When that never
 fires — a crash, a kill, or the plugin having been disabled for a while — the next session
 started in the same directory flushes what was stranded there, so an ordinary gap heals on its
 own. That per-workspace catch-up is deliberately capped, so it drains a session or two at a
-time rather than stalling the start of your work.
+time rather than stalling the start of your work. It goes newest first, so current work arrives
+before old history, and skips a transcript written in the last 10 minutes: that session is
+probably still running, and its own end (or a later start) sends it. A sub-agent's transcript (under `<session>/subagents/`, its lines marked
+`isSidechain`) is part of its lead session and is never uploaded as a session of its own.
 
 It is not a way to import a year of history. For that, `backfill` sweeps every project
 directory on the machine and uploads everything not already current:

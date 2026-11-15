@@ -36,6 +36,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -89,6 +90,15 @@ const CURSOR_CATCHUP_MAX = 20
 // SessionEnd is the exception rather than the rule. Five drains a crash or two without making
 // the start of a session feel like it stalled; `backfill` exists for real volume.
 const CLAUDE_CATCHUP_MAX = 5
+
+// A transcript written within this long is probably a session still running (people run several
+// at once in one workspace). It is not a catch-up or backfill candidate: its own SessionEnd sends
+// it, or a later start once it has gone quiet. Ten minutes: long enough that an active session
+// is not caught between turns, short enough that one left open but idle is captured the same
+// hour. Without it, newest-first would spend every start re-uploading the live sessions.
+// Overridable only so the test suite can flush transcripts it just wrote, as with the debounce.
+const _parsedQuietMs = Number.parseInt(process.env.BONEZ_SESSION_SYNC_QUIET_MS ?? "", 10)
+const CATCHUP_QUIET_MS = Number.isFinite(_parsedQuietMs) && _parsedQuietMs >= 0 ? _parsedQuietMs : 10 * 60_000
 
 // `backfill` is a human sweeping YEARS of local history, not a hook. It still runs in bounded
 // batches so it can be interrupted and resumed rather than becoming one unkillable upload
@@ -603,6 +613,25 @@ function isWindowsPath(p) {
   return /^\/?[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\")
 }
 
+// A sub-agent's transcript is part of its lead session, never a session of its own. Claude Code
+// files it under <session>/subagents/ and marks every one of its lines `"isSidechain":true`, so
+// either says so. Only the head is read: the marker sits near the start of every record. (A
+// key inside a message's text is escaped, `\"isSidechain\":`, so it cannot match.)
+function isSidechainTranscript(path) {
+  if (path.split(/[\\/]/).slice(0, -1).includes("subagents")) return true
+  let fd
+  try {
+    fd = openSync(path, "r")
+    const head = Buffer.alloc(16_384)
+    const n = readSync(fd, head, 0, head.length, 0)
+    return /"isSidechain":\s*(true|false)/.exec(head.toString("utf8", 0, n))?.[1] === "true"
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
 function staleTranscriptTargets(root, { excludeId, state, cap }) {
@@ -628,13 +657,16 @@ function staleTranscriptTargets(root, { excludeId, state, cap }) {
       // come back as often as it actually changes; uploadOne's own content-hash check then
       // drops the ones where the mtime moved but the content did not.
       if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      if (Date.now() - mtime < CATCHUP_QUIET_MS) return null // probably still running
+      if (isSidechainTranscript(p)) return null // read only for the stale ones
       return { transcriptPath: p, sessionId: id, mtime }
     })
     .filter((x) => x !== null)
-  // Oldest first: a finished conversation should not lose its slot to one that is merely more
-  // recently touched. The cap is a runaway guard, not a policy — a workspace with more than
-  // this many stale conversations drains over the next few starts.
-  candidates.sort((a, b) => a.mtime - b.mtime)
+  // Newest first: current work is what the person's page shows, so it must not wait behind a
+  // tail of months-old history. The old tail drains on later starts (and by `backfill`).
+  // The cap is a runaway guard, not a policy — a workspace with more than this many stale
+  // conversations drains over the next few starts.
+  candidates.sort((a, b) => b.mtime - a.mtime)
   return cap ? candidates.slice(0, cap) : candidates
 }
 
@@ -1131,6 +1163,10 @@ function inCaptureScope(cfg, dir) {
 async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   if (!transcriptPath || !existsSync(transcriptPath)) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — transcript not found (${transcriptPath ?? "unresolved"})`)
+    return
+  }
+  if (agent === "claude" && isSidechainTranscript(transcriptPath)) {
+    await log(`upload: session=${sessionId} agent=${agent} skipped — a sub-agent transcript, part of its lead session`)
     return
   }
 
@@ -1827,7 +1863,7 @@ async function cmdBackfill(rest) {
 
   const batch = targets.slice(0, limit)
   console.log(`Claude Code transcripts not yet uploaded at their current content: ${targets.length}`)
-  console.log(`This run would upload ${batch.length} of them (oldest first).`)
+  console.log(`This run would upload ${batch.length} of them (newest first).`)
   if (targets.length > batch.length) {
     console.log(`Re-run to continue; each run picks up where the last one stopped.`)
   }
@@ -2038,6 +2074,7 @@ export {
   announcedSessionId,
   takePresenceLock,
   describeFailure,
+  isSidechainTranscript,
   buildBundle,
   inCaptureScope,
   cmdHook,
