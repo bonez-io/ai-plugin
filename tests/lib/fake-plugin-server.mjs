@@ -3,7 +3,7 @@
 //
 // With `oauth: {...}` it is also the sign-in side the CLI talks to when it has no API key, all on one origin: the
 // protected-resource metadata (RFC 9728), the authorization server's metadata and device flow (RFC 8628), and the
-// MCP endpoint (POST /mcp: initialize, notifications/initialized, tools/call of `vendor_operation` with operation
+// MCP endpoint (POST /mcp: initialize, notifications/initialized, tools/call of `vendor_write` with operation
 // bonez.plugin.publish.v1, which runs the SAME vetUpload as the route). `server.signin` drives the browser's part.
 //
 // `vetUpload` is a line-for-line port of `vet()` and `_check_path()` in bonez-core's
@@ -215,7 +215,7 @@ export function startFakePluginServer({ key, computers = 2, state = "ready", bui
     const text = (value, isError = false) => answer({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }], isError })
     const { name, arguments: args = {} } = msg.params ?? {}
     seen.tool = name
-    if (name !== "vendor_operation") return reply(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `unknown tool '${name}'` } })
+    if (name !== "vendor_write") return reply(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `unknown tool '${name}'` } })
     if (args.operation_id !== "bonez.plugin.publish.v1" || idp.opts.noPublish) {
       seen.outcome = "operation_not_found"
       return text("[bonez] operation_not_found: unknown vendor operation", true)

@@ -27,12 +27,11 @@ fail=0
 #   $1: case name
 #   $2: stdin payload
 #   $3: expected mode — "silent" or "prompt"
-#   $4: when "prompt", the op expected in the response — "save" (memory,
-#       the default tool) or "rules:save" to expect the rules wording
+#   $4: when "prompt", the tool expected in the response (memory_save or rules_write)
 #   $5+: optional `KEY=VALUE` env overrides for this run (use these to unset
 #        CLAUDE_PLUGIN_ROOT by not passing it — the base env is empty)
 run_case() {
-    local name="$1" payload="$2" expected="$3" expected_op="${4:-}"
+    local name="$1" payload="$2" expected="$3" expected_tool="${4:-}"
     if (( $# >= 4 )); then shift 4; else shift $#; fi
     local out status
     out="$(env -i PATH="$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR" "$@" bash "$HOOK" <<<"$payload")"
@@ -42,16 +41,10 @@ run_case() {
     if [[ "$expected" == "silent" ]]; then
         [[ -z "$out" && $status -eq 0 ]] || ok=0
     else
-        # Match the actual JSON shape the hook produces, with the tool and
-        # op interpolated. Any drift in the response template fails here.
-        local tool_word="memory" op_word="$expected_op"
-        if [[ "$expected_op" == *:* ]]; then
-            tool_word="${expected_op%%:*}"
-            op_word="${expected_op##*:}"
-        fi
-        local needle="\"permissionDecision\":\"ask\""
-        local op_needle="bonez ${tool_word} \`${op_word}\` writes"
-        [[ $status -eq 0 && "$out" == *"$needle"* && "$out" == *"$op_needle"* ]] || ok=0
+        # Match the actual JSON shape the hook produces, with the tool
+        # interpolated. Any drift in the response template fails here.
+        [[ $status -eq 0 && "$out" == *"\"permissionDecision\":\"ask\""* \
+           && "$out" == *"bonez ${expected_tool} writes"* ]] || ok=0
     fi
 
     if (( ok )); then
@@ -64,34 +57,72 @@ run_case() {
     fi
 }
 
-# Helper: payload for a memory tool invocation with a given op and tool name.
-memory_call() {
-    local op="$1" tool_name="${2:-mcp__bonez__memory}"
-    printf '{"tool_name":"%s","tool_input":{"op":"%s","content":"the deploy script lives in infra/"}}' "$tool_name" "$op"
-}
+# memory_save and rules_write prompt on any input; rules_read and the other
+# reads pass.
 
-# Helper: payload for a rules tool invocation with a given op and tool name.
-rules_call() {
-    local op="$1" tool_name="${2:-mcp__bonez__rules}"
-    printf '{"tool_name":"%s","tool_input":{"op":"%s","name":"no-force-push","content":"Never force-push shared branches."}}' "$tool_name" "$op"
-}
+for t in memory_save rules_write; do
+    run_case "$t prompts" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"content\":\"deploys run from infra/\"}}" \
+        prompt "$t"
+    run_case "$t prompts even with a read-looking op" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"op\":\"list\"}}" \
+        prompt "$t"
+    run_case "$t via the raw-server prefix prompts" \
+        "{\"tool_name\":\"mcp__bonez__$t\",\"tool_input\":{}}" \
+        prompt "$t"
+    run_case "$t via a renamed server key containing bonez prompts" \
+        "{\"tool_name\":\"mcp__my-bonez-prod__$t\",\"tool_input\":{}}" \
+        prompt "$t"
+    run_case "$t from another product is ignored" \
+        "{\"tool_name\":\"mcp__someothermcp__$t\",\"tool_input\":{}}" \
+        silent
+done
 
-# Helper: payload for a graph_write invocation. Mirrors what the server's tool
-# schema accepts: every op is a write, and `about` is an array of anchor handles.
-graph_write_call() {
-    local op="$1" tool_name="${2:-mcp__bonez__graph_write}"
-    printf '{"tool_name":"%s","tool_input":{"op":"%s","content":"deploys run from infra/","description":"where deploys live","kind":"convention","basis":"stated","reason":"user said so","about":["~4f1a9c2e"]}}' "$tool_name" "$op"
-}
+for t in rules_read memory_recall system_model_search system_model_query system_model_fetch system_model_schema system_model_history vendor_search vendor_info vendor_read vendor_status; do
+    run_case "$t is silent" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"op\":\"save\"}}" \
+        silent
+done
+
+# The old names are no longer gated: the removal is deliberate. A fresh install
+# never sees them, and the gate does not inspect `op` any more.
+run_case "old graph_write is silent" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__graph_write","tool_input":{"op":"remember","content":"x"}}' \
+    silent
+run_case "old rules with op save is silent" \
+    '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"save","name":"x","content":"y"}}' \
+    silent
+run_case "old memory with op save is silent" \
+    '{"tool_name":"mcp__bonez__memory","tool_input":{"op":"save","content":"y"}}' \
+    silent
+
+# The Claude hooks.json matcher is the first filter: it must select the two
+# write tools and leave everything else to the normal flow.
+matcher="$(sed -n 's/.*"matcher": "\(__[^"]*\)".*/\1/p' "$HERE/../hooks/hooks.json" | head -1)"
+for t in memory_save rules_write; do
+    if [[ "mcp__plugin_bonez_bonez__$t" =~ $matcher ]]; then
+        pass=$((pass + 1)); printf "  ok   hooks.json matcher selects %s\n" "$t"
+    else
+        fail=$((fail + 1)); printf "  FAIL hooks.json matcher (%s) misses %s\n" "$matcher" "$t"
+    fi
+done
+for t in rules_read memory_recall system_model_fetch graph_write rules memory; do
+    if [[ "mcp__plugin_bonez_bonez__$t" =~ $matcher ]]; then
+        fail=$((fail + 1)); printf "  FAIL hooks.json matcher selects %s\n" "$t"
+    else
+        pass=$((pass + 1)); printf "  ok   hooks.json matcher leaves %s alone\n" "$t"
+    fi
+done
 
 # --- Cursor leg (beforeMCPExecution) -------------------------------------
 #
 # Cursor speaks a different protocol on both ends: it keeps `mcp_server_name`
-# separate from a BARE `tool_name`, documents `tool_input` as a JSON *string*
-# (so params arrive escaped), and expects a flat `{"permission":"ask"}` reply
-# rather than Claude Code's nested `hookSpecificOutput`. It also sets no
-# CLAUDE_PLUGIN_ROOT, so these cases deliberately run without one.
+# separate from a BARE `tool_name`, documents `tool_input` as a JSON *string*,
+# and expects a flat `{"permission":"ask"}` reply rather than Claude Code's
+# nested `hookSpecificOutput`. It also sets no CLAUDE_PLUGIN_ROOT, so these
+# cases deliberately run without one.
 cursor_run_case() {
-    local name="$1" payload="$2" expected="$3" expected_op="${4:-}"
+    local name="$1" payload="$2" expected="$3" expected_tool="${4:-}"
     local out status
     out="$(env -i PATH="$PATH" bash "$HOOK" <<<"$payload")"
     status=$?
@@ -100,11 +131,6 @@ cursor_run_case() {
     if [[ "$expected" == "silent" ]]; then
         [[ -z "$out" && $status -eq 0 ]] || ok=0
     else
-        local tool_word="memory" op_word="$expected_op"
-        if [[ "$expected_op" == *:* ]]; then
-            tool_word="${expected_op%%:*}"
-            op_word="${expected_op##*:}"
-        fi
         # The Cursor shape, asserted explicitly — a Claude-shaped reply here
         # would be silently useless to Cursor, so the needle must not be shared.
         # camelCase is the authoritative spelling (cursor-hooks types'
@@ -115,7 +141,7 @@ cursor_run_case() {
            && "$out" == *'"userMessage"'* \
            && "$out" == *'"agentMessage"'* \
            && "$out" == *'"user_message"'* \
-           && "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* ]] || ok=0
+           && "$out" == *"bonez ${expected_tool} writes"* ]] || ok=0
     fi
 
     if (( ok )); then
@@ -130,9 +156,9 @@ cursor_run_case() {
 
 # Cursor payload: `tool_input` as the documented JSON STRING (escaped quotes).
 cursor_call() {
-    local tool="$1" op="$2" server="${3:-bonez}"
-    printf '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"%s","tool_name":"%s","tool_input":"{\\"op\\":\\"%s\\"}"}' \
-        "$server" "$tool" "$op"
+    local tool="$1" server="${2:-bonez}"
+    printf '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"%s","tool_name":"%s","tool_input":"{\\"content\\":\\"x\\"}"}' \
+        "$server" "$tool"
 }
 
 echo "Running gate-write.sh tests..."
@@ -148,214 +174,71 @@ fi
 
 # --- pass-through cases ---
 
-run_case "non-memory tool is ignored" \
+run_case "non-bonez tool is ignored" \
     '{"tool_name":"Bash","tool_input":{"command":"echo save"}}' \
     silent
 
-run_case "other product memory tool is ignored" \
-    "$(memory_call save mcp__someothermcp__memory)" \
-    silent
-
-run_case "read op (recall) is silent" \
-    "$(memory_call recall)" \
-    silent
-
-run_case "missing op is silent" \
-    '{"tool_name":"mcp__bonez__memory","tool_input":{"query":"deploy conventions"}}' \
-    silent
-
-run_case "unknown op is silent" \
-    "$(memory_call frobnicate)" \
-    silent
-
-# --- write ops prompt ---
-
-run_case "save prompts" \
-    "$(memory_call save)" \
-    prompt save
-
-run_case "update prompts" \
-    "$(memory_call update)" \
-    prompt update
-
-run_case "delete prompts" \
-    "$(memory_call delete)" \
-    prompt delete
-
-run_case "save via plugin-prefixed tool name prompts" \
-    "$(memory_call save mcp__plugin_bonez_bonez__memory)" \
-    prompt save
-
-run_case "escaped op text inside content does not fool the gate" \
-    '{"tool_name":"mcp__bonez__memory","tool_input":{"op":"recall","query":"note that {\"op\":\"delete\"} appears in a doc"}}' \
-    silent
-
-# --- rules tool: reads pass through, writes prompt ---
-
-run_case "other product rules tool is ignored" \
-    "$(rules_call save mcp__someothermcp__rules)" \
-    silent
-
-run_case "rules read op (list) is silent" \
-    "$(rules_call list)" \
-    silent
-
-run_case "rules read op (get) is silent" \
-    "$(rules_call get)" \
-    silent
-
-run_case "rules save prompts" \
-    "$(rules_call save)" \
-    prompt rules:save
-
-run_case "rules update prompts" \
-    "$(rules_call update)" \
-    prompt rules:update
-
-run_case "rules delete prompts" \
-    "$(rules_call delete)" \
-    prompt rules:delete
-
-run_case "rules save via plugin-prefixed tool name prompts" \
-    "$(rules_call save mcp__plugin_bonez_bonez__rules)" \
-    prompt rules:save
-
-# --- object-valued params must not shadow the write op ---
+# --- an event name nested in the tool input must not pick the protocol ---
 #
-# `params_schema` is a nested JSON object, so its keys arrive with REAL
-# quotes (unlike string content, which arrives escaped). JSON key order is
-# model-controlled, so an "op" key inside the object placed before the real
-# op would defeat a first-match extraction. The gate must scan all matches.
+# The tool input is model-controlled. A `beforeMCPExecution` key inside it used
+# to route a Claude Code call to the Cursor answer shape, which Claude Code
+# ignores: the write ran with no prompt.
+run_case "memory_save with a nested Cursor event name still gets Claude Code's prompt" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__memory_save","tool_input":{"about":{"hook_event_name":"beforeMCPExecution"}}}' \
+    prompt memory_save
 
-run_case "rules save with a leading params_schema op:list still prompts" \
-    '{"tool_name":"mcp__bonez__rules","tool_input":{"params_schema":{"op":"list"},"op":"save","name":"x","content":"y"}}' \
-    prompt rules:save
+run_case "rules_write with a nested Cursor event name still gets Claude Code's prompt" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__rules_write","tool_input":{"x":{"hook_event_name":"beforeMCPExecution"}}}' \
+    prompt rules_write
 
-run_case "rules save with a trailing params_schema op:get still prompts" \
-    '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"save","name":"x","content":"y","params_schema":{"op":"get"}}}' \
-    prompt rules:save
-
-# Fail-toward-prompting: a read op whose nested object mentions a write-op
-# name prompts anyway. A spurious prompt is the safe direction for a write
-# gate; silence on a real write is the failure mode this exists to prevent.
-run_case "rules read with a nested write-op name fails toward prompting" \
-    '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"list","params_schema":{"op":"delete"}}}' \
-    prompt rules:delete
-
-# --- graph_write: every op is a write, so every op prompts ---
+# --- vendor_write is deliberately NOT gated ---
 #
-# graph_write replaced `memory`: it has seven typed ops and no read op at all.
+# vendor_write runs an operation that changes state, and the gateway has its own
+# approval step for those (`vendor_status` checks a run that waits). The plugin's
+# own publish runs through it too, so a prompt here would fire on every push. The
+# README ("Vendor operations") and the using-vendor-operations skill make the agent ask
+# the user in words instead. These cases pin that boundary so a half-gate cannot
+# appear unnoticed: if the gate is ever extended to vendor_write, flip them and the README.
 
-for _op in note remember revise claim link unlink close; do
-    run_case "graph_write $_op prompts" \
-        "$(graph_write_call "$_op")" \
-        prompt "graph_write:$_op"
-done
-
-run_case "graph_write via plugin-prefixed tool name prompts" \
-    "$(graph_write_call remember mcp__plugin_bonez_bonez__graph_write)" \
-    prompt graph_write:remember
-
-run_case "other product graph_write tool is ignored" \
-    "$(graph_write_call remember mcp__someothermcp__graph_write)" \
+run_case "vendor_write is not gated: a write operation is silent" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_write","tool_input":{"operation_id":"linear.issue.create.v1","input":{"title":"x"}}}' \
     silent
 
-run_case "graph_write with an unknown op is silent" \
-    "$(graph_write_call frobnicate)" \
+run_case "vendor_search is not gated either" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_search","tool_input":{"query":"issue create","vendor":"linear"}}' \
     silent
 
-run_case "graph_write with a missing op is silent" \
-    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"content":"x"}}' \
+cursor_run_case "cursor: vendor_write is not gated" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"vendor_write","tool_input":"{\"operation_id\":\"database.execute.v1\",\"input\":{}}"}' \
     silent
-
-# The write-op lists are per tool: `save` is not a graph_write op, and `remember`
-# is not a rules op, so neither is treated as one.
-run_case "graph_write with a memory-style op (save) is silent" \
-    "$(graph_write_call save)" \
-    silent
-
-run_case "rules with a graph_write op (remember) is silent" \
-    "$(rules_call remember)" \
-    silent
-
-# `preflight` and `dry_run` write nothing, but a pure-bash regex cannot tell them
-# from a nested-key spoof, so they prompt like any other call.
-run_case "graph_write remember with preflight still prompts" \
-    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remember","preflight":true,"content":"x","reason":"y"}}' \
-    prompt graph_write:remember
-
-run_case "graph_write remember with dry_run still prompts" \
-    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remember","dry_run":true,"content":"x","reason":"y"}}' \
-    prompt graph_write:remember
-
-run_case "escaped op text inside graph_write content does not fool the gate" \
-    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"frobnicate","content":"note that {\"op\":\"close\"} appears in a doc"}}' \
-    silent
-
-run_case "the read tools are ignored even if their input mentions a write op" \
-    '{"tool_name":"mcp__bonez__graph_query","tool_input":{"query":"x","params":{"op":"remember"}}}' \
-    silent
-
-# --- vendor_operation is deliberately NOT gated ---
-#
-# The call carries only operation_id / input / connection_ref. Whether an operation
-# writes (`side_effect`) lives in the server's catalog and in tool_search results,
-# never in the call this hook sees, so the gate cannot tell a read from a write
-# without shipping its own catalog copy or guessing from operation names, and a wrong
-# guess is silence on a real write. The README ("Vendor operations") and the
-# using-the-tool-lake skill say so and make the agent ask the user in words instead.
-# These cases pin that boundary so a half-gate cannot appear unnoticed: if the call
-# ever carries read/write metadata and the gate is extended, flip them and the README.
-
-run_case "vendor_operation is not gated: a write operation is silent" \
-    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_operation","tool_input":{"operation_id":"linear.issue.create.v1","input":{"title":"x"}}}' \
-    silent
-
-run_case "tool_search is not gated either" \
-    '{"tool_name":"mcp__plugin_bonez_bonez__tool_search","tool_input":{"query":"issue create","vendor":"linear"}}' \
-    silent
-
-cursor_run_case "cursor: vendor_operation is not gated" \
-    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"vendor_operation","tool_input":"{\"operation_id\":\"database.execute.v1\",\"input\":{}}"}' \
-    silent
-
-run_case "disable=1 silences a graph_write" \
-    "$(graph_write_call remember)" \
-    silent "" \
-    BONEZ_MCP_GATE_DISABLE="1"
-
-run_case "PLUGIN_ROOT set (Codex) silences a graph_write" \
-    "$(graph_write_call remember)" \
-    silent "" \
-    PLUGIN_ROOT="/tmp/codex-plugin-root"
 
 # --- BONEZ_MCP_GATE_DISABLE turns the gate off entirely ---
 
-run_case "disable=1 silences a save" \
-    "$(memory_call save)" \
+run_case "disable=1 silences a memory_save" \
+    '{"tool_name":"mcp__bonez__memory_save","tool_input":{}}' \
     silent "" \
     BONEZ_MCP_GATE_DISABLE="1"
 
 run_case "disable=0 leaves the gate active" \
-    "$(memory_call save)" \
-    prompt save \
+    '{"tool_name":"mcp__bonez__memory_save","tool_input":{}}' \
+    prompt memory_save \
     BONEZ_MCP_GATE_DISABLE="0"
 
-run_case "disable=1 silences a rules save too" \
-    "$(rules_call save)" \
+run_case "disable=1 silences a rules_write too" \
+    '{"tool_name":"mcp__bonez__rules_write","tool_input":{}}' \
     silent "" \
     BONEZ_MCP_GATE_DISABLE="1"
 
-# --- harness detection: only Claude Code gets the prompt ---
+# --- harness detection: only Claude Code and Cursor get the prompt ---
 
 # Codex sets its native PLUGIN_ROOT; the gate must stand down there.
-run_case "PLUGIN_ROOT set (Codex) silences a save" \
-    "$(memory_call save)" \
+run_case "PLUGIN_ROOT set (Codex) silences a memory_save" \
+    '{"tool_name":"mcp__bonez__memory_save","tool_input":{}}' \
     silent "" \
     PLUGIN_ROOT="/tmp/codex-plugin-root"
 
 # No CLAUDE_PLUGIN_ROOT at all = not Claude Code; the gate must stand down.
-out="$(env -i PATH="$PATH" bash "$HOOK" <<<"$(memory_call save)")"
+out="$(env -i PATH="$PATH" bash "$HOOK" <<<'{"tool_name":"mcp__bonez__memory_save","tool_input":{}}')"
 status=$?
 if [[ -z "$out" && $status -eq 0 ]]; then
     pass=$((pass + 1)); printf "  ok   no CLAUDE_PLUGIN_ROOT (non-Claude harness) is silent\n"
@@ -372,11 +255,9 @@ fi
 for _payload in \
     '' \
     'not json at all {{{' \
-    '{"tool_name":"mcp__bonez__memory"}' \
-    '{"tool_name":"mcp__bonez__memory","tool_input":{"op":"sa' \
-    '{"tool_name":"mcp__bonez__graph_write","tool_input":{"op":"remem' \
-    "$(memory_call save)" \
-    "$(graph_write_call remember)"
+    '{"tool_name":"mcp__bonez__memory_save"}' \
+    '{"tool_name":"mcp__bonez__memory_save","tool_input":{"con' \
+    '{"tool_name":"mcp__bonez__memory_save","tool_input":{}}'
 do
     env -i PATH="$PATH" CLAUDE_PLUGIN_ROOT="$PLUGIN_DIR" bash "$HOOK" <<<"$_payload" >/dev/null 2>&1
     if (( $? != 2 )); then
@@ -388,52 +269,45 @@ done
 
 # --- Cursor: beforeMCPExecution ---
 
-cursor_run_case "cursor: memory save prompts" \
-    "$(cursor_call memory save)" prompt save
+cursor_run_case "cursor: memory_save prompts" \
+    "$(cursor_call memory_save)" prompt memory_save
 
-cursor_run_case "cursor: memory update prompts" \
-    "$(cursor_call memory update)" prompt update
+cursor_run_case "cursor: rules_write prompts" \
+    "$(cursor_call rules_write)" prompt rules_write
 
-cursor_run_case "cursor: memory delete prompts" \
-    "$(cursor_call memory delete)" prompt delete
+cursor_run_case "cursor: rules_read is silent" \
+    "$(cursor_call rules_read)" silent
 
-cursor_run_case "cursor: memory recall is silent" \
-    "$(cursor_call memory recall)" silent
+cursor_run_case "cursor: old graph_write is silent" \
+    "$(cursor_call graph_write)" silent
 
-cursor_run_case "cursor: rules save prompts with rules wording" \
-    "$(cursor_call rules save)" prompt rules:save
-
-cursor_run_case "cursor: rules list is silent" \
-    "$(cursor_call rules list)" silent
+cursor_run_case "cursor: old rules with op save is silent" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"rules","tool_input":{"op":"save"}}' \
+    silent
 
 # The server identity is the ONLY filter on this leg (Cursor's hooks.json
 # carries no matcher), so a same-named tool on someone else's server must not
 # inherit our prompt.
-cursor_run_case "cursor: another server's memory tool is ignored" \
-    "$(cursor_call memory save othervendor)" silent
+cursor_run_case "cursor: another server's memory_save is ignored" \
+    "$(cursor_call memory_save othervendor)" silent
+
+cursor_run_case "cursor: a renamed server key containing bonez prompts" \
+    "$(cursor_call memory_save my-bonez-prod)" prompt memory_save
 
 cursor_run_case "cursor: a non-write bonez tool is ignored" \
-    "$(cursor_call graph_search save)" silent
+    "$(cursor_call system_model_search)" silent
 
 # tool_input as a real object rather than the documented string — tolerated
-# either way, so a Cursor build that stops stringifying cannot silently disarm
-# the gate.
+# either way.
 cursor_run_case "cursor: object-valued tool_input still prompts" \
-    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"rules","tool_input":{"op":"save"}}' \
-    prompt rules:save
-
-# The Claude-leg content protection has to survive the Cursor unescape pass:
-# text INSIDE the stringified tool_input is double-escaped, so one pass leaves
-# it as \" and must still not match.
-cursor_run_case "cursor: escaped op text inside content does not fool the gate" \
-    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"memory","tool_input":"{\"op\":\"recall\",\"query\":\"note that {\\\"op\\\":\\\"delete\\\"} appears\"}"}' \
-    silent
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"rules_write","tool_input":{"name":"x"}}' \
+    prompt rules_write
 
 # Protocol is chosen by hook_event_name, never by luck: a Claude-shaped payload
 # reaching the Cursor helper (which sets no CLAUDE_PLUGIN_ROOT) stays silent
 # rather than being answered in the wrong shape.
 cursor_run_case "cursor: PreToolUse payload without plugin root is silent" \
-    '{"hook_event_name":"PreToolUse","tool_name":"mcp__bonez__memory","tool_input":{"op":"save"}}' \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__bonez__memory_save","tool_input":{}}' \
     silent
 
 # Server identification is not settled across Cursor's own sources: the docs
@@ -442,46 +316,22 @@ cursor_run_case "cursor: PreToolUse payload without plugin root is silent" \
 # of them — and a write gate that never fires is worse than no gate.
 
 cursor_run_case "cursor: identified by url when mcp_server_name is absent" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' \
-    prompt save
-
-cursor_run_case "cursor: identified by url — rules wording" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"rules","tool_input":"{\"op\":\"update\"}","url":"https://gateway.bonez.io/mcp"}' \
-    prompt rules:update
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{}","url":"https://gateway.bonez.io/mcp"}' \
+    prompt memory_save
 
 cursor_run_case "cursor: a different server's url is ignored" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://other.example/mcp"}' \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{}","url":"https://other.example/mcp"}' \
     silent
 
 cursor_run_case "cursor: no identifying field at all is silent" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}"}' \
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{}"}' \
     silent
 
 # A flattened tool name identifies the server by itself, for a build that
 # namespaces the way Claude Code does.
 cursor_run_case "cursor: flattened tool name self-identifies" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__memory","tool_input":"{\"op\":\"save\"}"}' \
-    prompt save
-
-cursor_run_case "cursor: graph_write remember prompts" \
-    "$(cursor_call graph_write remember)" prompt graph_write:remember
-
-cursor_run_case "cursor: graph_write close prompts" \
-    "$(cursor_call graph_write close)" prompt graph_write:close
-
-cursor_run_case "cursor: another server's graph_write is ignored" \
-    "$(cursor_call graph_write remember othervendor)" silent
-
-cursor_run_case "cursor: bonez graph_search is ignored" \
-    "$(cursor_call graph_search remember)" silent
-
-cursor_run_case "cursor: graph_write identified by url when mcp_server_name is absent" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"graph_write","tool_input":"{\"op\":\"claim\"}","url":"https://bonez.example.com/mcp"}' \
-    prompt graph_write:claim
-
-cursor_run_case "cursor: flattened graph_write tool name self-identifies" \
-    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__graph_write","tool_input":"{\"op\":\"revise\"}"}' \
-    prompt graph_write:revise
+    '{"hook_event_name":"beforeMCPExecution","tool_name":"mcp__bonez__rules_write","tool_input":"{}"}' \
+    prompt rules_write
 
 # The plugin must be SELF-CONTAINED. Cursor resolves a plugin hook `command`
 # from the plugin root, and a marketplace install copies that directory on its
@@ -490,7 +340,7 @@ cursor_run_case "cursor: flattened graph_write tool name self-identifies" \
 # gate that fails to exec lets writes through (Cursor fails open).
 _standalone="$(mktemp -d)/bonez"
 cp -R "$HERE/../cursor" "$_standalone"
-plugin_out="$(cd "$_standalone" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}')"
+plugin_out="$(cd "$_standalone" && env -i PATH="$PATH" ./hooks/gate-write.sh <<<'{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{}","url":"https://gateway.bonez.io/mcp"}')"
 rm -rf "$(dirname "$_standalone")"
 if [[ "$plugin_out" == *'"permission":"ask"'* ]]; then
     pass=$((pass + 1)); printf "  ok   cursor: gate fires from a standalone plugin copy\n"

@@ -304,7 +304,7 @@ describe("the skill set and the skill descriptions", () => {
       "reviewing-with-org-rules": /before you tell the user a non-trivial change is ready/i,
       "session-context": /start of a task in an unfamiliar repo/i,
       "who-owns-what": /who owns/i,
-      "using-the-tool-lake": /instead of guessing or asking the user to paste it/i,
+      "using-vendor-operations": /instead of guessing or asking the user to paste it/i,
     }
     for (const [skill, re] of Object.entries(triggers)) assert.match(descriptionOf(skillText("skills", skill)), re, skill)
   })
@@ -344,13 +344,13 @@ describe("suggesting-agents", () => {
 describe("creating-an-agent", () => {
   const text = skillText("skills", "creating-an-agent")
 
-  test("it checks tool_search for the operation, says the spec out loud and waits for a yes before it creates", () => {
-    assert.match(text, /`tool_search`[\s\S]*"vendor": "bonez"/)
+  test("it checks vendor_search for the operation, says the spec out loud and waits for a yes before it creates", () => {
+    assert.match(text, /`vendor_search`[\s\S]*"vendor": "bonez"/)
     assert.match(text, /only if the results show `bonez\.agent\.create\.v2`/, "an older server lacks the operation")
     assert.match(text, /wait for a yes/i)
     assert.ok(text.indexOf("## 2. Say it out loud") < text.indexOf("## 4. Create it"), "the question comes before the call")
     assert.match(text, /BEFORE you call the create operation/)
-    assert.match(text, /the write gate covers `graph_write` and `rules` only/, "the skill is the guard")
+    assert.match(text, /the write gate covers `memory_save` and `rules_write` only/, "the skill is the guard")
   })
 
   test("it calls the create operation, polls the agent until ready, runs it only on request and reads the run", () => {
@@ -378,7 +378,7 @@ describe("creating-an-agent", () => {
     assert.match(text, /changed since its last run/)
     assert.match(text, /reads an item's existing comments before it posts one/)
     assert.match(text, /`gitlab\.note\.list`[^\n]*`noteable_type`[^\n]*`merge_request`[^\n]*`issue`[^\n]*`noteable_iid`/)
-    assert.match(text, /another vendor[^\n]*`tool_search`/)
+    assert.match(text, /another vendor[^\n]*`vendor_search`/)
     assert.match(text, /says in its final answer what it reviewed/)
   })
 
@@ -428,7 +428,7 @@ describe("creating-an-agent", () => {
 describe("the agent skills and commands name no v1 agent operation", () => {
   // create, read, list and run moved to v2 (update is v1). A v1 id here would send a person to the old operation.
   const FILES = [
-    ...["skills", "cursor/skills", "codex/skills"].flatMap((root) => AGENT_SKILLS.concat("using-the-tool-lake").map((s) => `${root}/${s}/SKILL.md`)),
+    ...["skills", "cursor/skills", "codex/skills"].flatMap((root) => AGENT_SKILLS.concat("using-vendor-operations").map((s) => `${root}/${s}/SKILL.md`)),
     "commands/agents.md", "cursor/commands/bonez-agents.md", "codex/prompts/agents.md", "README.md",
   ]
   for (const file of FILES) {
@@ -436,8 +436,8 @@ describe("the agent skills and commands name no v1 agent operation", () => {
   }
 })
 
-describe("using-the-tool-lake: what the bonez run operations return", () => {
-  const text = skillText("skills", "using-the-tool-lake")
+describe("using-vendor-operations: what the bonez run operations return", () => {
+  const text = skillText("skills", "using-vendor-operations")
 
   test("run.read gives the agent's own report (result, outcome, outcome_reason) and calls summary boilerplate; run.list rows name the trigger", () => {
     assert.match(text, /`bonez\.run\.read\.v1` `\{run_id\}`[^\n]*`result`[^\n]*`outcome`[^\n]*`outcome_reason`[^\n]*`summary` \(platform boilerplate/)
@@ -530,10 +530,10 @@ describe("standalone capture and memory hooks", () => {
       assert.match(run(cursor ? "sessionStart" : "SessionStart"), /memory_recall/)
       if (leg === "codex") assert.match(run("SessionStart", undefined, "\ufeff", "\ufeff"), /memory_recall/)
       if (leg !== "claude") assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
-      assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
+      assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "system_model_fetch"), "")
       if (!cursor) {
         assert.ok(hooks.SessionStart.every(group => group.hooks.every(hook => hook.type !== "mcp_tool")),
-          "Opening an idle host must not perform a graph read")
+          "Opening an idle host must not perform a System Model read")
       }
       if (leg === "claude") {
         const scratch = mkdtempSync(join(tmpdir(), "bonez-file-hook-"))
@@ -551,7 +551,7 @@ describe("standalone capture and memory hooks", () => {
         }
         assert.match(run("UserPromptSubmit", undefined, "", "", "Plan a change to acme/api/src/refund.py"), /memory_recall/)
         assert.equal(run("UserPromptSubmit", undefined, "", "", "Thanks!"), "")
-        const tool = "mcp__plugin_bonez_bonez__graph_fetch"
+        const tool = "mcp__plugin_bonez_bonez__system_model_fetch"
         assert.ok(hooks.PostToolUse.some(entry => new RegExp(entry.matcher).test(tool)))
         assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)
       }

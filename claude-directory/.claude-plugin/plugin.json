@@ -1,0 +1,25 @@
+{
+  "name": "bonez",
+  "description": "Bring your organization's System Model into your coding agent — search across code, decisions, tickets, PRs, docs, and people; code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
+  "version": "0.11.0",
+  "author": {
+    "name": "Bonez",
+    "url": "https://bonez.io"
+  },
+  "homepage": "https://bonez.io",
+  "privacyPolicyUrl": "https://bonez.io/privacy",
+  "repository": "https://github.com/bonez-io/ai-plugin",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "system-model",
+    "org-memory",
+    "code-navigation",
+    "code-search",
+    "prior-art",
+    "blast-radius",
+    "mcp"
+  ],
+  "documentationUrl": "https://github.com/bonez-io/ai-plugin#readme",
+  "icon": "./assets/icon.png"
+}

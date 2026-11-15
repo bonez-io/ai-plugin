@@ -30,7 +30,7 @@ Then restart Claude Code so the server connects to the new address. The server a
 
 **A. OAuth** — when the server has OAuth enabled. Run `/mcp`, select the Bonez server (`plugin:bonez:bonez`), choose **Authenticate**, and finish the sign-in in the browser. If the server has no OAuth set up, Authenticate will not complete; use B.
 
-**B. An API key minted by a Bonez admin** — for a headless box, CI, or a server without OAuth. The key's scope decides what the agent can do: `read` reads everything; `read+memory` also lets it save memories with `graph_write`; `read+write` also lets it change the org's rules. Ask the admin for the smallest that covers the work, then run this yourself in a shell (bash or PowerShell), with the server's URL:
+**B. An API key minted by a Bonez admin** — for a headless box, CI, or a server without OAuth. The key's scope decides what the agent can do: `read` reads everything; `read+memory` also lets it save memories with `memory_save`; `read+write` also lets it change the org's rules. Ask the admin for the smallest that covers the work, then run this yourself in a shell (bash or PowerShell), with the server's URL:
 
 ```bash
 claude mcp add --transport http bonez https://bonez.example.com/mcp --header "Authorization: Bearer <key>"

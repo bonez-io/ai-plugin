@@ -20,7 +20,7 @@
 //   1. BONEZ_API_KEY: POSTs {files: {<path>: <base64>}, sha256} to $BONEZ_URL/api/admin/org/plugins with
 //      "Authorization: Bearer $BONEZ_API_KEY".
 //   2. A saved sign-in (~/.bonez/plugin-login.json; lib/signin.mjs): calls the server's MCP endpoint, the
-//      `vendor_operation` tool with operation bonez.plugin.publish.v1 and the same {files, sha256} (lib/mcp.mjs).
+//      `vendor_write` tool with operation bonez.plugin.publish.v1 and the same {files, sha256} (lib/mcp.mjs).
 //   3. Otherwise it signs you in, in two runs: the first prints an address and a code and exits 4 at once; once
 //      you have approved in the browser, running the same command again finishes the sign-in and publishes.
 // The sha256 is the tree hash of bonez-package-hash.mjs, computed by the SAME code (lib/plugin-tree.mjs; the keys
@@ -257,7 +257,7 @@ async function pushSignedIn(server, { map, fingerprint, count, total }) {
     hide(token, "token")
     console.error(`bonez-plugin-push: publishing ${count} files (${total} bytes), fingerprint ${fingerprint}, to ${server.origin}`)
     try {
-      return outcome(await callTool(url, token, "vendor_operation", { operation_id: OPERATION, input: { files: map, sha256: fingerprint } }))
+      return outcome(await callTool(url, token, "vendor_write", { operation_id: OPERATION, input: { files: map, sha256: fingerprint } }))
     } catch (err) {
       if (!(err instanceof HttpRefusal)) throw err
       // 401: the token. Once more with a fresh one, then a new sign-in.

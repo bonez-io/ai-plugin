@@ -1,7 +1,7 @@
 {
   "name": "bonez",
-  "version": "0.10.9",
-  "description": "Bring your organization's context lake into Codex — fused org search across code, decisions, tickets, PRs, docs, and people; graph-powered code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
+  "version": "0.11.0",
+  "description": "Bring your organization's System Model into Codex — search across code, decisions, tickets, PRs, docs, and people; code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
   "author": {
     "name": "Bonez",
     "url": "https://bonez.io"
@@ -9,12 +9,12 @@
   "homepage": "https://bonez.io",
   "repository": "https://github.com/bonez-io/ai-plugin",
   "license": "MIT",
-  "keywords": ["context", "knowledge-graph", "org-memory", "code-navigation", "code-search", "mcp"],
+  "keywords": ["context", "system-model", "org-memory", "code-navigation", "code-search", "mcp"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Bonez",
-    "shortDescription": "Your organization's context lake: search, graph, rules and memories",
+    "shortDescription": "Your organization's System Model: search, rules and memories",
     "developerName": "Bonez",
     "category": "Productivity",
     "websiteURL": "https://bonez.io"

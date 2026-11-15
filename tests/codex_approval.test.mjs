@@ -15,10 +15,14 @@ import { fileURLToPath } from "node:url"
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..")
 
-test("codex/.mcp.json asks before graph_write and rules", () => {
+test("codex/.mcp.json asks before memory_save and rules_write, and not before reads", () => {
   const server = JSON.parse(readFileSync(join(REPO, "codex", ".mcp.json"), "utf8")).mcpServers.bonez
-  assert.equal(server.tools?.graph_write?.approval_mode, "prompt")
-  assert.equal(server.tools?.rules?.approval_mode, "prompt")
+  assert.equal(server.tools?.memory_save?.approval_mode, "prompt")
+  assert.equal(server.tools?.rules_write?.approval_mode, "prompt")
+  assert.equal(server.tools?.rules_read, undefined, "rules_read is a read; a prompt on it is the old per-tool cost")
+  // The old names are hidden aliases a Codex session is never offered, so no stanza for them.
+  assert.equal(server.tools?.graph_write, undefined)
+  assert.equal(server.tools?.rules, undefined)
 })
 
 test("no file tells anyone to set approval_mode to approve (it runs the tool without asking)", () => {

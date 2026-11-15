@@ -345,8 +345,8 @@ try {
 
   # ---- the write gate under Git Bash ----------------------------------------------------------------
 
-  $claudeWrite = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__graph_write","tool_input":{"op":"remember","content":"x"}}'
-  $claudeRead = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__graph_search","tool_input":{"query":"x"}}'
+  $claudeWrite = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__memory_save","tool_input":{"op":"remember","content":"x"}}'
+  $claudeRead = '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__system_model_search","tool_input":{"query":"x"}}'
   Check 'Codex SessionStart command injects recall guidance from an installed path with spaces' {
     $codexRoot = P $Spaced @('codex')
     $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (P $codexRoot @('hooks', 'hooks.json')) | ConvertFrom-Json
@@ -367,7 +367,7 @@ try {
       $env1 = @{ CLAUDE_PLUGIN_ROOT = $rootValue; PLUGIN_ROOT = $null; BONEZ_MCP_GATE_DISABLE = $null }
       $w = Invoke-Native $script:GitBash @('-c', $gateCommand) -InputText $claudeWrite -EnvVars $env1
       if ($w.ExitCode -ne 0) { return (Fail "exit $($w.ExitCode) (a hook must exit 0):`n$(Show-Text $w.Err 6)") }
-      if ($w.Out -notmatch '"permissionDecision":"ask"') { return (Fail "no ask decision for a graph_write.`ncommand: $gateCommand`nCLAUDE_PLUGIN_ROOT=$rootValue`nstdout: '$($w.Out)'`nstderr: $(Show-Text $w.Err 6)") }
+      if ($w.Out -notmatch '"permissionDecision":"ask"') { return (Fail "no ask decision for a memory_save.`ncommand: $gateCommand`nCLAUDE_PLUGIN_ROOT=$rootValue`nstdout: '$($w.Out)'`nstderr: $(Show-Text $w.Err 6)") }
       $r = Invoke-Native $script:GitBash @('-c', $gateCommand) -InputText $claudeRead -EnvVars $env1
       if ($r.ExitCode -ne 0 -or $r.Out.Trim() -ne '') { return (Fail "a read must pass through silently; exit $($r.ExitCode), stdout '$($r.Out)'") }
       return (Pass ("write: " + $w.Out.Trim() + "`nread: (silent)"))
@@ -375,7 +375,7 @@ try {
   }
 
   Check 'Cursor hook: `bash ./hooks/gate-write.sh` run from the plugin folder through cmd.exe prompts for a write' {
-    $payload = '{"hook_event_name":"beforeMCPExecution","tool_name":"graph_write","tool_input":"{\"op\":\"remember\"}","mcp_server_name":"bonez","url":"https://bonez.example.com/mcp"}'
+    $payload = '{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{\"op\":\"remember\"}","mcp_server_name":"bonez","url":"https://bonez.example.com/mcp"}'
     $cursorCommand = ((Get-Content -Raw -Encoding UTF8 -LiteralPath (P $Root @('cursor', 'hooks', 'hooks.json')) | ConvertFrom-Json).hooks.beforeMCPExecution[0].command)
     $r = Invoke-Native 'cmd.exe' @('/c', $cursorCommand) -InputText $payload -WorkDir (P $Spaced @('cursor')) -EnvVars @{ CLAUDE_PLUGIN_ROOT = $null; PLUGIN_ROOT = $null; BONEZ_MCP_GATE_DISABLE = $null }
     if ($r.Out -notmatch '"permission":"ask"') {

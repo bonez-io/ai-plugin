@@ -1,6 +1,6 @@
 ---
 name: creating-a-plugin
-description: Create, extend, test, bundle and hand over a Bonez plugin (a "package" that adds tools to Bonez agents). Use when the user wants to write a Bonez plugin, package, extension or new agent tool, add a tool to one, build or hash one, or asks how a plugin gets onto a Bonez box.
+description: Creates, extends, tests, bundles and hands over a Bonez plugin (a "package" that adds tools to Bonez agents). Use when the user wants to write a Bonez plugin, package, extension or new agent tool, add a tool to one, build or hash one, or asks how a plugin gets onto a Bonez box.
 ---
 
 # Creating a Bonez plugin

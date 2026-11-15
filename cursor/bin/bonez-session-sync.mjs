@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // bonez-session-sync — captures Claude Code, Codex and Cursor conversation transcripts at
 // session end
-// and uploads them into the org's bonez knowledge graph, the same pipeline the desktop app's
+// and uploads them into the org's bonez System Model, the same pipeline the desktop app's
 // manual "Import history" feature feeds (SPEC-mcp-session-capture.md).
 //
 // Two very different runtime shapes live in this one file:
@@ -317,7 +317,7 @@ function saveState(state) {
 // file — but the read-modify-write ACROSS processes is not, so the last writer silently drops
 // the other two entries. (Measured: three interleaved uploads, one entry survived.)
 //
-// The damage is not lost conversations — unit_key MERGEs server-side, so the graph is
+// The damage is not lost conversations — unit_key MERGEs server-side, so the System Model is
 // unaffected — but a dropped entry means the next trigger sees the conversation as never
 // uploaded and uploads it again. That defeats the debounce, which exists specifically to keep
 // upload count down, which is the whole reason `stop` is affordable.
@@ -791,7 +791,7 @@ function findClaudeBackfillTargets(state) {
 // A public client, per RFC 8252 §8.5: there is no secret, because a secret shipped inside a
 // distributed CLI is not a secret. Security comes from the user's own browser consent and
 // from the token being scoped to `bonez:sessions` — upload-only, and refused on /mcp by the
-// gateway precisely so a long-lived credential in a config file can't read the org lake.
+// gateway precisely so a long-lived credential in a config file can't read the org's System Model.
 // `??`, never `||` — the same trap DEBOUNCE_MS documents above. `BONEZ_OAUTH_CLIENT_ID=""`
 // is a deliberate "this build has no client", and `||` would treat that empty string as
 // unset and fall back to the real one. That is not a style point: with `||`, anything
@@ -1832,8 +1832,8 @@ function consentText(cfg) {
     "",
     `Scope: ${scopeDetail}`,
     "",
-    `Where it goes: ${gatewayBaseUrl()} → your org's bonez import pipeline → the org knowledge`,
-    "graph, as a searchable :Convo (same destination as the desktop app's manual import).",
+    `Where it goes: ${gatewayBaseUrl()} → your org's bonez import pipeline → the org's`,
+    "System Model, as a searchable conversation record (same destination as the desktop app's manual import).",
     "",
     "Who can read it: anyone in your org with bonez read/session access — the same visibility",
     "as any other imported conversation. Content you scrub locally never leaves this machine.",
@@ -1844,7 +1844,7 @@ function consentText(cfg) {
     "  Check status any time:          bonez-session-sync.mjs status",
     `Credential stored at: ${configPath()} (${credentialProtection()}).`,
     cfg.oauth
-      ? "Signed in with OAuth, scoped to session upload only — this credential cannot read the lake."
+      ? "Signed in with OAuth, scoped to session upload only — this credential cannot read the System Model."
       : "Using an API key. `login` swaps it for browser sign-in with no key on disk.",
   ].join("\n")
 }
@@ -1921,7 +1921,7 @@ function cmdLogout() {
 }
 
 // A deliberate, human-run sweep of local Claude Code history. Deliberately NOT reachable from
-// any hook: it publishes a large volume of past conversation to the org lake in one go, and
+// any hook: it publishes a large volume of past conversation to the org's System Model in one go, and
 // that is a decision someone makes on purpose, once, not a side effect of opening a terminal.
 //
 // `--dry-run` first is the point of the default output — you should be able to see the size of
@@ -1959,7 +1959,7 @@ async function cmdBackfill(rest) {
   }
   if (dryRun) {
     console.log("")
-    console.log("--dry-run: nothing was uploaded. Drop the flag to publish these to your org's lake.")
+    console.log("--dry-run: nothing was uploaded. Drop the flag to publish these to your org's System Model.")
     return
   }
 
