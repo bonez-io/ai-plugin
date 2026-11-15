@@ -16,13 +16,13 @@
   ],
   "name": "io.bonez/mcp",
   "title": "Bonez MCP Server",
-  "description": "The bonez org context lake over MCP — fused search across code, decisions, tickets, PRs, docs, and people; BGQ graph queries; org rules and durable memories.",
+  "description": "The bonez System Model over MCP — search across code, decisions, tickets, PRs, docs, and people; System Model queries; org rules and durable memories.",
   "repository": {
     "url": "https://github.com/bonez-io/ai-plugin",
     "source": "github"
   },
   "websiteUrl": "https://bonez.io",
-  "version": "0.10.8",
+  "version": "0.11.0",
   "remotes": [
     {
       "type": "streamable-http",

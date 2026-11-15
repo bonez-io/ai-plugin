@@ -530,10 +530,10 @@ describe("standalone capture and memory hooks", () => {
       assert.match(run(cursor ? "sessionStart" : "SessionStart"), /memory_recall/)
       if (leg === "codex") assert.match(run("SessionStart", undefined, "\ufeff", "\ufeff"), /memory_recall/)
       if (leg !== "claude") assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
-      assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "graph_fetch"), "")
+      assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "system_model_fetch"), "")
       if (!cursor) {
         assert.ok(hooks.SessionStart.every(group => group.hooks.every(hook => hook.type !== "mcp_tool")),
-          "Opening an idle host must not perform a graph read")
+          "Opening an idle host must not perform a System Model read")
       }
       if (leg === "claude") {
         const scratch = mkdtempSync(join(tmpdir(), "bonez-file-hook-"))
@@ -551,7 +551,7 @@ describe("standalone capture and memory hooks", () => {
         }
         assert.match(run("UserPromptSubmit", undefined, "", "", "Plan a change to acme/api/src/refund.py"), /memory_recall/)
         assert.equal(run("UserPromptSubmit", undefined, "", "", "Thanks!"), "")
-        const tool = "mcp__plugin_bonez_bonez__graph_fetch"
+        const tool = "mcp__plugin_bonez_bonez__system_model_fetch"
         assert.ok(hooks.PostToolUse.some(entry => new RegExp(entry.matcher).test(tool)))
         assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)
       }

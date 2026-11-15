@@ -51,6 +51,8 @@ run_case() {
         fi
         local needle="\"permissionDecision\":\"ask\""
         local op_needle="bonez ${tool_word} \`${op_word}\` writes"
+        # `tool:` with no op is a write tool that needs none (memory_save, rules_write).
+        [[ -z "$op_word" ]] && op_needle="bonez ${tool_word} writes"
         [[ $status -eq 0 && "$out" == *"$needle"* && "$out" == *"$op_needle"* ]] || ok=0
     fi
 
@@ -82,6 +84,46 @@ graph_write_call() {
     local op="$1" tool_name="${2:-mcp__bonez__graph_write}"
     printf '{"tool_name":"%s","tool_input":{"op":"%s","content":"deploys run from infra/","description":"where deploys live","kind":"convention","basis":"stated","reason":"user said so","about":["~4f1a9c2e"]}}' "$tool_name" "$op"
 }
+
+# --- current names (0.11.0): memory_save and rules_write prompt on any input;
+# --- rules_read and the other reads pass. Old names above keep their op logic
+# --- because the gateway serves them as hidden aliases for 30 days.
+
+for t in memory_save rules_write; do
+    run_case "$t prompts without an op" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"content\":\"deploys run from infra/\"}}" \
+        prompt "$t:"
+    run_case "$t prompts even with a read-looking op" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"op\":\"list\"}}" \
+        prompt "$t:"
+    run_case "$t from another product is ignored" \
+        "{\"tool_name\":\"mcp__someothermcp__$t\",\"tool_input\":{}}" \
+        silent
+done
+
+for t in rules_read memory_recall system_model_search system_model_query system_model_fetch system_model_schema system_model_history vendor_search vendor_info vendor_read vendor_status; do
+    run_case "$t is silent" \
+        "{\"tool_name\":\"mcp__plugin_bonez_bonez__$t\",\"tool_input\":{\"op\":\"save\"}}" \
+        silent
+done
+
+# The Claude hooks.json matcher is the first filter: it must select the write
+# tools and the retired names, and leave rules_read to the normal flow.
+matcher="$(sed -n 's/.*"matcher": "\(__[^"]*\)".*/\1/p' "$HERE/../hooks/hooks.json" | head -1)"
+for t in memory_save rules_write graph_write rules memory; do
+    if [[ "mcp__plugin_bonez_bonez__$t" =~ $matcher ]]; then
+        pass=$((pass + 1)); printf "  ok   hooks.json matcher selects %s\n" "$t"
+    else
+        fail=$((fail + 1)); printf "  FAIL hooks.json matcher (%s) misses %s\n" "$matcher" "$t"
+    fi
+done
+for t in rules_read memory_recall system_model_fetch; do
+    if [[ "mcp__plugin_bonez_bonez__$t" =~ $matcher ]]; then
+        fail=$((fail + 1)); printf "  FAIL hooks.json matcher selects the read tool %s\n" "$t"
+    else
+        pass=$((pass + 1)); printf "  ok   hooks.json matcher leaves %s alone\n" "$t"
+    fi
+done
 
 # --- Cursor leg (beforeMCPExecution) -------------------------------------
 #
@@ -115,7 +157,8 @@ cursor_run_case() {
            && "$out" == *'"userMessage"'* \
            && "$out" == *'"agentMessage"'* \
            && "$out" == *'"user_message"'* \
-           && "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* ]] || ok=0
+           && ( "$out" == *"bonez ${tool_word} \`${op_word}\` writes"* \
+                || ( -z "$op_word" && "$out" == *"bonez ${tool_word} writes"* ) ) ]] || ok=0
     fi
 
     if (( ok )); then
@@ -296,27 +339,29 @@ run_case "the read tools are ignored even if their input mentions a write op" \
     '{"tool_name":"mcp__bonez__graph_query","tool_input":{"query":"x","params":{"op":"remember"}}}' \
     silent
 
-# --- vendor_operation is deliberately NOT gated ---
+# --- vendor_write is deliberately NOT gated (as vendor_operation was not) ---
 #
-# The call carries only operation_id / input / connection_ref. Whether an operation
-# writes (`side_effect`) lives in the server's catalog and in tool_search results,
-# never in the call this hook sees, so the gate cannot tell a read from a write
-# without shipping its own catalog copy or guessing from operation names, and a wrong
-# guess is silence on a real write. The README ("Vendor operations") and the
-# using-the-tool-lake skill say so and make the agent ask the user in words instead.
-# These cases pin that boundary so a half-gate cannot appear unnoticed: if the call
-# ever carries read/write metadata and the gate is extended, flip them and the README.
+# vendor_write runs an operation that changes state, and the gateway has its own
+# approval step for those (`vendor_status` checks a run that waits). The plugin's
+# own publish runs through it too, so a prompt here would fire on every push. The
+# README ("Vendor operations") and the using-the-tool-lake skill make the agent ask
+# the user in words instead. These cases pin that boundary so a half-gate cannot
+# appear unnoticed: if the gate is ever extended to vendor_write, flip them and the README.
 
-run_case "vendor_operation is not gated: a write operation is silent" \
+run_case "vendor_write is not gated: a write operation is silent" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_write","tool_input":{"operation_id":"linear.issue.create.v1","input":{"title":"x"}}}' \
+    silent
+
+run_case "the retired vendor_operation is not gated either" \
     '{"tool_name":"mcp__plugin_bonez_bonez__vendor_operation","tool_input":{"operation_id":"linear.issue.create.v1","input":{"title":"x"}}}' \
     silent
 
-run_case "tool_search is not gated either" \
-    '{"tool_name":"mcp__plugin_bonez_bonez__tool_search","tool_input":{"query":"issue create","vendor":"linear"}}' \
+run_case "vendor_search is not gated either" \
+    '{"tool_name":"mcp__plugin_bonez_bonez__vendor_search","tool_input":{"query":"issue create","vendor":"linear"}}' \
     silent
 
-cursor_run_case "cursor: vendor_operation is not gated" \
-    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"vendor_operation","tool_input":"{\"operation_id\":\"database.execute.v1\",\"input\":{}}"}' \
+cursor_run_case "cursor: vendor_write is not gated" \
+    '{"hook_event_name":"beforeMCPExecution","mcp_server_name":"bonez","tool_name":"vendor_write","tool_input":"{\"operation_id\":\"database.execute.v1\",\"input\":{}}"}' \
     silent
 
 run_case "disable=1 silences a graph_write" \
@@ -471,6 +516,18 @@ cursor_run_case "cursor: graph_write close prompts" \
 
 cursor_run_case "cursor: another server's graph_write is ignored" \
     "$(cursor_call graph_write remember othervendor)" silent
+
+cursor_run_case "cursor: memory_save prompts" \
+    "$(cursor_call memory_save save)" prompt memory_save:
+
+cursor_run_case "cursor: rules_write prompts" \
+    "$(cursor_call rules_write delete)" prompt rules_write:
+
+cursor_run_case "cursor: rules_read is silent" \
+    "$(cursor_call rules_read list)" silent
+
+cursor_run_case "cursor: another server's memory_save is ignored" \
+    "$(cursor_call memory_save save othervendor)" silent
 
 cursor_run_case "cursor: bonez graph_search is ignored" \
     "$(cursor_call graph_search remember)" silent

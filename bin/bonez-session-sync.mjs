@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // bonez-session-sync — captures Claude Code, Codex and Cursor conversation transcripts at
 // session end
-// and uploads them into the org's bonez knowledge graph, the same pipeline the desktop app's
+// and uploads them into the org's bonez System Model, the same pipeline the desktop app's
 // manual "Import history" feature feeds (SPEC-mcp-session-capture.md).
 //
 // Two very different runtime shapes live in this one file:
@@ -281,7 +281,7 @@ function saveState(state) {
 // file — but the read-modify-write ACROSS processes is not, so the last writer silently drops
 // the other two entries. (Measured: three interleaved uploads, one entry survived.)
 //
-// The damage is not lost conversations — unit_key MERGEs server-side, so the graph is
+// The damage is not lost conversations — unit_key MERGEs server-side, so the System Model is
 // unaffected — but a dropped entry means the next trigger sees the conversation as never
 // uploaded and uploads it again. That defeats the debounce, which exists specifically to keep
 // upload count down, which is the whole reason `stop` is affordable.
@@ -1329,8 +1329,8 @@ function consentText(cfg) {
     "",
     `Scope: ${scopeDetail}`,
     "",
-    `Where it goes: ${gatewayBaseUrl()} → your org's bonez import pipeline → the org knowledge`,
-    "graph, as a searchable :Convo (same destination as the desktop app's manual import).",
+    `Where it goes: ${gatewayBaseUrl()} → your org's bonez import pipeline → the org's`,
+    "System Model, as a searchable conversation record (same destination as the desktop app's manual import).",
     "",
     "Who can read it: anyone in your org with bonez read/session access — the same visibility",
     "as any other imported conversation. Content you scrub locally never leaves this machine.",
