@@ -1540,7 +1540,9 @@ async function sessionsCall(cfg, gatewayUrl, id, route, body) {
       method: "POST",
       headers: httpHeaders(bearer, { "content-type": "application/json", "x-bonez-session": id }),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
+      // Under the hooks' own 5-second limit (hooks/hooks.json), so a slow answer is logged here instead of the
+      // hook being cut with nothing written. No retry: the next event announces the session again.
+      signal: AbortSignal.timeout(4_000),
     })
     return { ok: res.ok, status: res.status }
   } catch (err) {
