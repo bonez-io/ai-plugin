@@ -363,7 +363,7 @@ One loop: **`system_model_search` → `system_model_schema` → `system_model_qu
 | `rules_write` | Save, update or delete binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
 | `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
-The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.0 reaches `stable`.
+The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.1 reaches `stable`.
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
