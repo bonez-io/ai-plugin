@@ -2313,7 +2313,7 @@ describe("an expired sign-in is refreshed once, and the new token is used from t
       const { home, dataDir, cwds } = await setup("refresh-once", [["api", 3]])
       await startIn(home, dataDir, cwds[0], "now")
       await waitFor(() => presignsSince(before).length >= 3 && existsSync(join(dataDir, "sync.log")) &&
-        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/ OK$/gm) ?? []).length >= 3, { timeoutMs: 8000 })
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/upload: session=.* OK$/gm) ?? []).length >= 3, { timeoutMs: 8000 })
       const refreshes = as.calls.token.filter((t) => t.grant_type === "refresh_token")
       assert.deepEqual(refreshes.map((t) => t.refresh_token), ["rt-1"], "one refresh, and no refresh token presented twice")
       assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(3).fill("Bearer at-refreshed-1"))
@@ -2334,7 +2334,7 @@ describe("an expired sign-in is refreshed once, and the new token is used from t
       const { home, dataDir, cwds } = await setup("refresh-together", [["one", 1], ["two", 1]])
       await Promise.all([startIn(home, dataDir, cwds[0], "a"), startIn(home, dataDir, cwds[1], "b")])
       await waitFor(() => (existsSync(join(dataDir, "sync.log")) &&
-        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/ OK$/gm) ?? []).length >= 2), { timeoutMs: 8000 })
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/upload: session=.* OK$/gm) ?? []).length >= 2), { timeoutMs: 8000 })
       assert.equal(as.calls.token.filter((t) => t.grant_type === "refresh_token").length, 1)
       assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(2).fill("Bearer at-refreshed-1"))
     } finally {
