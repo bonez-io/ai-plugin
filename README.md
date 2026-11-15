@@ -2,21 +2,21 @@
 
 The official [bonez](https://bonez.io) plugin for AI coding tools — your organization's **context graph** delivered into whatever coding agent you already use, over MCP.
 
-Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example `https://bonez.example.com`).
+Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people into one knowledge graph, plus the durable memories its agents accumulate. This plugin connects that graph to your harness and teaches your agent how to use it well. It works against Bonez's own cloud and against **your own Bonez server** (for example <https://bonez.example.com>).
 
 ## Install
 
-Open `https://<your server>/mcp/install` (for example `https://bonez.example.com/mcp/install`). It shows one command for your OS. It installs this plugin into every one of Claude Code, Codex and Cursor on the machine, pointed at your server:
+Documentation: <https://docs.bonez.io/plugin/install>.
 
-```powershell
-irm https://bonez.example.com/mcp/install.ps1 | iex      # Windows (PowerShell)
-```
+In Claude Code (needs 2.1.292 or later):
 
 ```bash
-curl -fsSL https://bonez.example.com/mcp/install.sh | sh   # macOS and Linux
+claude plugin install bonez --marketplace https://github.com/bonez-io/ai-plugin#stable
 ```
 
-The server writes its own address into the plugin, because only Claude Code can ask for it at install time. The script is plain text at the same URL; read it first if you like. Then sign in once per tool:
+For your own server, add `--config bonez_url=https://your-server` to that command.
+
+To install into Claude Code, Codex and Cursor at once, open `https://<your server>/mcp/install` (for example <https://gateway.bonez.io/mcp/install>). It shows one command for your OS, pointed at your server; the script is plain text at the same address, so you can read it first. The server writes its own address into the plugin, because only Claude Code can ask for it at install time. Then sign in once per tool:
 
 | Tool | Sign in |
 |---|---|
@@ -35,7 +35,7 @@ Remember that the deploy script lives in infra/, not the app repo.
 
 The last one saves a memory; the plugin asks you to approve every `graph_write` call (see [Write gate](#write-gate)).
 
-### Bonez's own cloud (no script)
+### Native install per tool
 
 Each tool installs the plugin natively and points at `gateway.bonez.io` by default:
 

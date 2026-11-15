@@ -83,7 +83,7 @@ describe("file names", () => {
 })
 
 describe("hook commands", () => {
-  const commandsOf = (file) => Object.values(json(file).hooks).flatMap((groups) => groups.flatMap((g) => (g.hooks ?? [g]).filter((h) => h.type !== "mcp_tool").map((h) => h.command)))
+  const commandsOf = (file) => Object.values(json(file).hooks).flatMap((groups) => groups.flatMap((g) => (g.hooks ?? [g]).filter((h) => h.type !== "mcp_tool").map((h) => h.args ? [h.command, ...h.args.map((a) => `"${a}"`)].join(" ") : h.command)))
 
   test("Claude Code: the plugin root is always quoted, so a path with a space stays one word", () => {
     const commands = commandsOf("hooks/hooks.json")
@@ -96,8 +96,9 @@ describe("hook commands", () => {
   })
 
   test("Claude Code: the write gate is run through bash (Git Bash on Windows), never as a bare script", () => {
-    const gate = json("hooks/hooks.json").hooks.PreToolUse[0].hooks[0].command
-    assert.match(gate, /^bash "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/gate-write\.sh"$/)
+    const gate = json("hooks/hooks.json").hooks.PreToolUse[0].hooks[0]
+    assert.equal(gate.command, "bash")
+    assert.deepEqual(gate.args, ["${CLAUDE_PLUGIN_ROOT}/hooks/gate-write.sh"])
   })
 
   test("Cursor: every hook names its interpreter (a bare .sh is opened by the Windows file association)", () => {

@@ -7,7 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/gate-write.sh\"",
+            "command": "bash",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/gate-write.sh"],
             "timeout": 5
           }
         ]
@@ -19,7 +20,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-session-sync.mjs\" hook claude session-end",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-session-sync.mjs", "hook", "claude", "session-end"],
             "timeout": 5
           }
         ]
@@ -31,12 +33,14 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-session-sync.mjs\" hook claude session-start",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-session-sync.mjs", "hook", "claude", "session-start"],
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs", "claude"],
             "timeout": 5
           }
         ]
@@ -48,7 +52,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs", "claude"],
             "timeout": 5
           }
         ]
@@ -58,7 +63,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs", "claude"],
             "timeout": 5
           }
         ]
@@ -69,7 +75,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs", "claude"],
             "timeout": 5
           }
         ]

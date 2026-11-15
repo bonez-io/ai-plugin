@@ -514,7 +514,8 @@ describe("standalone capture and memory hooks", () => {
       const run = (name, tool, prefix = "", suffix = "", prompt, file_path) => {
         const entries = hooks[name]
         const handlers = cursor ? entries : entries.flatMap((e) => e.hooks)
-        const cmd = handlers.find((h) => /recall-hook|session-sync.sh recall/.test(h.command || "")).command
+        const h = handlers.find((h) => /recall-hook|session-sync.sh recall/.test((h.command || "") + (h.args || []).join(" ")))
+        const cmd = h.args ? [h.command, ...h.args.map((a) => `"${a}"`)].join(" ") : h.command
         const result = spawnSync("bash", ["-c", cmd], {
           cwd: root, encoding: "utf8",
           env: { ...process.env, PLUGIN_ROOT: root, CLAUDE_PLUGIN_ROOT: root },
@@ -556,7 +557,7 @@ describe("standalone capture and memory hooks", () => {
         assert.match(run("PostToolUse", tool), /Before sending an answer.*memory_cite/)
       }
       if (cursor) assert.match(hooks.stop[0].command, /turn-end/)
-      else assert.match(hooks.SessionEnd[0].hooks[0].command, /session-end/)
+      else assert.match([hooks.SessionEnd[0].hooks[0].command, ...(hooks.SessionEnd[0].hooks[0].args || [])].join(" "), /session-end/)
     })
   }
 })
