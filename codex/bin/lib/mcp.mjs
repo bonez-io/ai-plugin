@@ -33,12 +33,12 @@ function message(res, text, id) {
 }
 
 // Calls the tool `name` with `args` and returns the tool's result ({content: [...], isError}).
-export async function callTool(url, token, name, args) {
+export async function callTool(url, token, name, args, consumer = "plugin-push") {
   const headers = {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
-    "x-bonez-mcp-consumer": "plugin-push",
+    "x-bonez-mcp-consumer": consumer,
   }
   const post = async (body) => {
     const { res, text } = await send(url, { method: "POST", headers, body: JSON.stringify(body) })
