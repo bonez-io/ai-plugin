@@ -8,7 +8,7 @@ import { createServer } from "node:http"
 export function startStubGateway() {
   const calls = { presign: [], put: [], complete: [], start: [], events: [] }
   // The live-session routes answer with these; a test sets them to replay an old gateway (403).
-  const answers = { start: 200, events: 200 }
+  const answers = { start: 200, events: 200, authServer: null }
   let uploadSeq = 0
 
   const server = createServer((req, res) => {
@@ -55,6 +55,13 @@ export function startStubGateway() {
         calls.complete.push({ headers: { ...req.headers }, uploadId: completeMatch[1] })
         res.writeHead(200, { "content-type": "application/json" })
         res.end(JSON.stringify({ upload_id: completeMatch[1], status: "uploaded" }))
+        return
+      }
+
+      // Names an authorization server when a test sets one, so an OAuth refresh can be exercised.
+      if (req.url === "/.well-known/oauth-protected-resource" && answers.authServer) {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify({ resource: `http://127.0.0.1:${port}/mcp`, authorization_servers: [`${answers.authServer}/`] }))
         return
       }
 

@@ -341,6 +341,27 @@ function sleepSync(ms) {
 
 function withStateLock(fn, timeoutMs = STATE_LOCK_TIMEOUT_MS) {
   const lock = `${statePath()}.lock`
+  const held = takeStateLock(lock, timeoutMs)
+  try {
+    return fn()
+  } finally {
+    releaseStateLock(lock, held)
+  }
+}
+
+// The same lock around async work (the token refresh, which waits on the network).
+async function withStateLockAsync(fn, timeoutMs = STATE_LOCK_TIMEOUT_MS) {
+  const lock = `${statePath()}.lock`
+  const held = takeStateLock(lock, timeoutMs)
+  try {
+    return await fn()
+  } finally {
+    releaseStateLock(lock, held)
+  }
+}
+
+function takeStateLock(lock, timeoutMs) {
+  ensureDataDir()
   const deadline = Date.now() + timeoutMs
   let held = false
   for (;;) {
@@ -362,16 +383,15 @@ function withStateLock(fn, timeoutMs = STATE_LOCK_TIMEOUT_MS) {
       sleepSync(25)
     }
   }
+  return held
+}
+
+function releaseStateLock(lock, held) {
+  if (!held) return
   try {
-    return fn()
-  } finally {
-    if (held) {
-      try {
-        unlinkSync(lock)
-      } catch {
-        /* already gone */
-      }
-    }
+    unlinkSync(lock)
+  } catch {
+    /* already gone */
   }
 }
 
@@ -908,11 +928,24 @@ async function resolveBearer(cfg, gatewayUrl) {
   if (!oauth.refreshToken) {
     throw new Error("the stored access token expired and there is no refresh token — run `login` again")
   }
-  const fresh = await refreshAccessToken(gatewayUrl, oauth.refreshToken)
-  // Re-read before writing: a concurrent `disable` or `--repo` edit must not be clobbered by
-  // an upload that happened to refresh its token at the same moment. Only `oauth` is ours.
-  const current = loadConfig() ?? cfg
-  saveConfig({ ...current, oauth: { ...fresh, issuer: oauth.issuer } })
+  // One refresh at a time across processes (several sessions starting together each spawn a
+  // worker), under the lock the upload record already uses. Inside it, re-read the stored
+  // settings: another worker may have refreshed already, and a rotating sign-in service treats a
+  // refresh token presented twice as stolen.
+  const fresh = await withStateLockAsync(async () => {
+    // Re-read before writing: a concurrent `disable` or `--repo` edit must not be clobbered by
+    // an upload that happened to refresh its token at the same moment. Only `oauth` is ours.
+    const current = loadConfig() ?? cfg
+    const stored = current.oauth ?? oauth
+    if (stored.accessToken && stored.expiresAt && Date.now() < stored.expiresAt - TOKEN_SKEW_MS) return stored
+    if (!stored.refreshToken) throw new Error("the stored access token expired and there is no refresh token — run `login` again")
+    const next = { ...(await refreshAccessToken(gatewayUrl, stored.refreshToken)), issuer: stored.issuer ?? oauth.issuer }
+    saveConfig({ ...current, oauth: next })
+    return next
+  }, 15_000)
+  // The rest of this process's run uses it too: a catch-up of several transcripts passes the
+  // same settings to every upload, and must not refresh again with the old refresh token.
+  cfg.oauth = fresh
   return fresh.accessToken
 }
 

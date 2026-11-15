@@ -2253,3 +2253,69 @@ describe("catch-up: never a sub-agent transcript, and newest first", () => {
     assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), /skipped — a sub-agent transcript/)
   })
 })
+
+// ---------------------------------------------------------------------------- one refresh per catch-up
+
+describe("an expired sign-in is refreshed once, and the new token is used from then on", () => {
+  const setup = async (prefix, workspaces) => {
+    const home = freshDir(prefix)
+    const dataDir = join(home, "data")
+    mkdirSync(dataDir, { recursive: true })
+    // An expired OAuth sign-in, as `login` stores it.
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [],
+      oauth: { accessToken: "at-old", refreshToken: "rt-1", expiresAt: Date.now() - 1 } }))
+    const cwds = []
+    for (const [w, count] of workspaces) {
+      const cwd = join(home, "work", w)
+      mkdirSync(cwd, { recursive: true })
+      const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+      mkdirSync(project, { recursive: true })
+      for (let i = 0; i < count; i++) cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, `${w}-stale-${i}.jsonl`))
+      cwds.push(cwd)
+    }
+    return { home, dataDir, cwds }
+  }
+  const startIn = (home, dataDir, cwd, id) => runCli(["hook", "claude", "session-start"], {
+    env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, BONEZ_OAUTH_CLIENT_ID: "test-client" },
+    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: id, cwd }),
+  })
+  const presignsSince = (n) => gateway.calls.presign.slice(n)
+
+  test("a catch-up of three stale transcripts refreshes once; all three uploads carry the new token", async () => {
+    const as = await startStubOAuth({ rotateRefreshToken: "rt-2" })
+    gateway.answers.authServer = as.url
+    const before = gateway.calls.presign.length
+    try {
+      const { home, dataDir, cwds } = await setup("refresh-once", [["api", 3]])
+      await startIn(home, dataDir, cwds[0], "now")
+      await waitFor(() => presignsSince(before).length >= 3 && existsSync(join(dataDir, "sync.log")) &&
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/ OK$/gm) ?? []).length >= 3, { timeoutMs: 8000 })
+      const refreshes = as.calls.token.filter((t) => t.grant_type === "refresh_token")
+      assert.deepEqual(refreshes.map((t) => t.refresh_token), ["rt-1"], "one refresh, and no refresh token presented twice")
+      assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(3).fill("Bearer at-refreshed-1"))
+      const stored = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")).oauth
+      assert.equal(stored.accessToken, "at-refreshed-1")
+      assert.equal(stored.refreshToken, "rt-2")
+    } finally {
+      gateway.answers.authServer = null
+      await as.close()
+    }
+  })
+
+  test("two sessions starting together still refresh once", async () => {
+    const as = await startStubOAuth({ rotateRefreshToken: "rt-2" })
+    gateway.answers.authServer = as.url
+    const before = gateway.calls.presign.length
+    try {
+      const { home, dataDir, cwds } = await setup("refresh-together", [["one", 1], ["two", 1]])
+      await Promise.all([startIn(home, dataDir, cwds[0], "a"), startIn(home, dataDir, cwds[1], "b")])
+      await waitFor(() => (existsSync(join(dataDir, "sync.log")) &&
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/ OK$/gm) ?? []).length >= 2), { timeoutMs: 8000 })
+      assert.equal(as.calls.token.filter((t) => t.grant_type === "refresh_token").length, 1)
+      assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(2).fill("Bearer at-refreshed-1"))
+    } finally {
+      gateway.answers.authServer = null
+      await as.close()
+    }
+  })
+})
