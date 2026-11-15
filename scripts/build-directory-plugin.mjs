@@ -106,7 +106,7 @@ The System Model is your organization's connected model of its code, tickets, pe
 - **Search**: one query across code, docs, tickets, PRs, conversations and people.
 - **Impact analysis**: who calls a function, what breaks if you change or delete it, which tests cover it.
 - **Rules**: your organization's standing rules, applied when Claude reviews or writes code.
-- **Memories**: durable facts your team saved, such as conventions and decisions, available to every session. Claude asks before it saves one.
+- **Memories**: durable facts your team saved, such as conventions and decisions, available to every session. Saving one is a write, so the app's own permission prompt applies.
 
 ## Sign in
 

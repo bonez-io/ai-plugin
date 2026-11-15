@@ -12,7 +12,7 @@ Search the org's System Model for whatever the user typed after the command.
 
 Narrow `types` only with names `system_model_schema` has shown you, and only if the user's phrasing clearly asks for it.
 
-2. Present the ranked results compactly: label, record type, key, and the attached-memory count. Keep the `~hex` handles for follow-up calls; a handle is tool input, not a link a person can open.
+2. Present the ranked results compactly: label, record type, key, and the attached-memory count. Keep the `~hex` handles for follow-up calls; a handle is tool input, not a URL a person can open.
 
 3. If the output says the search was cut off, say so — that is NOT "nothing matched". If nothing matched, say "no records matched these words" and offer one rephrasing; do not conclude the org knows nothing about it.
 

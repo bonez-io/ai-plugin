@@ -17,7 +17,7 @@ phrasing clearly asks for it.
 
 Present the ranked results compactly: label, record type, key, and the
 attached-memory count. Keep the `~hex` handles for follow-up calls; a handle
-is tool input, not a link a person can open.
+is tool input, not a URL a person can open.
 
 If the output says the search was cut off, say so — that is NOT "nothing
 matched". If nothing matched, say "no records matched these words" and offer one

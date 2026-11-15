@@ -82,8 +82,17 @@ input="$(cat)"
 # environment: it is the one field both hosts always send, and keying on it
 # means a host that sets a surprising env var cannot route us into the wrong
 # response shape. Anything we do not recognise falls through silently.
+#
+# The tool's own input is model-controlled and can carry either event name as a
+# nested key. So Claude Code is recognised first, by its event name together
+# with the env var only it sets: a `beforeMCPExecution` buried in a tool input
+# cannot turn a Claude Code call into a Cursor-shaped answer that Claude Code
+# would ignore. On Cursor the env var is absent, so a nested `PreToolUse`
+# cannot do the reverse.
 protocol=""
-if [[ "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"beforeMCPExecution\" ]]; then
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"PreToolUse\" ]]; then
+    protocol="claude"
+elif [[ "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"beforeMCPExecution\" ]]; then
     protocol="cursor"
 elif [[ "$input" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"PreToolUse\" ]]; then
     protocol="claude"

@@ -285,6 +285,19 @@ run_case "rules read with a nested write-op name fails toward prompting" \
     '{"tool_name":"mcp__bonez__rules","tool_input":{"op":"list","params_schema":{"op":"delete"}}}' \
     prompt rules:delete
 
+# --- an event name nested in the tool input must not pick the protocol ---
+#
+# The tool input is model-controlled. A `beforeMCPExecution` key inside it used
+# to route a Claude Code call to the Cursor answer shape, which Claude Code
+# ignores: the write ran with no prompt.
+run_case "memory_save with a nested Cursor event name still gets Claude Code's prompt" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__memory_save","tool_input":{"op":"remember","about":{"hook_event_name":"beforeMCPExecution"}}}' \
+    prompt memory_save:
+
+run_case "rules_write with a nested Cursor event name still gets Claude Code's prompt" \
+    '{"hook_event_name":"PreToolUse","tool_name":"mcp__plugin_bonez_bonez__rules_write","tool_input":{"op":"save","x":{"hook_event_name":"beforeMCPExecution"}}}' \
+    prompt rules_write:
+
 # --- graph_write: every op is a write, so every op prompts ---
 #
 # graph_write replaced `memory`: it has seven typed ops and no read op at all.

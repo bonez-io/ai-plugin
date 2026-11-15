@@ -10,7 +10,7 @@ Show the org's Bonez agents. Argument (optional): **$ARGUMENTS**
 
 2. No argument: call `vendor_read` with the `bonez.agent.list.v2` id and `{"input": {"limit": 20}}`. Show a compact table: name, enabled, triggers (each one's `summary`), latest run status and when. If `next_cursor` is set, say there are more and offer the next page. `q`, `trigger` (an operation type such as `linear.issue.changed`), `status` and `include_retired` narrow the list.
 
-3. With an argument: call `vendor_read` with `bonez.agent.read.v2` with `{"name": "$ARGUMENTS"}` and `bonez.run.list.v1` with `{"agent": "$ARGUMENTS", "limit": 5}`. Show the agent in two lines (what it is, how it is triggered) and its recent runs (status, started, finished, who triggered). If a deployment is not `ready`, add its `readiness` reasons. An unknown name is an error: say so and offer the list.
+3. With an argument: call `vendor_read` with `bonez.agent.read.v2` with `{"input": {"name": "$ARGUMENTS"}}` and `bonez.run.list.v1` with `{"input": {"agent": "$ARGUMENTS", "limit": 5}}`. Show the agent in two lines (what it is, how it is triggered) and its recent runs (status, started, finished, who triggered). If a deployment is not `ready`, add its `readiness` reasons. An unknown name is an error: say so and offer the list.
 
 4. Offer the next step: `bonez.run.read.v1` for a run's `result` (the agent's own report), `outcome` and error, or `bonez.session.list.v1` for its sessions. These are read-only; never run anything else without asking.
 
