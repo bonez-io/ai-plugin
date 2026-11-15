@@ -77,6 +77,13 @@ Every plugin config sends its version in an `x-bonez-plugin-version` header (CI 
 version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
 update signal for a tool that cannot update itself.
 
+### What is new in 0.10.9
+
+- **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
+- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only (1SI-3763).
+- **Capture says when it is off.** `status` gives the same answer everywhere and shows the last upload attempt and success; a failed upload logs its cause; Claude Code shows one line a day when capture is set up but not uploading (1SI-3775).
+- **Catch-up sends current work first.** Sub-agent transcripts are never uploaded as sessions, the catch-up and `backfill` go newest first, and a transcript written in the last 10 minutes waits until its session is quiet (1SI-3784).
+
 ## Windows
 
 Claude Code, Codex and Cursor run on Windows 11. Before the one command:
@@ -478,15 +485,18 @@ bonez-session-sync.mjs install bnz_... --global
 | `login [--repo <path>]... [--global]` | Browser sign-in, then turn capture on. Repo-scoped by default; `--global` captures every repo on this machine. Also re-authorizes an existing install. |
 | `logout` | Discard the credential and stop capture. |
 | `install <bnz_...key> [--repo <path>]... [--global]` | The headless lane: store a sessions-scoped key (mode 600) and turn capture on. Same scope options. |
-| `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far. Never prints a key or token. |
+| `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far, the folder the Claude Code hook reads its settings from (and whether they were found there or through the fallback), and the time and result of the last upload attempt and of the last successful one. The same answer from a plain shell as under the hook. Never prints a key or token. |
 | `disable` / `enable` | Turn capture off/on without discarding the credential. |
-| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Oldest first, in bounded batches; re-run to continue. Start with `--dry-run` to see the volume first. |
+| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Newest first, in bounded batches; sub-agent transcripts are part of their lead session and are never uploaded on their own; re-run to continue. Start with `--dry-run` to see the volume first. |
 
 **Catching up on what was missed.** Capture normally happens at `SessionEnd`. When that never
 fires — a crash, a kill, or the plugin having been disabled for a while — the next session
 started in the same directory flushes what was stranded there, so an ordinary gap heals on its
 own. That per-workspace catch-up is deliberately capped, so it drains a session or two at a
-time rather than stalling the start of your work.
+time rather than stalling the start of your work. It goes newest first, so current work arrives
+before old history, and skips a transcript written in the last 10 minutes: that session is
+probably still running, and its own end (or a later start) sends it. A sub-agent's transcript (under `<session>/subagents/`, its lines marked
+`isSidechain`) is part of its lead session and is never uploaded as a session of its own.
 
 It is not a way to import a year of history. For that, `backfill` sweeps every project
 directory on the machine and uploads everything not already current:
@@ -499,6 +509,18 @@ bonez-session-sync.mjs backfill             # publish the first batch
 It is a deliberate command and no hook ever triggers it, because it publishes a large volume of
 past conversation to your organization's System Model in one go. Each upload is recorded as it lands,
 so interrupting it is safe and re-running continues where it stopped.
+
+**When capture is set up but not working,** Claude Code shows you one line at the start of a
+session, at most once a day per reason, for example: "Bonez session capture has not uploaded since
+1 Sep (certificate check failed). Run `node ".../bonez-session-sync.mjs" status` for details." It
+appears when the last three upload attempts all failed, when the last attempt failed and nothing
+has uploaded for three days, or when the settings sit in an older folder
+the hook no longer reads (running `status` moves them). The line is shown to you, not added to the
+model's context. It is worked out from what the uploader recorded, locally: a session it skips on purpose (empty,
+unchanged, out of scope) or has not reached yet (still open) never counts. Cursor's and Codex's session-start hooks
+have no field for a message to the person, so they show nothing; `status` works the same there. A
+failed upload also writes its cause to `sync.log`: the step (token refresh, presign, upload,
+complete), the host, and the error code and message.
 
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed
 config — the same escape hatch `BONEZ_MCP_GATE_DISABLE` gives the write gate.
@@ -550,9 +572,33 @@ location outright.
   `CURSOR_TRANSCRIPT_PATH` and then to a walk of `~/.cursor/projects/*/agent-transcripts/`, but
   if Cursor has written nothing there is nothing to capture and the hook is a silent no-op.
 
+**Live sessions (Claude Code and Cursor).** While capture is on, and only for a session whose
+repository is inside your capture scope, the plugin also tells Bonez that the session is running,
+so teammates can see "working here now, edited `src/x.py`". It sends:
+
+- when the session starts: the session's id, the repository's name as `owner/name` (from the Git
+  origin), and which tool it is (`claude-code` or `cursor`);
+- after a Read, Edit or Write: whether the file was read or changed, its path **inside the
+  repository** (`owner/name/src/x.py`), and the time.
+
+Nothing else: no file content, no prompt, no command line, no title, no path on your laptop. A
+file outside the repository sends nothing. Teammates see the files you changed; a file you only
+read just keeps the session marked as working and is never shown. There is no end message: the
+session leaves teammates' lists when its transcript upload is imported, or after 30 quiet
+minutes. Capture off (`disable`, `logout`, `BONEZ_SESSION_SYNC=0`) or a repository out of scope
+sends nothing at all. The hooks only write a line to a local file; a background process sends it,
+and a failure is one line in `sync.log`. A Bonez server without this feature refuses the first
+call, and the plugin stops trying for that session. Once a session is announced, the recall hints
+the plugin gives the model name the session's id and ask it to pass it as `session` to
+`memory_recall`, so the session's own reads and edits are not shown back to it as someone else's
+work; before that, or when the server refused, the hints are unchanged. A session's local
+bookkeeping (under `presence/` beside the credential) is removed at its end, and anything older
+than three days is swept at the next start. Codex is not announced: its transcript id is
+not its hook's session id, so the announcement would never meet its own upload.
+
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
 
-**Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Simple questions can finish without a seed read. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its file ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports System Model search and fetch for anchored memories. Capture consent and System Model sign-in are separate.
+**Recall in Claude Code, Codex and Cursor:** On the first prompt of a session the plugin fetches the Bonez seed: your memories, work in flight, and what is relevant to this repo (from the checkout's `origin` remote) and to the prompt. It adds the seed to the agent's context and passes the session's id, so the session's own activity is left out. Later prompts do not fetch it again. Claude Code fetches it with an `mcp_tool` hook on its signed-in Bonez connection, which has no access to the repo, so its seed is built from the prompt alone. Codex and Cursor hooks can only run commands, so the hook calls the server itself, with the repo and the prompt. It uses an API key installed for session capture (`install <bnz_...>`, sent only to Bonez-operated servers) or a `bonez-plugin-push login` sign-in for that server. Capture's own `login` is upload-only and cannot read the System Model. The fetch gives up after about three seconds, and the prompt then goes ahead without it. A server from before the session argument refuses it, and the hook asks once more without it. The startup guidance still tells the agent to call `memory_recall` on its signed-in Bonez MCP connection when no seed arrived. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its System Model ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
 
 ## Publishing a plugin
 

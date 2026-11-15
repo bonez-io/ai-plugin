@@ -12,12 +12,13 @@
 // Run: node --test tests/session_sync.test.mjs   (or ./tests/test_session_sync.sh)
 import { test, describe, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync, cpSync, rmSync, existsSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, utimesSync, cpSync, rmSync, existsSync, symlinkSync, realpathSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
+import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
 import { startStubOAuth } from "./lib/stub-oauth.mjs"
@@ -67,7 +68,9 @@ function runCli(args, { env = {}, input = "" } = {}) {
     const t0 = performance.now()
     const child = spawn(process.execPath, [SCRIPT, ...args], {
       cwd: REPO_ROOT,
-      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, ...env },
+      // The catch-up's quiet period would hold back the transcripts these tests just wrote. The
+      // in-process check below runs with the real ten minutes.
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -1350,7 +1353,7 @@ describe("credential store: one sign-in shared by all three clients", () => {
   // hardcoded branch — while Claude Code writes to `<plugin>-<marketplace>`, which is only
   // that same path when the marketplace happens to be named "bonez". Any other name and
   // Cursor silently found no credential and captured nothing, with no error anywhere.
-  const statusDataDir = (out) => (/data dir:\s*(.+)/.exec(out)?.[1] ?? "").trim()
+  const statusDataDir = (out) => (/hook reads:\s*(.+?)(?: \(|$)/m.exec(out)?.[1] ?? "").trim()
 
   test("a fresh install with no legacy store lands in the agent-neutral location", async () => {
     const home = freshDir("store-fresh")
@@ -1768,4 +1771,617 @@ test("an empty host data directory uses the configured shared store, while a hos
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------- live session (1SI-3763)
+
+describe("live session: start once, then repository-relative reads and edits", () => {
+  // A Git checkout whose origin is acme/api, with two files in it and one file outside it.
+  const makeRepo = (origin = "https://github.com/acme/api.git") => {
+    const repo = freshDir("live-repo")
+    for (const args of [["init", "-q"], ["remote", "add", "origin", origin]]) {
+      assert.equal(spawnSync("git", args, { cwd: repo }).status, 0)
+    }
+    mkdirSync(join(repo, "src"))
+    writeFileSync(join(repo, "src", "a.py"), "a = 1\n")
+    writeFileSync(join(repo, "src", "b.py"), "b = 1\n")
+    const outside = join(freshDir("live-outside"), "notes.txt")
+    writeFileSync(outside, "private\n")
+    return { repo, outside }
+  }
+  const forId = (route, id) => gateway.calls[route].filter((c) => c.headers["x-bonez-session"] === id)
+  const logOf = (dataDir) => (existsSync(join(dataDir, "sync.log")) ? readFileSync(join(dataDir, "sync.log"), "utf8") : "")
+  const hook = (dataDir, agent, event, payload) =>
+    runCli(["hook", agent, event], { env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url }, input: JSON.stringify(payload) })
+  // The start worker has finished once its catch-up line is logged (announce runs before it).
+  const started = (dataDir, agent) => waitFor(() => logOf(dataDir).includes(`upload: ${agent} session-start`))
+  // The drain worker has finished once its lock is gone and nothing is left spooled.
+  const drained = (dataDir, id) => waitFor(() => !existsSync(join(dataDir, "presence", `${id}.lock`)) &&
+    !existsSync(join(dataDir, "presence", `${id}.ndjson`)))
+
+  test("claude: one start with the header, the repository and no title; a read and an edit; nothing for a file outside", async () => {
+    const { repo, outside } = makeRepo()
+    const dataDir = freshDir("live-claude")
+    await install(dataDir, ["--repo", repo])
+    const id = "live-claude-1"
+    const start = { hook_event_name: "SessionStart", session_id: id, cwd: repo, source: "startup" }
+    await hook(dataDir, "claude", "session-start", start)
+    await started(dataDir, "claude")
+    await hook(dataDir, "claude", "session-start", { ...start, source: "resume" })
+    await waitFor(() => logOf(dataDir).split("upload: claude session-start").length === 3)
+
+    const starts = forId("start", id)
+    assert.equal(starts.length, 1)
+    assert.deepEqual(starts[0].body, { surface: "claude-code", repo: "acme/api" })
+    assert.equal(starts[0].headers.authorization, `Bearer ${TEST_KEY}`)
+
+    const touch = (tool_name, file_path) =>
+      hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name, tool_input: { file_path, content: "SECRET" } })
+    symlinkSync(outside, join(repo, "src", "link.txt"))
+    const escapes = [["Read", outside], ["Read", join(repo, "src", "link.txt")], ["Edit", "src/../../escape.py"], ["Read", join(repo, "..", "x.py")]]
+    for (const [tool, file] of [["Read", join(repo, "src", "a.py")], ["Edit", "src/b.py"], ...escapes]) {
+      const res = await touch(tool, file)
+      assert.equal(res.status, 0)
+      assert.equal(res.stdout, "")
+      assert.equal(res.stderr, "")
+      assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    }
+    await waitFor(() => forId("events", id).length)
+    await drained(dataDir, id)
+    const events = forId("events", id).flatMap((c) => c.body.events)
+    assert.deepEqual(events.map((e) => [e.tool, e.args]), [["read", { path: "acme/api/src/a.py" }], ["edit", { path: "acme/api/src/b.py" }]])
+    assert.ok(events.every((e) => !Number.isNaN(Date.parse(e.at))))
+    assert.doesNotMatch(JSON.stringify(forId("events", id)), /SECRET|private|notes\.txt/)
+  })
+
+  test("cursor: start with surface cursor and the conversation id; a relative edit resolves against the workspace", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-cursor")
+    await install(dataDir, ["--global"])
+    const id = "live-cursor-convo"
+    await hook(dataDir, "cursor", "session-start", { hook_event_name: "sessionStart", conversation_id: id, session_id: "other", workspace_roots: [repo] })
+    await started(dataDir, "cursor")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "cursor", repo: "acme/api" }])
+    await hook(dataDir, "cursor", "tool-use", { hook_event_name: "postToolUse", conversation_id: id, workspace_roots: [repo], tool_name: "Write", tool_input: { file_path: "src/a.py" } })
+    await waitFor(() => forId("events", id).length)
+    assert.deepEqual(forId("events", id)[0].body.events.map((e) => [e.tool, e.args.path]), [["write", "acme/api/src/a.py"]])
+  })
+
+  test("capture off, or the repository out of scope: nothing is sent", async () => {
+    const { repo } = makeRepo()
+    const off = freshDir("live-off")
+    await install(off, ["--global"])
+    assert.equal((await runCli(["disable"], { env: { CLAUDE_PLUGIN_DATA: off } })).status, 0)
+    const elsewhere = freshDir("live-scope")
+    await install(elsewhere, ["--repo", freshDir("live-other-repo")])
+
+    for (const [dataDir, id] of [[off, "live-off-1"], [elsewhere, "live-scope-1"]]) {
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } })
+    }
+    await started(elsewhere, "claude") // the disabled install never spawns a worker at all
+    await new Promise((r) => setTimeout(r, 1500)) // longer than a drain's batch wait
+    for (const id of ["live-off-1", "live-scope-1"]) {
+      assert.equal(forId("start", id).length, 0, id)
+      assert.equal(forId("events", id).length, 0, id)
+    }
+    assert.ok(!existsSync(join(off, "presence")) && !existsSync(join(elsewhere, "presence")))
+  })
+
+  test("a 403 on start (an older gateway) stops every further call for that session", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-403")
+    await install(dataDir, ["--global"])
+    const id = "live-403-1"
+    gateway.answers.start = 403
+    try {
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await started(dataDir, "claude")
+    } finally {
+      gateway.answers.start = 200
+    }
+    assert.equal(forId("start", id).length, 1)
+    assert.match(logOf(dataDir), /presence: start session=live-403-1 agent=claude failed — HTTP 403/)
+    await hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Read", tool_input: { file_path: join(repo, "src", "a.py") } })
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo, source: "resume" })
+    await waitFor(() => logOf(dataDir).split("upload: claude session-start").length === 3)
+    await new Promise((r) => setTimeout(r, 1500))
+    assert.equal(forId("start", id).length, 1)
+    assert.equal(forId("events", id).length, 0)
+  })
+
+  const recall = (dataDir, host, payload) => {
+    const r = spawnSync(process.execPath, [join(REPO_ROOT, "bin", "bonez-recall-hook.mjs"), host], {
+      encoding: "utf8", input: JSON.stringify(payload),
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+    })
+    assert.equal(r.status, 0, r.stderr)
+    const out = JSON.parse(r.stdout)
+    return host === "cursor" ? out.additional_context : out.hookSpecificOutput.additionalContext
+  }
+
+  test("outside a Git checkout: global scope announces with no repository; repo scope does not, and says why", async () => {
+    const folder = freshDir("live-workspace-root") // a folder of several repositories, not one itself
+    writeFileSync(join(folder, "notes.md"), "x\n")
+    const global = freshDir("live-noscope-global")
+    await install(global, ["--global"])
+    const id = "live-norepo-1"
+    await hook(global, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: folder })
+    await started(global, "claude")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "claude-code" }])
+    assert.deepEqual(JSON.parse(readFileSync(join(global, "presence", `${id}.json`), "utf8")), { repo: null })
+    // No repository to be relative to, so file touches are not sent.
+    await hook(global, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: folder, tool_name: "Edit", tool_input: { file_path: join(folder, "notes.md") } })
+    await new Promise((r) => setTimeout(r, 1500))
+    assert.equal(forId("events", id).length, 0)
+
+    const scoped = freshDir("live-noscope-repo")
+    await install(scoped, ["--repo", freshDir("live-listed-repo")])
+    await hook(scoped, "claude", "session-start", { hook_event_name: "SessionStart", session_id: "live-norepo-2", cwd: folder })
+    await started(scoped, "claude")
+    assert.equal(forId("start", "live-norepo-2").length, 0)
+    assert.match(logOf(scoped), /presence: start session=live-norepo-2 agent=claude not announced — the folder is outside the capture scope/)
+  })
+
+  test("recall text names the session only once its start succeeded; otherwise it is unchanged", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-recall")
+    await install(dataDir, ["--global"])
+    const cases = [
+      ["claude", { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }],
+      ["claude", { hook_event_name: "PostToolUse", session_id: "live-recall-1", cwd: repo, tool_name: "Read", tool_input: { file_path: join(repo, "src", "a.py") } }],
+      ["cursor", { hook_event_name: "postToolUse", conversation_id: "live-recall-1", workspace_roots: [repo], tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } }],
+    ]
+    const before = cases.map(([host, payload]) => recall(dataDir, host, payload))
+    for (const text of before) assert.doesNotMatch(text, /live-recall-1|"session"/)
+    gateway.answers.start = 403
+    try {
+      await hook(dataDir, "claude", "session-start", cases[0][1])
+      await started(dataDir, "claude")
+    } finally {
+      gateway.answers.start = 200
+    }
+    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before, "a refused start keeps the text")
+
+    rmSync(join(dataDir, "presence"), { recursive: true, force: true })
+    await hook(dataDir, "claude", "session-start", { ...cases[0][1], source: "resume" })
+    await waitFor(() => existsSync(join(dataDir, "presence", "live-recall-1.json")))
+    const note = ' This session\'s id is "live-recall-1". Pass "session": "live-recall-1" to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.'
+    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => t + note))
+    // Codex is never announced, so its text never changes.
+    const codex = { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }
+    assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
+  })
+
+  test("a 404 or 409 on events refuses the session: one failed call, not one per burst", async () => {
+    for (const status of [404, 409]) {
+      const { repo } = makeRepo()
+      const dataDir = freshDir(`live-${status}`)
+      await install(dataDir, ["--global"])
+      const id = `live-events-${status}`
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await started(dataDir, "claude")
+      gateway.answers.events = status
+      try {
+        const touch = () => hook(dataDir, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } })
+        await touch()
+        await waitFor(() => forId("events", id).length)
+        await drained(dataDir, id)
+        await touch()
+        await new Promise((r) => setTimeout(r, 1500))
+      } finally {
+        gateway.answers.events = 200
+      }
+      assert.equal(forId("events", id).length, 1, String(status))
+      assert.deepEqual(JSON.parse(readFileSync(join(dataDir, "presence", `${id}.json`), "utf8")), { refused: status })
+    }
+  })
+
+  test("origin: an ssh URL with a port gives owner/name; a URL with credentials sends no repository", async () => {
+    const dataDir = freshDir("live-origin")
+    await install(dataDir, ["--global"])
+    for (const [origin, id, want] of [
+      ["ssh://git@git.example.com:2222/acme/api.git", "live-origin-port", [{ surface: "claude-code", repo: "acme/api" }]],
+      ["https://github.com:8443/acme/api.git", "live-origin-https-port", [{ surface: "claude-code", repo: "acme/api" }]],
+      // The credentials never leave; the session is announced with no repository.
+      ["https://someone:tok@github.com/acme/api.git", "live-origin-creds", [{ surface: "claude-code" }]],
+    ]) {
+      const { repo } = makeRepo(origin)
+      const lines = logOf(dataDir).split("upload: claude session-start").length
+      await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+      await waitFor(() => logOf(dataDir).split("upload: claude session-start").length > lines)
+      assert.deepEqual(forId("start", id).map((c) => c.body), want, origin)
+    }
+  })
+
+  test("a gateway Bonez does not operate gets neither call", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-foreign")
+    await install(dataDir, ["--global"])
+    const fetchLog = join(dataDir, "fetch.log")
+    writeFileSync(fetchLog, "")
+    const env = {
+      CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: "https://bonez.example.com",
+      NODE_OPTIONS: `--import=${join(HERE, "lib", "record-fetch.mjs")}`, BONEZ_TEST_FETCH_LOG: fetchLog,
+    }
+    const id = "live-foreign-1"
+    await runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: id, cwd: repo }) })
+    await started(dataDir, "claude")
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    // An announced session whose gateway setting then changes: the drain worker refuses too.
+    mkdirSync(join(dataDir, "presence"), { recursive: true })
+    writeFileSync(join(dataDir, "presence", `${id}.json`), JSON.stringify({ repo: "acme/api", root: realpathSync(repo) }))
+    await runCli(["hook", "claude", "tool-use"], { env, input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: id, cwd: repo, tool_name: "Edit", tool_input: { file_path: join(repo, "src", "a.py") } }) })
+    await drained(dataDir, id)
+    assert.equal(readFileSync(fetchLog, "utf8"), "")
+  })
+
+  test("the drain lock: one holder at a time, a stale one is taken over, two workers at once send each touch once", async () => {
+    const dataDir = freshDir("live-lock")
+    mkdirSync(join(dataDir, "presence"), { recursive: true })
+    const probe = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import { utimesSync } from "node:fs"
+      const { takePresenceLock } = await import(${JSON.stringify(SCRIPT)})
+      const a = takePresenceLock("lk"), b = takePresenceLock("lk")
+      const old = new Date(Date.now() - 120_000)
+      utimesSync(${JSON.stringify(join(dataDir, "presence", "lk.lock"))}, old, old)
+      console.log(JSON.stringify([a, b, takePresenceLock("lk")]))`], {
+      encoding: "utf8", env: { ...process.env, HOME: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+    })
+    assert.deepEqual(JSON.parse(probe.stdout), [true, false, true], probe.stderr)
+
+    await install(dataDir, ["--global"])
+    const id = "live-lock-2"
+    writeFileSync(join(dataDir, "presence", `${id}.json`), JSON.stringify({ repo: "acme/api", root: "/nowhere" }))
+    const at = new Date().toISOString()
+    writeFileSync(join(dataDir, "presence", `${id}.ndjson`),
+      ["a", "b", "c"].map((f) => JSON.stringify({ tool: "edit", args: { path: `acme/api/${f}.py` }, at })).join("\n") + "\n")
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url }
+    await Promise.all([runCli(["_presence", id], { env }), runCli(["_presence", id], { env })])
+    assert.deepEqual(forId("events", id).flatMap((c) => c.body.events.map((e) => e.args.path)).sort(),
+      ["acme/api/a.py", "acme/api/b.py", "acme/api/c.py"])
+  })
+
+  test("session end forgets the session; session start sweeps presence files older than three days", async () => {
+    const { repo } = makeRepo()
+    const dataDir = freshDir("live-end")
+    await install(dataDir, ["--global"])
+    const id = "live-end-1"
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: repo })
+    await waitFor(() => existsSync(join(dataDir, "presence", `${id}.json`)))
+    const old = join(dataDir, "presence", "crashed-long-ago.json")
+    writeFileSync(old, "{}")
+    utimesSync(old, new Date(Date.now() - 4 * 86_400_000), new Date(Date.now() - 4 * 86_400_000))
+    await hook(dataDir, "claude", "session-end", { hook_event_name: "SessionEnd", session_id: id, cwd: repo, transcript_path: join(FIXTURES, "claude-transcript.jsonl") })
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    await hook(dataDir, "claude", "session-start", { hook_event_name: "SessionStart", session_id: "live-end-2", cwd: repo })
+    await waitFor(() => existsSync(join(dataDir, "presence", "live-end-2.json")))
+    assert.ok(!existsSync(old))
+  })
+})
+
+// ---------------------------------------------------------------------------- capture says when it is off (1SI-3775)
+
+describe("capture says when it is set up but not working", () => {
+  const PERSON = /^\{"systemMessage":"Bonez session capture .*Run `node \\".*bonez-session-sync\.mjs\\" status` for details\."\}$/
+  const homeWith = (prefix) => {
+    const home = freshDir(prefix)
+    return { home, env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "", BONEZ_GATEWAY_URL: gateway.url } }
+  }
+  const start = (env, cwd = "/tmp/bonez-capture-health") =>
+    runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "now", cwd, source: "startup" }) })
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const readJsonOr = (path) => JSON.parse(readFileSync(path, "utf8"))
+  const installed = async (home, env, extra = {}) => {
+    mkdirSync(store(home), { recursive: true })
+    writeFileSync(join(store(home), "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-01T00:00:00Z", ...extra }))
+  }
+
+  test("status gives the same answer under the hook's environment and from a plain shell", async () => {
+    const outputs = []
+    for (const where of ["hook", "shell"]) {
+      const { home, env } = homeWith(`status-${where}`)
+      const hostDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+      const older = join(home, ".claude", "plugins", "data", "bonez-bonez")
+      mkdirSync(hostDir, { recursive: true })
+      mkdirSync(older, { recursive: true })
+      writeFileSync(join(older, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-01T00:00:00Z" }))
+      const hookEnv = { ...env, CLAUDE_PLUGIN_DATA: hostDir }
+      await start(hookEnv) // the Claude Code hook writes down its folder
+      const st = await runCli(["status"], { env: where === "hook" ? hookEnv : env })
+      assert.equal(st.status, 0, st.stderr)
+      outputs.push(st.stdout.replaceAll(home, "<home>"))
+    }
+    assert.equal(outputs[0], outputs[1])
+    assert.match(outputs[0], /bonez session capture: enabled/)
+    assert.match(outputs[0], /hook reads: <home>\/\.bonez\/session-sync \(settings found through the fallback; the Claude Code folder <home>\/\.claude\/plugins\/data\/bonez-acme has none\)/)
+    assert.match(outputs[0], /last upload attempt: none recorded/)
+    assert.match(outputs[0], /last successful upload: never/)
+  })
+
+  test("a failing call logs its cause, step and host, and no credential", async () => {
+    const { home, env } = homeWith("cause")
+    await installed(home, env, { apiKey: undefined, oauth: { accessToken: "at-SECRET-1", refreshToken: "rt-SECRET-2", expiresAt: Date.now() - 1 } })
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "s", transcript_path: join(FIXTURES, "claude-transcript.jsonl"), cwd: "/tmp/x" }))
+    const closed = await new Promise((r) => { const srv = createServer().listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => r(port)) }) })
+    const res = await runCli(["_upload", "claude", "session-end", payloadFile], { env: { ...env, BONEZ_GATEWAY_URL: `http://127.0.0.1:${closed}` } })
+    assert.equal(res.stdout, "")
+    const log = readFileSync(join(store(home), "sync.log"), "utf8")
+    assert.match(log, new RegExp(`token refresh to 127\\.0\\.0\\.1:${closed} failed — ECONNREFUSED: connect ECONNREFUSED 127\\.0\\.0\\.1:${closed}`))
+    assert.doesNotMatch(log, /SECRET/)
+    const st = await runCli(["status"], { env })
+    assert.match(st.stdout, new RegExp(`last upload attempt: .* — failed: token refresh to 127\\.0\\.0\\.1:${closed}: ECONNREFUSED`))
+    assert.doesNotMatch(st.stdout, /SECRET/)
+
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const tls = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("unable to verify the first certificate"), { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }) })
+    assert.deepEqual(mod.describeFailure("token refresh", "gateway.bonez.io", tls), {
+      step: "token refresh", host: "gateway.bonez.io", short: "certificate check failed",
+      detail: "UNABLE_TO_VERIFY_LEAF_SIGNATURE: unable to verify the first certificate",
+    })
+  })
+
+  test("three failed attempts: one line for the person, none on the second session that day", async () => {
+    const { home, env } = homeWith("failing")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.parse("2026-09-01T10:00:00Z") } }))
+    const failed = { ok: false, step: "token refresh", host: "gateway.bonez.io", detail: "x", short: "certificate check failed" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed].map((a, i) => ({ at: i, ...a })) }))
+    const first = await start(env)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /^Bonez session capture has not uploaded since 1 Sep \(certificate check failed\)\. Run /)
+    assert.equal((await start(env)).stdout, "")
+  })
+
+  test("nothing uploaded for three days and the last attempt failed: one line, then none that day", async () => {
+    const { home, env } = homeWith("stale")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.now() - 5 * 86_400_000 } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now() - 4 * 86_400_000, ok: true }, { at: Date.now(), ok: false, short: "server not found" }] }))
+    const first = await start(env)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /has not uploaded since .*, though sessions ran after that \(server not found\)\./)
+    assert.equal((await start(env)).stdout, "")
+  })
+
+  test("no false warning: an empty session and one still open in another window are not missed uploads", async () => {
+    const { home, env } = homeWith("quiet-weekend")
+    await installed(home, env)
+    const cwd = join(home, "work", "api")
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.now() - 5 * 86_400_000 } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now() - 5 * 86_400_000, ok: true }] }))
+    const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+    mkdirSync(project, { recursive: true })
+    const day = new Date(Date.now() - 86_400_000)
+    // Opened and closed with nothing said: the uploader skips it on purpose.
+    writeFileSync(join(project, "empty.jsonl"), "")
+    utimesSync(join(project, "empty.jsonl"), day, day)
+    // Still open in another window: real messages, but its end has not come yet.
+    cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, "still-open.jsonl"))
+    utimesSync(join(project, "still-open.jsonl"), day, day)
+    assert.equal((await start(env, cwd)).stdout, "")
+    // The catch-up this start ran handled both without a failed attempt, so the next start is quiet too.
+    await waitFor(() => existsSync(join(store(home), "sync.log")) && /claude session-start/.test(readFileSync(join(store(home), "sync.log"), "utf8")))
+    await waitFor(() => /still-open|claude-transcript/.test(readFileSync(join(store(home), "sync.log"), "utf8")))
+    assert.equal((await start(env, cwd)).stdout, "")
+    assert.ok((readJsonOr(join(store(home), "health.json")).attempts ?? []).every((a) => a.ok))
+  })
+
+  test("the notice takes the uploader's lock, so an attempt recorded meanwhile is kept", async () => {
+    const { home, env } = homeWith("lock")
+    await installed(home, env)
+    const failed = { ok: false, short: "server not found" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed] }))
+    const lock = join(store(home), "sync-state.json.lock")
+    writeFileSync(lock, "")
+    const hookRun = start(env)
+    await new Promise((r) => setTimeout(r, 150))
+    // The uploader, holding the lock, records one more attempt, then lets go.
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, { ...failed, at: 42 }] }))
+    rmSync(lock)
+    const res = await hookRun
+    assert.match(res.stdout, PERSON)
+    const health = readJsonOr(join(store(home), "health.json"))
+    assert.equal(health.attempts.at(-1).at, 42, "the attempt written under the lock survives")
+    assert.ok(health.notified.failing)
+  })
+
+  test("the hook writes down its folder only for someone who set capture up", async () => {
+    const { home, env } = homeWith("no-capture")
+    const hostDir = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(hostDir, { recursive: true })
+    assert.equal((await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })).stdout, "")
+    assert.ok(!existsSync(join(home, ".bonez")), "nothing written for a person without capture")
+    writeFileSync(join(hostDir, "config.json"), JSON.stringify({ enabled: false }))
+    await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })
+    // It also writes down the server address it uses, with where that came from.
+    assert.deepEqual(readJsonOr(join(home, ".bonez", "session-sync", "hook-folder.json")),
+      { claude: hostDir, gateway: gateway.url, gatewaySource: "BONEZ_GATEWAY_URL" })
+  })
+
+  test("settings in an older folder the hook does not read: one line, then none that day", async () => {
+    const { home, env } = homeWith("stranded")
+    const hostDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+    const older = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(hostDir, { recursive: true })
+    mkdirSync(older, { recursive: true })
+    writeFileSync(join(older, "config.json"), JSON.stringify({ enabled: true, scope: "global", apiKey: TEST_KEY }))
+    const hookEnv = { ...env, CLAUDE_PLUGIN_DATA: hostDir }
+    const first = await start(hookEnv)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /settings are in an older folder this plugin no longer reads/)
+    assert.equal((await start(hookEnv)).stdout, "")
+  })
+
+  test("a healthy setup, a disabled one, and Cursor or Codex print nothing", async () => {
+    const { home, env } = homeWith("healthy")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ s: { lastUploadedAt: Date.now() } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now(), ok: true }] }))
+    const res = await start(env)
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+
+    const failed = { ok: false, short: "server not found" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed] }))
+    for (const agent of ["cursor", "codex"]) {
+      const r = await runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "sessionStart", session_id: "c", conversation_id: "c" }) })
+      assert.equal(r.stdout, "", agent)
+    }
+    assert.equal((await runCli(["disable"], { env })).status, 0)
+    assert.equal((await start(env)).stdout, "")
+  })
+})
+
+// ---------------------------------------------------------------------------- sub-agents and order
+
+describe("catch-up: never a sub-agent transcript, and newest first", () => {
+  const line = (sidechain, text) => JSON.stringify({ type: "user", isSidechain: sidechain, cwd: "/tmp/x", message: { role: "user", content: text } })
+  const writeAt = (path, body, ageMin) => {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, body)
+    const t = new Date(Date.now() - ageMin * 60_000)
+    utimesSync(path, t, t)
+  }
+
+  test("sub-agent and still-running transcripts are not candidates; the quiet ones come newest first", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const root = freshDir("catchup-order")
+    writeAt(join(root, "old.jsonl"), `${line(false, "old work")}\n`, 600)
+    writeAt(join(root, "new.jsonl"), `${line(false, "new work")}\n`, 15)
+    // Written a minute ago: probably still running, so not a candidate yet.
+    writeAt(join(root, "live.jsonl"), `${line(false, "still running")}\n`, 1)
+    writeAt(join(root, "middle.jsonl"), `${JSON.stringify({ type: "summary", summary: "s" })}\n${line(false, "middle")}\n`, 60)
+    // Where Claude Code files a sub-agent's transcript, and what it marks on its lines.
+    writeAt(join(root, "new", "subagents", "agent-a1.jsonl"), `${line(true, "brief from the lead agent")}\n`, 20)
+    // The marker alone is enough, wherever the file is.
+    writeAt(join(root, "agent-b2.jsonl"), `${line(true, "brief from the lead agent")}\n`, 25)
+    // A message that merely quotes the key is not a sub-agent.
+    writeAt(join(root, "quotes.jsonl"), `${line(false, 'it said "isSidechain":true')}\n`, 30)
+
+    const ids = mod.staleTranscriptTargets(root, { excludeId: null, state: {}, cap: 0 }).map((t) => t.sessionId)
+    assert.deepEqual(ids, ["new", "quotes", "middle", "old"])
+    assert.deepEqual(mod.staleTranscriptTargets(root, { excludeId: null, state: {}, cap: 2 }).map((t) => t.sessionId), ["new", "quotes"])
+  })
+
+  test("the live path never uploads a sub-agent transcript either", async () => {
+    const dataDir = freshDir("live-subagent")
+    await install(dataDir, ["--global"])
+    const sub = join(freshDir("subagent-tx"), "lead", "subagents", "agent-c3.jsonl")
+    writeAt(sub, `${line(true, "brief")}\n`, 1)
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "agent-c3", transcript_path: sub, cwd: "/tmp/x" }))
+    const before = gateway.calls.presign.length
+    await runCli(["_upload", "claude", "session-end", payloadFile], { env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url } })
+    assert.equal(gateway.calls.presign.length, before)
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), /skipped — a sub-agent transcript/)
+  })
+})
+
+// ---------------------------------------------------------------------------- one refresh per catch-up
+
+describe("an expired sign-in is refreshed once, and the new token is used from then on", () => {
+  const setup = async (prefix, workspaces) => {
+    const home = freshDir(prefix)
+    const dataDir = join(home, "data")
+    mkdirSync(dataDir, { recursive: true })
+    // An expired OAuth sign-in, as `login` stores it.
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [],
+      oauth: { accessToken: "at-old", refreshToken: "rt-1", expiresAt: Date.now() - 1 } }))
+    const cwds = []
+    for (const [w, count] of workspaces) {
+      const cwd = join(home, "work", w)
+      mkdirSync(cwd, { recursive: true })
+      const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+      mkdirSync(project, { recursive: true })
+      for (let i = 0; i < count; i++) cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, `${w}-stale-${i}.jsonl`))
+      cwds.push(cwd)
+    }
+    return { home, dataDir, cwds }
+  }
+  const startIn = (home, dataDir, cwd, id) => runCli(["hook", "claude", "session-start"], {
+    env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, BONEZ_OAUTH_CLIENT_ID: "test-client" },
+    input: JSON.stringify({ hook_event_name: "SessionStart", session_id: id, cwd }),
+  })
+  const presignsSince = (n) => gateway.calls.presign.slice(n)
+
+  test("a catch-up of three stale transcripts refreshes once; all three uploads carry the new token", async () => {
+    const as = await startStubOAuth({ rotateRefreshToken: "rt-2" })
+    gateway.answers.authServer = as.url
+    const before = gateway.calls.presign.length
+    try {
+      const { home, dataDir, cwds } = await setup("refresh-once", [["api", 3]])
+      await startIn(home, dataDir, cwds[0], "now")
+      await waitFor(() => presignsSince(before).length >= 3 && existsSync(join(dataDir, "sync.log")) &&
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/upload: session=.* OK$/gm) ?? []).length >= 3, { timeoutMs: 8000 })
+      const refreshes = as.calls.token.filter((t) => t.grant_type === "refresh_token")
+      assert.deepEqual(refreshes.map((t) => t.refresh_token), ["rt-1"], "one refresh, and no refresh token presented twice")
+      assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(3).fill("Bearer at-refreshed-1"))
+      const stored = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")).oauth
+      assert.equal(stored.accessToken, "at-refreshed-1")
+      assert.equal(stored.refreshToken, "rt-2")
+    } finally {
+      gateway.answers.authServer = null
+      await as.close()
+    }
+  })
+
+  test("two sessions starting together still refresh once", async () => {
+    const as = await startStubOAuth({ rotateRefreshToken: "rt-2" })
+    gateway.answers.authServer = as.url
+    const before = gateway.calls.presign.length
+    try {
+      const { home, dataDir, cwds } = await setup("refresh-together", [["one", 1], ["two", 1]])
+      await Promise.all([startIn(home, dataDir, cwds[0], "a"), startIn(home, dataDir, cwds[1], "b")])
+      await waitFor(() => (existsSync(join(dataDir, "sync.log")) &&
+        (readFileSync(join(dataDir, "sync.log"), "utf8").match(/upload: session=.* OK$/gm) ?? []).length >= 2), { timeoutMs: 8000 })
+      assert.equal(as.calls.token.filter((t) => t.grant_type === "refresh_token").length, 1)
+      assert.deepEqual(presignsSince(before).map((c) => c.headers.authorization), Array(2).fill("Bearer at-refreshed-1"))
+    } finally {
+      gateway.answers.authServer = null
+      await as.close()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------- sign-in for another gateway
+
+describe("a sign-in issued by one gateway is never sent to another", () => {
+  test("nothing is sent; the log, the notice and status name both hosts", async () => {
+    const home = freshDir("mismatch")
+    const dataDir = join(home, "data")
+    mkdirSync(dataDir, { recursive: true })
+    // Shaped like the gateway's access token: its MCP audience names the gateway that issued it.
+    const b64 = (v) => Buffer.from(JSON.stringify(v)).toString("base64url")
+    const token = [b64({ alg: "RS256" }), b64({ aud: ["https://gateway.bonez.io/mcp", "https://example.auth0.com/userinfo"] }), "SIGNATUREPART"].join(".")
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [],
+      oauth: { accessToken: token, refreshToken: "rt-1", expiresAt: Date.now() + 3_600_000 } }))
+    const cwd = join(home, "work", "api")
+    mkdirSync(cwd, { recursive: true })
+    const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+    mkdirSync(project, { recursive: true })
+    cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, "stale.jsonl"))
+    // The plugin's server address option points elsewhere (the stub gateway on loopback).
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_OPTION_BONEZ_URL: gateway.url }
+    const target = new URL(gateway.url).host
+    const before = { presign: gateway.calls.presign.length, start: gateway.calls.start.length }
+    const res = await runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "mm-1", cwd }) })
+    const notice = JSON.parse(res.stdout).systemMessage
+    assert.ok(notice.startsWith(`Bonez session capture is signed in to gateway.bonez.io, but the plugin's server address is ${target}, so nothing uploads. Sign in again (`), notice)
+    assert.doesNotMatch(notice, /rt-1|SIGNATUREPART|eyJ/)
+    const log = () => (existsSync(join(dataDir, "sync.log")) ? readFileSync(join(dataDir, "sync.log"), "utf8") : "")
+    await waitFor(() => /upload: session=stale agent=claude not sent/.test(log()))
+    assert.match(log(), new RegExp(`not sent — signed in to gateway\\.bonez\\.io, but the server address is ${target.replace(".", "\\.")} \\(from the plugin's server address option\\)`))
+    assert.match(log(), /start session=mm-1 agent=claude not announced — signed in to gateway\.bonez\.io/)
+    assert.doesNotMatch(log(), /rt-1|eyJ/)
+    assert.equal(gateway.calls.presign.length, before.presign)
+    assert.equal(gateway.calls.start.length, before.start)
+    // A hand-run status, without the option in its environment, still says what the hook uses.
+    const st = await runCli(["status"], { env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir } })
+    assert.match(st.stdout, /gateway: {2}https:\/\/gateway\.bonez\.io \(from the default\)/)
+    assert.match(st.stdout, new RegExp(`the Claude Code hook uses: ${gateway.url.replaceAll(".", "\\.")} \\(from the plugin's server address option\\)`))
+    assert.match(st.stdout, new RegExp(`sign-in: {2}issued by gateway\\.bonez\\.io, not ${target.replace(".", "\\.")}`))
+  })
 })
