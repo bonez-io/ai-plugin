@@ -77,6 +77,13 @@ Every plugin config sends its version in an `x-bonez-plugin-version` header (CI 
 version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
 update signal for a tool that cannot update itself.
 
+### What is new in 0.10.9
+
+- **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
+- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only (1SI-3763).
+- **Capture says when it is off.** `status` gives the same answer everywhere and shows the last upload attempt and success; a failed upload logs its cause; Claude Code shows one line a day when capture is set up but not uploading (1SI-3775).
+- **Catch-up sends current work first.** Sub-agent transcripts are never uploaded as sessions, the catch-up and `backfill` go newest first, and a transcript written in the last 10 minutes waits until its session is quiet (1SI-3784).
+
 ## Windows
 
 Claude Code, Codex and Cursor run on Windows 11. Before the one command:
@@ -587,7 +594,7 @@ not its hook's session id, so the announcement would never meet its own upload.
 
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
 
-**Recall in Claude Code, Codex and Cursor:** For substantive tasks, the startup guidance directs the agent to call `memory_recall` on its signed-in Bonez MCP connection. It returns the caller's memories and work in flight. Simple questions can finish without a seed read. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its graph ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
+**Recall in Claude Code, Codex and Cursor:** On the first prompt of a session the plugin fetches the Bonez seed: your memories, work in flight, and what is relevant to this repo (from the checkout's `origin` remote) and to the prompt. It adds the seed to the agent's context and passes the session's id, so the session's own activity is left out. Later prompts do not fetch it again. Claude Code fetches it with an `mcp_tool` hook on its signed-in Bonez connection, which has no access to the repo, so its seed is built from the prompt alone. Codex and Cursor hooks can only run commands, so the hook calls the server itself, with the repo and the prompt. It uses an API key installed for session capture (`install <bnz_...>`, sent only to Bonez-operated servers) or a `bonez-plugin-push login` sign-in for that server. Capture's own `login` is upload-only and cannot read the graph. The fetch gives up after about three seconds, and the prompt then goes ahead without it. A server from before the session argument refuses it, and the hook asks once more without it. The startup guidance still tells the agent to call `memory_recall` on its signed-in Bonez MCP connection when no seed arrived. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its graph ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
 
 ## Publishing a plugin
 
