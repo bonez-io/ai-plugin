@@ -15,6 +15,15 @@ import { fileURLToPath } from "node:url"
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..")
 
+test("Codex signs in as Codex with the scopes needed for recall and citation", () => {
+  const server = JSON.parse(readFileSync(join(REPO, "codex", ".mcp.json"), "utf8")).mcpServers.bonez
+  assert.equal(server.oauth.client_id, "https://chatgpt.com/oauth/codex/client.json")
+  assert.deepEqual(new Set(server.scopes), new Set(["bonez:read", "bonez:memory", "bonez:write"]))
+  assert.equal(server.http_headers["x-bonez-mcp-consumer"], "codex-plugin")
+  const manual = readFileSync(join(REPO, "codex", "config.toml"), "utf8")
+  assert.ok(manual.includes(`client_id = "${server.oauth.client_id}"`))
+})
+
 test("codex/.mcp.json asks before graph_write and rules", () => {
   const server = JSON.parse(readFileSync(join(REPO, "codex", ".mcp.json"), "utf8")).mcpServers.bonez
   assert.equal(server.tools?.graph_write?.approval_mode, "prompt")

@@ -3,10 +3,10 @@
     "bonez": {
       "type": "streamable-http",
       "url": "https://gateway.bonez.io/mcp",
-      "http_headers": { "x-bonez-mcp-consumer": "codex-plugin", "x-bonez-plugin-version": "0.10.8" },
+      "http_headers": { "x-bonez-mcp-consumer": "codex-plugin", "x-bonez-plugin-version": "0.10.9" },
       "scopes": ["bonez:read", "bonez:memory", "bonez:write"],
       "oauth": {
-        "client_id": "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm",
+        "client_id": "https://chatgpt.com/oauth/codex/client.json",
         "callback_port": 8787,
         "callback_url": "http://localhost:8787/callback"
       },

@@ -4,7 +4,7 @@
       "url": "https://gateway.bonez.io/mcp",
       "headers": {
         "x-bonez-mcp-consumer": "cursor-plugin",
-        "x-bonez-plugin-version": "0.10.8"
+        "x-bonez-plugin-version": "0.10.9"
       },
       "auth": {
         "CLIENT_ID": "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm",
