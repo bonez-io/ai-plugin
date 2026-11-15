@@ -24,6 +24,6 @@ The first time Claude uses Bonez it opens a sign-in page: use your Bonez account
 - Bonez: https://bonez.io
 - Source and full documentation: https://github.com/bonez-io/ai-plugin
 - Privacy policy: https://bonez.io/privacy
-- Support: https://bonez.io/support/
+- Support: support@bonez.io
 
 Customers who run their own Bonez server install from their server's install page instead of this plugin.
