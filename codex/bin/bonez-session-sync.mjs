@@ -1454,7 +1454,8 @@ function hostSessionId(agent, payload) {
 function announcedSessionId(agent, payload) {
   const id = hostSessionId(agent, payload)
   if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return undefined
-  return typeof readJsonSafe(presencePath(id, "json"), null)?.repo === "string" ? id : undefined
+  const announced = readJsonSafe(presencePath(id, "json"), null)
+  return announced && !announced.refused ? id : undefined
 }
 
 // Forget the session's presence at its end, and sweep what crashed sessions left behind.
@@ -1505,27 +1506,32 @@ async function announceSession(agent, cfg, payload, cwd) {
   if (agent !== "claude" && agent !== "cursor") return
   const id = hostSessionId(agent, payload)
   prunePresence()
-  if (typeof id !== "string" || !SESSION_ID_RE.test(id) || !cwd || !inCaptureScope(cfg, cwd)) return
-  if (existsSync(presencePath(id, "json"))) return // announced before (a resume), or refused
+  // Every start that is not announced says why, in one line.
+  const skip = (why) => log(`presence: start session=${typeof id === "string" ? id.slice(0, 128) : "?"} agent=${agent} not announced — ${why}`)
+  if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return skip("no usable session id")
+  if (!cwd) return skip("no working directory")
+  if (!inCaptureScope(cfg, cwd)) return skip("the folder is outside the capture scope")
+  if (existsSync(presencePath(id, "json"))) return skip("announced before (a resume), or refused")
   const gatewayUrl = gatewayBaseUrl()
-  if (!captureGatewayAllowed(gatewayUrl)) return
+  if (!captureGatewayAllowed(gatewayUrl)) return skip("not a Bonez-operated gateway")
+  // A folder that is no Git checkout (a folder of several repositories, say) is announced with
+  // no repository; its file touches are not sent, since they have no repository to be relative to.
   let root
   let repo
   try {
     root = realpathSync.native(git(cwd, "rev-parse", "--show-toplevel"))
     repo = originRepo(cwd)
   } catch {
-    return // not a Git checkout
+    /* not a Git checkout */
   }
-  if (!repo) return
   for (let attempt = 1; ; attempt++) {
-    const res = await sessionsCall(cfg, gatewayUrl, id, "start", { surface: wireAgentFor(agent), repo })
+    const res = await sessionsCall(cfg, gatewayUrl, id, "start", { surface: wireAgentFor(agent), ...(repo && { repo }) })
     if (res.status === 503 && attempt < 3) {
       await sleep(2_000)
       continue
     }
     // 403: a gateway without this route. 409: an id this credential cannot use. Neither retries.
-    if (res.ok) writePresence(id, { repo, root })
+    if (res.ok) writePresence(id, repo ? { repo, root } : { repo: null })
     else if (res.status === 403 || res.status === 409) writePresence(id, { refused: res.status })
     await log(`presence: start session=${id} agent=${agent} ${res.ok ? "OK" : `failed — HTTP ${res.status}`}`)
     return

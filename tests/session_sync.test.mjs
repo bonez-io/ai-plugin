@@ -1900,6 +1900,29 @@ describe("live session: start once, then repository-relative reads and edits", (
     return host === "cursor" ? out.additional_context : out.hookSpecificOutput.additionalContext
   }
 
+  test("outside a Git checkout: global scope announces with no repository; repo scope does not, and says why", async () => {
+    const folder = freshDir("live-workspace-root") // a folder of several repositories, not one itself
+    writeFileSync(join(folder, "notes.md"), "x\n")
+    const global = freshDir("live-noscope-global")
+    await install(global, ["--global"])
+    const id = "live-norepo-1"
+    await hook(global, "claude", "session-start", { hook_event_name: "SessionStart", session_id: id, cwd: folder })
+    await started(global, "claude")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "claude-code" }])
+    assert.deepEqual(JSON.parse(readFileSync(join(global, "presence", `${id}.json`), "utf8")), { repo: null })
+    // No repository to be relative to, so file touches are not sent.
+    await hook(global, "claude", "tool-use", { hook_event_name: "PostToolUse", session_id: id, cwd: folder, tool_name: "Edit", tool_input: { file_path: join(folder, "notes.md") } })
+    await new Promise((r) => setTimeout(r, 1500))
+    assert.equal(forId("events", id).length, 0)
+
+    const scoped = freshDir("live-noscope-repo")
+    await install(scoped, ["--repo", freshDir("live-listed-repo")])
+    await hook(scoped, "claude", "session-start", { hook_event_name: "SessionStart", session_id: "live-norepo-2", cwd: folder })
+    await started(scoped, "claude")
+    assert.equal(forId("start", "live-norepo-2").length, 0)
+    assert.match(logOf(scoped), /presence: start session=live-norepo-2 agent=claude not announced — the folder is outside the capture scope/)
+  })
+
   test("recall text names the session only once its start succeeded; otherwise it is unchanged", async () => {
     const { repo } = makeRepo()
     const dataDir = freshDir("live-recall")
@@ -1954,13 +1977,14 @@ describe("live session: start once, then repository-relative reads and edits", (
     }
   })
 
-  test("origin: an ssh URL with a port gives owner/name; a URL with credentials announces nothing", async () => {
+  test("origin: an ssh URL with a port gives owner/name; a URL with credentials sends no repository", async () => {
     const dataDir = freshDir("live-origin")
     await install(dataDir, ["--global"])
     for (const [origin, id, want] of [
       ["ssh://git@git.example.com:2222/acme/api.git", "live-origin-port", [{ surface: "claude-code", repo: "acme/api" }]],
       ["https://github.com:8443/acme/api.git", "live-origin-https-port", [{ surface: "claude-code", repo: "acme/api" }]],
-      ["https://someone:tok@github.com/acme/api.git", "live-origin-creds", []],
+      // The credentials never leave; the session is announced with no repository.
+      ["https://someone:tok@github.com/acme/api.git", "live-origin-creds", [{ surface: "claude-code" }]],
     ]) {
       const { repo } = makeRepo(origin)
       const lines = logOf(dataDir).split("upload: claude session-start").length
