@@ -35,6 +35,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -557,6 +558,25 @@ function isWindowsPath(p) {
   return /^\/?[A-Za-z]:([\\/]|$)/.test(p) || p.startsWith("\\\\")
 }
 
+// A sub-agent's transcript is part of its lead session, never a session of its own. Claude Code
+// files it under <session>/subagents/ and marks every one of its lines `"isSidechain":true`, so
+// either says so. Only the head is read: the marker sits near the start of every record. (A
+// key inside a message's text is escaped, `\"isSidechain\":`, so it cannot match.)
+function isSidechainTranscript(path) {
+  if (path.split(/[\\/]/).slice(0, -1).includes("subagents")) return true
+  let fd
+  try {
+    fd = openSync(path, "r")
+    const head = Buffer.alloc(16_384)
+    const n = readSync(fd, head, 0, head.length, 0)
+    return /"isSidechain":\s*(true|false)/.exec(head.toString("utf8", 0, n))?.[1] === "true"
+  } catch {
+    return false
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
 function staleTranscriptTargets(root, { excludeId, state, cap }) {
@@ -582,13 +602,15 @@ function staleTranscriptTargets(root, { excludeId, state, cap }) {
       // come back as often as it actually changes; uploadOne's own content-hash check then
       // drops the ones where the mtime moved but the content did not.
       if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      if (isSidechainTranscript(p)) return null // read only for the stale ones
       return { transcriptPath: p, sessionId: id, mtime }
     })
     .filter((x) => x !== null)
-  // Oldest first: a finished conversation should not lose its slot to one that is merely more
-  // recently touched. The cap is a runaway guard, not a policy — a workspace with more than
-  // this many stale conversations drains over the next few starts.
-  candidates.sort((a, b) => a.mtime - b.mtime)
+  // Newest first: current work is what the person's page shows, so it must not wait behind a
+  // tail of months-old history. The old tail drains on later starts (and by `backfill`).
+  // The cap is a runaway guard, not a policy — a workspace with more than this many stale
+  // conversations drains over the next few starts.
+  candidates.sort((a, b) => b.mtime - a.mtime)
   return cap ? candidates.slice(0, cap) : candidates
 }
 
@@ -1069,6 +1091,10 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — transcript not found (${transcriptPath ?? "unresolved"})`)
     return
   }
+  if (agent === "claude" && isSidechainTranscript(transcriptPath)) {
+    await log(`upload: session=${sessionId} agent=${agent} skipped — a sub-agent transcript, part of its lead session`)
+    return
+  }
 
   const scope = cfg.scope === "global" ? "global" : "repo"
   const repos = scope === "repo" ? normalizeRepos(cfg.repos ?? []) : []
@@ -1450,7 +1476,7 @@ async function cmdBackfill(rest) {
 
   const batch = targets.slice(0, limit)
   console.log(`Claude Code transcripts not yet uploaded at their current content: ${targets.length}`)
-  console.log(`This run would upload ${batch.length} of them (oldest first).`)
+  console.log(`This run would upload ${batch.length} of them (newest first).`)
   if (targets.length > batch.length) {
     console.log(`Re-run to continue; each run picks up where the last one stopped.`)
   }
@@ -1622,6 +1648,7 @@ const isMain = (() => {
 if (isMain) await main()
 
 export {
+  isSidechainTranscript,
   buildBundle,
   cmdHook,
   cursorTitleFrom,

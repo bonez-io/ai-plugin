@@ -1769,3 +1769,46 @@ test("an empty host data directory uses the configured shared store, while a hos
     rmSync(home, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------- sub-agents and order
+
+describe("catch-up: never a sub-agent transcript, and newest first", () => {
+  const line = (sidechain, text) => JSON.stringify({ type: "user", isSidechain: sidechain, cwd: "/tmp/x", message: { role: "user", content: text } })
+  const writeAt = (path, body, ageMin) => {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, body)
+    const t = new Date(Date.now() - ageMin * 60_000)
+    utimesSync(path, t, t)
+  }
+
+  test("sub-agent transcripts are not candidates; the rest come newest first", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const root = freshDir("catchup-order")
+    writeAt(join(root, "old.jsonl"), `${line(false, "old work")}\n`, 600)
+    writeAt(join(root, "new.jsonl"), `${line(false, "new work")}\n`, 5)
+    writeAt(join(root, "middle.jsonl"), `${JSON.stringify({ type: "summary", summary: "s" })}\n${line(false, "middle")}\n`, 60)
+    // Where Claude Code files a sub-agent's transcript, and what it marks on its lines.
+    writeAt(join(root, "new", "subagents", "agent-a1.jsonl"), `${line(true, "brief from the lead agent")}\n`, 1)
+    // The marker alone is enough, wherever the file is.
+    writeAt(join(root, "agent-b2.jsonl"), `${line(true, "brief from the lead agent")}\n`, 2)
+    // A message that merely quotes the key is not a sub-agent.
+    writeAt(join(root, "quotes.jsonl"), `${line(false, 'it said "isSidechain":true')}\n`, 30)
+
+    const ids = mod.staleTranscriptTargets(root, { excludeId: null, state: {}, cap: 0 }).map((t) => t.sessionId)
+    assert.deepEqual(ids, ["new", "quotes", "middle", "old"])
+    assert.deepEqual(mod.staleTranscriptTargets(root, { excludeId: null, state: {}, cap: 2 }).map((t) => t.sessionId), ["new", "quotes"])
+  })
+
+  test("the live path never uploads a sub-agent transcript either", async () => {
+    const dataDir = freshDir("live-subagent")
+    await install(dataDir, ["--global"])
+    const sub = join(freshDir("subagent-tx"), "lead", "subagents", "agent-c3.jsonl")
+    writeAt(sub, `${line(true, "brief")}\n`, 1)
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "agent-c3", transcript_path: sub, cwd: "/tmp/x" }))
+    const before = gateway.calls.presign.length
+    await runCli(["_upload", "claude", "session-end", payloadFile], { env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url } })
+    assert.equal(gateway.calls.presign.length, before)
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), /skipped — a sub-agent transcript/)
+  })
+})
