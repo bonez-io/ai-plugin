@@ -6,7 +6,7 @@ Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people in
 
 ## Install
 
-Documentation: <https://docs.bonez.io/plugin/install>.
+Install page: <https://gateway.bonez.io/mcp/install>.
 
 In Claude Code (needs 2.1.292 or later):
 
