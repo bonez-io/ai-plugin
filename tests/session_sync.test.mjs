@@ -436,7 +436,7 @@ describe("OAuth credential lane (1SI-1033)", () => {
       // The user is told where to go and what happens next.
       assert.match(res.stdout, /\/activate\?user_code=WXYZ-1234/)
       assert.match(res.stdout, /installed and ENABLED/)
-      assert.match(res.stdout, /cannot read the lake/)
+      assert.match(res.stdout, /cannot read the System Model/)
 
       // It asked for exactly the upload-only scope, against the resource discovery named.
       assert.equal(as.calls.device[0].client_id, "test-client")
