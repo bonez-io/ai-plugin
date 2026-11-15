@@ -18,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
+import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
 import { startStubOAuth } from "./lib/stub-oauth.mjs"
@@ -1350,7 +1351,7 @@ describe("credential store: one sign-in shared by all three clients", () => {
   // hardcoded branch — while Claude Code writes to `<plugin>-<marketplace>`, which is only
   // that same path when the marketplace happens to be named "bonez". Any other name and
   // Cursor silently found no credential and captured nothing, with no error anywhere.
-  const statusDataDir = (out) => (/data dir:\s*(.+)/.exec(out)?.[1] ?? "").trim()
+  const statusDataDir = (out) => (/hook reads:\s*(.+?)(?: \(|$)/m.exec(out)?.[1] ?? "").trim()
 
   test("a fresh install with no legacy store lands in the agent-neutral location", async () => {
     const home = freshDir("store-fresh")
@@ -1768,4 +1769,127 @@ test("an empty host data directory uses the configured shared store, while a hos
   } finally {
     rmSync(home, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------- capture says when it is off (1SI-3775)
+
+describe("capture says when it is set up but not working", () => {
+  const PERSON = /^\{"systemMessage":"Bonez session capture .*Run `node \\".*bonez-session-sync\.mjs\\" status` for details\."\}$/
+  const homeWith = (prefix) => {
+    const home = freshDir(prefix)
+    return { home, env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "", BONEZ_GATEWAY_URL: gateway.url } }
+  }
+  const start = (env, cwd = "/tmp/bonez-capture-health") =>
+    runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "now", cwd, source: "startup" }) })
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const installed = async (home, env, extra = {}) => {
+    mkdirSync(store(home), { recursive: true })
+    writeFileSync(join(store(home), "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-01T00:00:00Z", ...extra }))
+  }
+
+  test("status gives the same answer under the hook's environment and from a plain shell", async () => {
+    const outputs = []
+    for (const where of ["hook", "shell"]) {
+      const { home, env } = homeWith(`status-${where}`)
+      const hostDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+      const older = join(home, ".claude", "plugins", "data", "bonez-bonez")
+      mkdirSync(hostDir, { recursive: true })
+      mkdirSync(older, { recursive: true })
+      writeFileSync(join(older, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY, installedAt: "2026-08-01T00:00:00Z" }))
+      const hookEnv = { ...env, CLAUDE_PLUGIN_DATA: hostDir }
+      await start(hookEnv) // the Claude Code hook writes down its folder
+      const st = await runCli(["status"], { env: where === "hook" ? hookEnv : env })
+      assert.equal(st.status, 0, st.stderr)
+      outputs.push(st.stdout.replaceAll(home, "<home>"))
+    }
+    assert.equal(outputs[0], outputs[1])
+    assert.match(outputs[0], /bonez session capture: enabled/)
+    assert.match(outputs[0], /hook reads: <home>\/\.bonez\/session-sync \(settings found through the fallback; the Claude Code folder <home>\/\.claude\/plugins\/data\/bonez-acme has none\)/)
+    assert.match(outputs[0], /last upload attempt: none recorded/)
+    assert.match(outputs[0], /last successful upload: never/)
+  })
+
+  test("a failing call logs its cause, step and host, and no credential", async () => {
+    const { home, env } = homeWith("cause")
+    await installed(home, env, { apiKey: undefined, oauth: { accessToken: "at-SECRET-1", refreshToken: "rt-SECRET-2", expiresAt: Date.now() - 1 } })
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: "s", transcript_path: join(FIXTURES, "claude-transcript.jsonl"), cwd: "/tmp/x" }))
+    const closed = await new Promise((r) => { const srv = createServer().listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => r(port)) }) })
+    const res = await runCli(["_upload", "claude", "session-end", payloadFile], { env: { ...env, BONEZ_GATEWAY_URL: `http://127.0.0.1:${closed}` } })
+    assert.equal(res.stdout, "")
+    const log = readFileSync(join(store(home), "sync.log"), "utf8")
+    assert.match(log, new RegExp(`token refresh to 127\\.0\\.0\\.1:${closed} failed — ECONNREFUSED: connect ECONNREFUSED 127\\.0\\.0\\.1:${closed}`))
+    assert.doesNotMatch(log, /SECRET/)
+    const st = await runCli(["status"], { env })
+    assert.match(st.stdout, new RegExp(`last upload attempt: .* — failed: token refresh to 127\\.0\\.0\\.1:${closed}: ECONNREFUSED`))
+    assert.doesNotMatch(st.stdout, /SECRET/)
+
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const tls = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("unable to verify the first certificate"), { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }) })
+    assert.deepEqual(mod.describeFailure("token refresh", "gateway.bonez.io", tls), {
+      step: "token refresh", host: "gateway.bonez.io", short: "certificate check failed",
+      detail: "UNABLE_TO_VERIFY_LEAF_SIGNATURE: unable to verify the first certificate",
+    })
+  })
+
+  test("three failed attempts: one line for the person, none on the second session that day", async () => {
+    const { home, env } = homeWith("failing")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.parse("2026-09-01T10:00:00Z") } }))
+    const failed = { ok: false, step: "token refresh", host: "gateway.bonez.io", detail: "x", short: "certificate check failed" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed].map((a, i) => ({ at: i, ...a })) }))
+    const first = await start(env)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /^Bonez session capture has not uploaded since 1 Sep \(certificate check failed\)\. Run /)
+    assert.equal((await start(env)).stdout, "")
+  })
+
+  test("nothing uploaded for three days though sessions ran: one line, then none that day", async () => {
+    const { home, env } = homeWith("stale")
+    await installed(home, env)
+    const cwd = join(home, "work", "api")
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ old: { lastUploadedAt: Date.now() - 5 * 86_400_000 } }))
+    const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+    mkdirSync(project, { recursive: true })
+    writeFileSync(join(project, "missed.jsonl"), "")
+    utimesSync(join(project, "missed.jsonl"), new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000))
+    const first = await start(env, cwd)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /has not uploaded since .*, though sessions ran after that\./)
+    assert.equal((await start(env, cwd)).stdout, "")
+  })
+
+  test("settings in an older folder the hook does not read: one line, then none that day", async () => {
+    const { home, env } = homeWith("stranded")
+    const hostDir = join(home, ".claude", "plugins", "data", "bonez-acme")
+    const older = join(home, ".claude", "plugins", "data", "bonez-bonez")
+    mkdirSync(hostDir, { recursive: true })
+    mkdirSync(older, { recursive: true })
+    writeFileSync(join(older, "config.json"), JSON.stringify({ enabled: true, scope: "global", apiKey: TEST_KEY }))
+    const hookEnv = { ...env, CLAUDE_PLUGIN_DATA: hostDir }
+    const first = await start(hookEnv)
+    assert.match(first.stdout, PERSON)
+    assert.match(JSON.parse(first.stdout).systemMessage, /settings are in an older folder this plugin no longer reads/)
+    assert.equal((await start(hookEnv)).stdout, "")
+  })
+
+  test("a healthy setup, a disabled one, and Cursor or Codex print nothing", async () => {
+    const { home, env } = homeWith("healthy")
+    await installed(home, env)
+    writeFileSync(join(store(home), "sync-state.json"), JSON.stringify({ s: { lastUploadedAt: Date.now() } }))
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [{ at: Date.now(), ok: true }] }))
+    const res = await start(env)
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 500, `hook wall time was ${res.ms.toFixed(1)}ms`)
+
+    const failed = { ok: false, short: "server not found" }
+    writeFileSync(join(store(home), "health.json"), JSON.stringify({ attempts: [failed, failed, failed] }))
+    for (const agent of ["cursor", "codex"]) {
+      const r = await runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "sessionStart", session_id: "c", conversation_id: "c" }) })
+      assert.equal(r.stdout, "", agent)
+    }
+    assert.equal((await runCli(["disable"], { env })).status, 0)
+    assert.equal((await start(env)).stdout, "")
+  })
 })
