@@ -1,5 +1,5 @@
 ---
-name: querying-the-graph
+name: querying-the-system-model
 description: Traverses the System Model with BGQ via system_model_query. Use when a question is about relationships or structure (what calls, imports, tests or depends on X, what is connected to a ticket or PR, which code touches a table), when you would otherwise grep across repos to trace callers or dependencies, or when system_model_search has found a seed and you need its neighbourhood.
 ---
 

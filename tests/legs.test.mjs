@@ -304,7 +304,7 @@ describe("the skill set and the skill descriptions", () => {
       "reviewing-with-org-rules": /before you tell the user a non-trivial change is ready/i,
       "session-context": /start of a task in an unfamiliar repo/i,
       "who-owns-what": /who owns/i,
-      "using-the-tool-lake": /instead of guessing or asking the user to paste it/i,
+      "using-vendor-operations": /instead of guessing or asking the user to paste it/i,
     }
     for (const [skill, re] of Object.entries(triggers)) assert.match(descriptionOf(skillText("skills", skill)), re, skill)
   })
@@ -428,7 +428,7 @@ describe("creating-an-agent", () => {
 describe("the agent skills and commands name no v1 agent operation", () => {
   // create, read, list and run moved to v2 (update is v1). A v1 id here would send a person to the old operation.
   const FILES = [
-    ...["skills", "cursor/skills", "codex/skills"].flatMap((root) => AGENT_SKILLS.concat("using-the-tool-lake").map((s) => `${root}/${s}/SKILL.md`)),
+    ...["skills", "cursor/skills", "codex/skills"].flatMap((root) => AGENT_SKILLS.concat("using-vendor-operations").map((s) => `${root}/${s}/SKILL.md`)),
     "commands/agents.md", "cursor/commands/bonez-agents.md", "codex/prompts/agents.md", "README.md",
   ]
   for (const file of FILES) {
@@ -436,8 +436,8 @@ describe("the agent skills and commands name no v1 agent operation", () => {
   }
 })
 
-describe("using-the-tool-lake: what the bonez run operations return", () => {
-  const text = skillText("skills", "using-the-tool-lake")
+describe("using-vendor-operations: what the bonez run operations return", () => {
+  const text = skillText("skills", "using-vendor-operations")
 
   test("run.read gives the agent's own report (result, outcome, outcome_reason) and calls summary boilerplate; run.list rows name the trigger", () => {
     assert.match(text, /`bonez\.run\.read\.v1` `\{run_id\}`[^\n]*`result`[^\n]*`outcome`[^\n]*`outcome_reason`[^\n]*`summary` \(platform boilerplate/)

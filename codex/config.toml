@@ -57,7 +57,7 @@ callback_url = "http://localhost:8787/callback"
 # [mcp_servers.bonez.tools.rules_write]
 # approval_mode = "prompt"
 #
-# Optional hard stop for the tool lake: `vendor_write` runs operations that change state on the
+# Optional hard stop for vendor operations: `vendor_write` runs operations that change state on the
 # org's vendors as you, and no harness's plugin gate covers it. This prompts on every one.
 #
 # [mcp_servers.bonez.tools.vendor_write]

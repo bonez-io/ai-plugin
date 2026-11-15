@@ -23,7 +23,7 @@ People are records in the System Model, with accounts from the vendors the org h
 {"text": "payments service", "limit": 10, "description": "Finding the payments service and who is attached to it"}
 ```
 
-3. Traverse with `system_model_query` from either end — from an artifact toward its authors, or from a person toward what they touch. Prefer a stored query the schema lookup surfaced (for example, `commit_authors_for_ticket` and `prs_addressing_ticket` take a ticket `key`); hand-write BGQ only when none fits, and see `querying-the-graph` for the rules.
+3. Traverse with `system_model_query` from either end — from an artifact toward its authors, or from a person toward what they touch. Prefer a stored query the schema lookup surfaced (for example, `commit_authors_for_ticket` and `prs_addressing_ticket` take a ticket `key`); hand-write BGQ only when none fits, and see `querying-the-system-model` for the rules.
 
 4. `system_model_fetch` the person record before naming them — don't guess emails or handles.
 

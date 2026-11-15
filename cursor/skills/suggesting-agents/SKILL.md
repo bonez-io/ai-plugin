@@ -36,4 +36,4 @@ Pick the nearest of these, adjust the names and the cron, and keep it to what th
 ## Hand-offs
 
 - On a yes: `creating-an-agent`.
-- To see what exists: `using-the-tool-lake` (section on Bonez's own agents, runs and sessions).
+- To see what exists: `using-vendor-operations` (section on Bonez's own agents, runs and sessions).

@@ -39,7 +39,7 @@ Leave `types` off until you have seen the results: the allowed list is closed an
 
 ## When to stop
 
-Two searches with varied phrasing plus fetched top hits is proportionate diligence for most tasks. Escalate to `system_model_query` only when you have a concrete seed and need its neighbourhood — see `querying-the-graph`.
+Two searches with varied phrasing plus fetched top hits is proportionate diligence for most tasks. Escalate to `system_model_query` only when you have a concrete seed and need its neighbourhood — see `querying-the-system-model`.
 
 ## Hand-offs
 

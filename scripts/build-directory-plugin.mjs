@@ -35,10 +35,10 @@ const REWRITES = [
   ["skills/session-context/SKILL.md",
     "use the records the hook already supplied. Otherwise batch up to",
     "batch up to"],
-  ["skills/using-the-tool-lake/SKILL.md",
+  ["skills/using-vendor-operations/SKILL.md",
     "Nothing in this plugin stops a vendor write, on any harness.",
     "Nothing in this plugin stops a vendor write; the app's tool-permission prompt may not cover it."],
-  ["skills/using-the-tool-lake/SKILL.md",
+  ["skills/using-vendor-operations/SKILL.md",
     "so run `bonez-plugin-push`, which calls it (an org admin only).",
     "so leave it to org admins using Bonez's own tools."],
 ];

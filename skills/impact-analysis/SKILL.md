@@ -47,5 +47,5 @@ Enumerate dependents, cluster them, spot-check a few representatives with `syste
 
 ## Hand-offs
 
-- Unknown names, or unexpected emptiness → `querying-the-graph` (schema-first rule).
+- Unknown names, or unexpected emptiness → `querying-the-system-model` (schema-first rule).
 - Presenting the analysis with sources → `citing-bonez-sources`.

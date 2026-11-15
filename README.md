@@ -337,7 +337,7 @@ MCP-scoped key never reaches the import routes. `plugins` is a third such lane, 
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 | `plugins` | Only `bonez-plugin-push.mjs` needs this, and only for CI or a machine without a browser: signed in, it needs no key. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
-**On servers released before Linear 1SI-2292, the vendor tools (then `vendor_operation`) ignore the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the tool lake on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
+**On servers released before Linear 1SI-2292, the vendor tools (then `vendor_operation`) ignore the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the vendor operations in the systems your organization connected on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
 ## The tools
 
@@ -373,7 +373,7 @@ Codex has no hook for this and does not need one: its plugin sets `approval_mode
 
 ### Vendor operations
 
-`vendor_search`, `vendor_info`, `vendor_read`, `vendor_write` and `vendor_status` are the same tool lake the Bonez chat agent uses, served over MCP. The `using-the-tool-lake` skill teaches the flow: `vendor_search` first, an `operation_id` copied from its result (never guessed), `vendor_info` for the operation's input schema, `vendor_read` or `vendor_write` (whichever `vendor_search` names) with the operation's own `input`, and `vendor_status` for an `invocation_id` a result carried. If the org has not connected a vendor, the skill has the agent say so rather than work around it.
+`vendor_search`, `vendor_info`, `vendor_read`, `vendor_write` and `vendor_status` are the vendor operations in the systems your organization connected, the same ones the Bonez chat agent uses, served over MCP. The `using-vendor-operations` skill teaches the flow: `vendor_search` first, an `operation_id` copied from its result (never guessed), `vendor_info` for the operation's input schema, `vendor_read` or `vendor_write` (whichever `vendor_search` names) with the operation's own `input`, and `vendor_status` for an `invocation_id` a result carried. If the org has not connected a vendor, the skill has the agent say so rather than work around it.
 
 **What is not guarded.**
 
@@ -381,7 +381,7 @@ Codex has no hook for this and does not need one: its plugin sets `approval_mode
 - **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any `vendor_write`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_write` off your Claude Code allow-list, so its default permission mode asks on every call, or, on Codex, uncomment the `vendor_write` `approval_mode = "prompt"` stanza in [`codex/config.toml`](codex/config.toml).
 - **Servers before Linear 1SI-2292 do not check the key's scope for vendor operations (then `vendor_operation`)** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
 
-**Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them in the same lake. Reads: `bonez.agent.list.v2`, `bonez.agent.read.v2`, `bonez.trigger.list.v1`, `bonez.trigger.options.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`; `/bonez:agents` lists the agents. Writes (they need the `write` scope; the skills ask first): `bonez.agent.create.v2` (with triggers: a schedule, a Linear or GitHub event, a person), `bonez.agent.update.v1` (edit, pause, retire), `bonez.agent.run.v2` and `bonez.session.bind.v1`. On an older server `vendor_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
+**Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them through the same tools. Reads: `bonez.agent.list.v2`, `bonez.agent.read.v2`, `bonez.trigger.list.v1`, `bonez.trigger.options.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`; `/bonez:agents` lists the agents. Writes (they need the `write` scope; the skills ask first): `bonez.agent.create.v2` (with triggers: a schedule, a Linear or GitHub event, a person), `bonez.agent.update.v1` (edit, pause, retire), `bonez.agent.run.v2` and `bonez.session.bind.v1`. On an older server `vendor_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
 ## Skills
 
@@ -389,7 +389,7 @@ Judgment for using the System Model well — traps, defaults, when to stop:
 
 - **session-context** — load the standing rules and the System Model overview at task start; what a failed read means.
 - **finding-prior-art** — search, then fetch, before building; memories are reached through their anchors; why absence proves nothing.
-- **querying-the-graph** — the loop; never guess record type, link type or query names; BGQ pitfalls; memories cannot be queried.
+- **querying-the-system-model** — the loop; never guess record type, link type or query names; BGQ pitfalls; memories cannot be queried.
 - **impact-analysis** — callers / blast radius / tests recipes and their depth traps.
 - **remembering** — the `memory_save` policy: when, when not, never store; preflight first; new memories start `pending`.
 - **citing-bonez-sources** — handles; never fabricate one; staleness and history.
@@ -398,7 +398,7 @@ Judgment for using the System Model well — traps, defaults, when to stop:
 - **creating-a-plugin** — write a Bonez plugin (a package that adds tools to agents): rules, template, hash, push to your server (or the manual handoff).
 - **suggesting-agents** — propose a Bonez agent, once, when work will repeat (a bug that came back, a chore done by hand): its description is the trigger, its body the etiquette.
 - **creating-an-agent** — create or change a Bonez agent (manual, scheduled, or woken by a Linear or GitHub event) from the session with `bonez.agent.create.v2` and `bonez.agent.update.v1`: say the spec and wait for a yes, find the trigger and its real ids, dry-run, instructions that stand alone, poll until ready, run once on request.
-- **using-the-tool-lake** — find (`vendor_search`), read (`vendor_info`), run (`vendor_read` or `vendor_write`) and poll (`vendor_status`) vendor operations: discover first and never guess an id, use the tool `vendor_search` names, ask the user in words before any write, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
+- **using-vendor-operations** — find (`vendor_search`), read (`vendor_info`), run (`vendor_read` or `vendor_write`) and poll (`vendor_status`) vendor operations: discover first and never guess an id, use the tool `vendor_search` names, ask the user in words before any write, what to say when a vendor is not connected, and how to list Bonez agents, runs and sessions through the `bonez` vendor.
 
 Plus commands — `/bonez:context`, `/bonez:search <query>`, `/bonez:connect`, `/bonez:agents [name]` and `/bonez:new-plugin <name>` (scaffold, test, bundle, hash and push a new Bonez plugin; see the `creating-a-plugin` skill) on Claude Code, `/prompts:context`, `/prompts:search` and `/prompts:agents` on Codex (copied prompts; the plugin creator is the `new-plugin` skill there: ask `Use the new-plugin skill to create the Bonez plugin <name>`), `/bonez-context`, `/bonez-search`, `/bonez-agents` and `/bonez-new-plugin <name>` on Cursor.
 

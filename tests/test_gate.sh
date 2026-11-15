@@ -357,7 +357,7 @@ run_case "the read tools are ignored even if their input mentions a write op" \
 # vendor_write runs an operation that changes state, and the gateway has its own
 # approval step for those (`vendor_status` checks a run that waits). The plugin's
 # own publish runs through it too, so a prompt here would fire on every push. The
-# README ("Vendor operations") and the using-the-tool-lake skill make the agent ask
+# README ("Vendor operations") and the using-vendor-operations skill make the agent ask
 # the user in words instead. These cases pin that boundary so a half-gate cannot
 # appear unnoticed: if the gate is ever extended to vendor_write, flip them and the README.
 
