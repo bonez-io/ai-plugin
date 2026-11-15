@@ -453,7 +453,7 @@ because it has to: the hook is a separate OS process with no access to the MCP c
 keychain, and that client's token is pinned to `POST /mcp` anyway. So it does the device
 flow (RFC 8628), which exists precisely for the case where the program asking for a token
 isn't the one the human authorizes in. The token it gets is scoped to `bonez:sessions` —
-upload-only. The gateway refuses it on `/mcp`, so this credential cannot read the lake even
+upload-only. The gateway refuses it on `/mcp`, so this credential cannot read the System Model even
 though it sits on your disk.
 
 Run from inside a Claude Code session with this plugin enabled, `bin/` is on the Bash tool's
@@ -497,7 +497,7 @@ bonez-session-sync.mjs backfill             # publish the first batch
 ```
 
 It is a deliberate command and no hook ever triggers it, because it publishes a large volume of
-past conversation to your organization's lake in one go. Each upload is recorded as it lands,
+past conversation to your organization's System Model in one go. Each upload is recorded as it lands,
 so interrupting it is safe and re-running continues where it stopped.
 
 Kill switch: `BONEZ_SESSION_SYNC=0` disables capture without touching the installed

@@ -653,7 +653,7 @@ function findClaudeBackfillTargets(state) {
 // A public client, per RFC 8252 §8.5: there is no secret, because a secret shipped inside a
 // distributed CLI is not a secret. Security comes from the user's own browser consent and
 // from the token being scoped to `bonez:sessions` — upload-only, and refused on /mcp by the
-// gateway precisely so a long-lived credential in a config file can't read the org lake.
+// gateway precisely so a long-lived credential in a config file can't read the org's System Model.
 // `??`, never `||` — the same trap DEBOUNCE_MS documents above. `BONEZ_OAUTH_CLIENT_ID=""`
 // is a deliberate "this build has no client", and `||` would treat that empty string as
 // unset and fall back to the real one. That is not a style point: with `||`, anything
@@ -1341,7 +1341,7 @@ function consentText(cfg) {
     "  Check status any time:          bonez-session-sync.mjs status",
     `Credential stored at: ${configPath()} (${credentialProtection()}).`,
     cfg.oauth
-      ? "Signed in with OAuth, scoped to session upload only — this credential cannot read the lake."
+      ? "Signed in with OAuth, scoped to session upload only — this credential cannot read the System Model."
       : "Using an API key. `login` swaps it for browser sign-in with no key on disk.",
   ].join("\n")
 }
@@ -1418,7 +1418,7 @@ function cmdLogout() {
 }
 
 // A deliberate, human-run sweep of local Claude Code history. Deliberately NOT reachable from
-// any hook: it publishes a large volume of past conversation to the org lake in one go, and
+// any hook: it publishes a large volume of past conversation to the org's System Model in one go, and
 // that is a decision someone makes on purpose, once, not a side effect of opening a terminal.
 //
 // `--dry-run` first is the point of the default output — you should be able to see the size of
@@ -1456,7 +1456,7 @@ async function cmdBackfill(rest) {
   }
   if (dryRun) {
     console.log("")
-    console.log("--dry-run: nothing was uploaded. Drop the flag to publish these to your org's lake.")
+    console.log("--dry-run: nothing was uploaded. Drop the flag to publish these to your org's System Model.")
     return
   }
 
