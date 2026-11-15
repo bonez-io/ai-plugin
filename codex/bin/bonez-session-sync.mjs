@@ -167,31 +167,41 @@ function legacyDataDirs() {
 // is no reason to re-stat for each one.
 let _dataDir
 function dataDir() {
-  if (_dataDir) return _dataDir
+  return (_dataDir ??= resolveDataDir(process.env.CLAUDE_PLUGIN_DATA))
+}
+
+// Which folder a hook started with `hostDir` as its CLAUDE_PLUGIN_DATA reads. `status` calls it
+// with the folder the Claude Code hook last reported, so it answers for the hook from any shell.
+function resolveDataDir(hostDir) {
   // An explicit override always wins — tests rely on this, and it is the escape hatch for
   // anyone with an unusual layout.
   const explicit = process.env.BONEZ_SESSION_SYNC_DATA
-  const hostDir = process.env.CLAUDE_PLUGIN_DATA
-  if (explicit) {
-    _dataDir = explicit
-    return _dataDir
-  }
+  if (explicit) return explicit
   // Preserve a host-specific choice (including disabled), but an empty host-created
   // directory must not hide a configured shared store.
-  if (hostDir && existsSync(join(hostDir, "config.json"))) return (_dataDir = hostDir)
-  if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) {
-    _dataDir = CANONICAL_DATA_DIR
-    return _dataDir
-  }
-  if (hostDir) return (_dataDir = hostDir)
+  if (hostDir && existsSync(join(hostDir, "config.json"))) return hostDir
+  if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) return CANONICAL_DATA_DIR
+  if (hostDir) return hostDir
   for (const d of legacyDataDirs()) {
-    if (existsSync(join(d, "config.json"))) {
-      _dataDir = d
-      return _dataDir
-    }
+    if (existsSync(join(d, "config.json"))) return d
   }
-  _dataDir = CANONICAL_DATA_DIR
-  return _dataDir
+  return CANONICAL_DATA_DIR
+}
+
+// The Claude Code hook writes down its host folder, so `status` from a plain shell (where
+// CLAUDE_PLUGIN_DATA is not set) can answer for the folder the hook really reads.
+const hookFolderPath = () => join(CANONICAL_DATA_DIR, "hook-folder.json")
+function rememberHookFolder() {
+  const hostDir = process.env.CLAUDE_PLUGIN_DATA
+  if (!hostDir || readJsonSafe(hookFolderPath(), null)?.claude === hostDir) return
+  // Only for someone who set capture up: settings exist somewhere.
+  if (![hostDir, CANONICAL_DATA_DIR, ...legacyDataDirs()].some((d) => existsSync(join(d, "config.json")))) return
+  try {
+    mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+    copyAtomic(`${JSON.stringify({ claude: hostDir })}\n`, hookFolderPath())
+  } catch {
+    /* status then answers for this shell's own resolution */
+  }
 }
 
 // Prints ONLY when something actually moved. Silent otherwise — `status` output gets pasted
@@ -215,20 +225,31 @@ function migrateLegacyData() {
   // An explicit override is a deliberate choice by the caller — never migrate out from under
   // it. (Without this, `install` with CLAUDE_PLUGIN_DATA set would write there and the very
   // next `status` would move it to the canonical path and report THAT instead.)
-  if (process.env.BONEZ_SESSION_SYNC_DATA || process.env.CLAUDE_PLUGIN_DATA) return null
+  // An empty host folder is not a choice: migrate past it, so `status` does the same under the
+  // hook's environment as in a plain shell.
+  const hostDir = process.env.CLAUDE_PLUGIN_DATA
+  if (process.env.BONEZ_SESSION_SYNC_DATA || (hostDir && existsSync(join(hostDir, "config.json")))) return null
   if (existsSync(join(CANONICAL_DATA_DIR, "config.json"))) return null
   const from = legacyDataDirs().find((d) => existsSync(join(d, "config.json")))
   if (!from || from === CANONICAL_DATA_DIR) return null
   try {
     mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
-    for (const f of ["config.json", "sync-state.json"]) {
-      if (existsSync(join(from, f))) writeFileSync(join(CANONICAL_DATA_DIR, f), readFileSync(join(from, f)), { mode: 0o600 })
+    // State first, config last: the config is what makes the folder count, so a crash in between
+    // never leaves a config without its record of what already uploaded.
+    for (const f of ["sync-state.json", "config.json"]) {
+      if (existsSync(join(from, f))) copyAtomic(readFileSync(join(from, f)), join(CANONICAL_DATA_DIR, f))
     }
     _dataDir = CANONICAL_DATA_DIR
     return from
   } catch {
     return null // migration is best-effort; the legacy path still resolves and still works
   }
+}
+
+function copyAtomic(data, path) {
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, data, { mode: 0o600 })
+  renameSync(tmp, path)
 }
 
 function ensureDataDir() {
@@ -308,9 +329,9 @@ function sleepSync(ms) {
   }
 }
 
-function withStateLock(fn) {
+function withStateLock(fn, timeoutMs = STATE_LOCK_TIMEOUT_MS) {
   const lock = `${statePath()}.lock`
-  const deadline = Date.now() + STATE_LOCK_TIMEOUT_MS
+  const deadline = Date.now() + timeoutMs
   let held = false
   for (;;) {
     try {
@@ -432,11 +453,22 @@ async function cmdHook(agent, event) {
   if (agent !== "claude" && agent !== "codex" && agent !== "cursor") return
   if (event !== "session-end" && event !== "session-start" && event !== "turn-end" && event !== "tool-use") return
 
+  const claudeStart = agent === "claude" && event === "session-start"
+  if (claudeStart) rememberHookFolder()
   const cfg = loadConfig()
-  if (!cfg || !cfg.enabled || !hasCredential(cfg)) return // never installed, or explicitly disabled
+  if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
+    // never installed, or explicitly disabled. Settings left in a folder the hook no longer
+    // reads are neither: say so, once a day.
+    if (claudeStart && !cfg && strandedSettings().length) notifyOnce("stranded", "Bonez session capture is set up, but its settings are in an older folder this plugin no longer reads, so nothing uploads.")
+    return
+  }
 
   const raw = readStdinSync()
   if (!raw || !raw.trim()) return
+  if (claudeStart) {
+    const notice = captureNotice(cfg)
+    if (notice) notifyOnce(notice.reason, notice.text)
+  }
   let payload
   try {
     payload = JSON.parse(raw)
@@ -686,7 +718,14 @@ const _parsedPollFloor = Number.parseInt(process.env.BONEZ_DEVICE_POLL_FLOOR_MS 
 const DEVICE_POLL_FLOOR_MS = Number.isFinite(_parsedPollFloor) && _parsedPollFloor >= 0 ? _parsedPollFloor : 5_000
 
 async function fetchJson(url, init) {
-  const res = await fetch(url, init)
+  let res
+  try {
+    res = await fetch(url, init)
+  } catch (err) {
+    // fetch's own error says only "fetch failed"; the host it was reaching goes with it.
+    if (err && typeof err === "object") err.host = new URL(url).host
+    throw err
+  }
   const text = await res.text().catch(() => "")
   let json = {}
   try {
@@ -1138,33 +1177,35 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   const wireAgent = wireAgentFor(agent)
 
   if (!captureGatewayAllowed(gatewayUrl)) {
+    recordAttempt({ ok: false, step: "presign", host: "", detail: "not a Bonez-operated gateway", short: "the configured server is not a Bonez one" })
     await log("upload: skipped — session capture requires a Bonez-operated gateway")
     return
   }
-  let bearer
+  // Each step names itself and its host, so a failure says where and why (never a credential or
+  // a URL's query string: the upload URL is presigned).
+  let step = "token refresh"
+  let host = new URL(gatewayUrl).host
+  let pre
   try {
-    bearer = await resolveBearer(cfg, gatewayUrl)
+    const bearer = await resolveBearer(cfg, gatewayUrl)
+    step = "presign"
+    pre = await presign(gatewayUrl, bearer, wireAgent, scope)
+    if (!pre.ok || !pre.json.upload_id || !pre.json.url) throw httpError(pre.status)
+    step = "upload"
+    host = new URL(pre.json.url).host
+    const put = await putGzip(pre.json.url, gz)
+    if (!put.ok) throw httpError(put.status)
+    step = "complete"
+    host = new URL(gatewayUrl).host
+    const done = await completeUpload(gatewayUrl, bearer, pre.json.upload_id)
+    if (!done.ok) throw httpError(done.status)
   } catch (err) {
-    await log(`upload: session=${sessionId} agent=${agent} skipped — ${err instanceof Error ? err.message : String(err)}`)
+    const failure = describeFailure(step, err.host ?? host, err)
+    recordAttempt({ ok: false, ...failure })
+    await log(`upload: session=${dedupKey} agent=${agent} ${failure.step} to ${failure.host} failed — ${failure.detail}`)
     return
   }
-  const pre = await presign(gatewayUrl, bearer, wireAgent, scope)
-  if (!pre.ok || !pre.json.upload_id || !pre.json.url) {
-    await log(`upload: session=${dedupKey} agent=${agent} presign failed — HTTP ${pre.status}`)
-    return
-  }
-
-  const put = await putGzip(pre.json.url, gz)
-  if (!put.ok) {
-    await log(`upload: session=${dedupKey} agent=${agent} PUT failed — HTTP ${put.status}`)
-    return
-  }
-
-  const done = await completeUpload(gatewayUrl, bearer, pre.json.upload_id)
-  if (!done.ok) {
-    await log(`upload: session=${dedupKey} agent=${agent} complete failed — HTTP ${done.status}`)
-    return
-  }
+  recordAttempt({ ok: true })
 
   recordUpload(dedupKey, {
     agent,
@@ -1523,6 +1564,100 @@ async function drainPresence(id) {
   return true
 }
 
+// -------------------------------------------------------------------------------- capture health
+//
+// Uploads run in a background process nobody watches, so a broken setup used to be silent for
+// months. health.json in the data folder keeps the last three upload attempts and the day each
+// notice was last shown. Local only; nothing here makes a network call.
+
+const healthPath = () => join(dataDir(), "health.json")
+const DAY_MS = 86_400_000
+
+function httpError(status) {
+  return Object.assign(new Error(`HTTP ${status}`), { status })
+}
+
+// The cause, in the log's words (`detail`) and in the person's (`short`).
+function describeFailure(step, host, err) {
+  const cause = err?.cause && typeof err.cause === "object" ? err.cause : err
+  const code = cause?.code ?? (err?.status ? `HTTP ${err.status}` : undefined)
+  const message = String(cause?.message ?? err?.message ?? err).split("?")[0].slice(0, 200)
+  let short = `${step} failed`
+  if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER/.test(code ?? "")) short = "certificate check failed"
+  else if (/ENOTFOUND|EAI_AGAIN/.test(code ?? "")) short = "server not found"
+  else if (/ECONN|ETIMEDOUT|UND_ERR/.test(code ?? "")) short = "could not reach the server"
+  else if (err?.status === 401 || err?.status === 403 || /^refresh failed/.test(message)) short = "sign-in refused"
+  return { step, host, detail: code && code !== message ? `${code}: ${message}` : message, short }
+}
+
+function recordAttempt(attempt) {
+  try {
+    withStateLock(() => {
+      const health = readJsonSafe(healthPath(), {})
+      health.attempts = [...(health.attempts ?? []), { at: Date.now(), ...attempt }].slice(-3)
+      writeJsonAtomic(healthPath(), health, 0o600)
+    })
+  } catch {
+    /* health is advisory */
+  }
+}
+
+function lastSuccessAt() {
+  const times = Object.values(loadState()).map((e) => e?.lastUploadedAt ?? 0)
+  return times.length ? Math.max(...times) || undefined : undefined
+}
+
+// Older folders holding settings that this process's folder does not have and will not read.
+function strandedSettings() {
+  return [CANONICAL_DATA_DIR, ...legacyDataDirs()].filter(
+    (d) => d !== dataDir() && existsSync(join(d, "config.json")),
+  )
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+const shortDate = (ms) => `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}`
+
+// Capture is on: is it working? Decided only from what the uploader recorded. An attempt is a
+// session it meant to send (it had messages, in scope, changed); one it skips on purpose (empty,
+// unchanged, out of scope) or has not reached yet (a session still open) is not an attempt, so it
+// never counts. Either the last three attempts all failed, or the last one failed and nothing has
+// uploaded for three days.
+function captureNotice(cfg) {
+  const attempts = readJsonSafe(healthPath(), {}).attempts ?? []
+  const last = attempts.at(-1)
+  if (!last || last.ok) return null
+  const lastOk = lastSuccessAt()
+  const since = lastOk ? `since ${shortDate(lastOk)}` : "yet"
+  if (attempts.length >= 3 && attempts.every((a) => !a.ok)) {
+    return { reason: "failing", text: `Bonez session capture has not uploaded ${since} (${last.short}).` }
+  }
+  const baseline = lastOk ?? Date.parse(cfg.installedAt ?? "")
+  if (!(Date.now() - baseline > 3 * DAY_MS)) return null
+  return { reason: "stale", text: `Bonez session capture has not uploaded ${since}, though sessions ran after that (${last.short}).` }
+}
+
+// The one line the PERSON sees: Claude Code shows a hook's `systemMessage` to the user and does
+// not add it to the model's context. At most once a day per reason. Cursor's and Codex's
+// session-start hooks have no such field, so they never print one.
+function notifyOnce(reason, text) {
+  try {
+    // The same lock as recordAttempt, so a background upload's record is never overwritten. A
+    // short wait: the uploader holds it for one small write, and the hook must stay fast.
+    const shown = withStateLock(() => {
+      const health = readJsonSafe(healthPath(), {})
+      const today = new Date().toISOString().slice(0, 10)
+      if (health.notified?.[reason] === today) return false
+      health.notified = { ...health.notified, [reason]: today }
+      writeJsonAtomic(healthPath(), health, 0o600)
+      return true
+    }, 500)
+    if (!shown) return
+    process.stdout.write(JSON.stringify({ systemMessage: `${text} Run \`node "${SELF_PATH}" status\` for details.` }))
+  } catch {
+    /* never fail the hook */
+  }
+}
+
 // -------------------------------------------------------------------------------- human-facing commands
 
 function parseInstallArgs(rest) {
@@ -1723,16 +1858,41 @@ async function cmdBackfill(rest) {
   console.log(`Done: ${uploaded}/${batch.length} uploaded. See ${logFilePath()} for per-session detail.`)
 }
 
+// Where the hook reads its settings, in words.
+function describeDataDir() {
+  const dir = dataDir()
+  const hostDir = process.env.CLAUDE_PLUGIN_DATA
+  const found = existsSync(join(dir, "config.json"))
+  if (process.env.BONEZ_SESSION_SYNC_DATA) return `${dir} (set by BONEZ_SESSION_SYNC_DATA)`
+  if (!found) return `${dir} (no settings there)`
+  if (dir === hostDir) return `${dir} (settings found there)`
+  return `${dir} (settings found through the fallback${hostDir ? `; the Claude Code folder ${hostDir} has none` : ""})`
+}
+
+const when = (ms) => new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC"
+
 function cmdStatus() {
+  // Answer for the folder the Claude Code hook reads, from a plain shell too.
+  if (!process.env.CLAUDE_PLUGIN_DATA && !process.env.BONEZ_SESSION_SYNC_DATA) {
+    const seen = readJsonSafe(hookFolderPath(), null)?.claude
+    if (typeof seen === "string" && seen) {
+      process.env.CLAUDE_PLUGIN_DATA = seen
+      _dataDir = undefined
+    }
+  }
   reportMigration()
   const cfg = loadConfig()
   if (!cfg) {
     console.log("bonez session capture: not installed.")
+    console.log(`  hook reads: ${describeDataDir()}`)
+    for (const d of strandedSettings()) console.log(`  settings also in ${d}, which the hook does not read`)
     console.log("Run: bonez-session-sync.mjs login [--repo <path>]... [--global]")
     console.log("  (headless, no browser: install <bnz_...key> with the same options)")
     return
   }
   const state = loadState()
+  const attempt = readJsonSafe(healthPath(), {}).attempts?.at(-1)
+  const lastOk = lastSuccessAt()
   const lines = [
     `bonez session capture: ${cfg.enabled ? "enabled" : "disabled"}${
       disabledByEnv() ? " (env override BONEZ_SESSION_SYNC=0 is ALSO active)" : ""
@@ -1749,7 +1909,9 @@ function cmdStatus() {
     `  clients:  Claude Code, Codex, Cursor (one sign-in, shared store)`,
     `  sessions synced: ${Object.keys(state).length}`,
     `  installed:${cfg.installedAt ?? "unknown"}`,
-    `  data dir: ${dataDir()}`,
+    `  hook reads: ${describeDataDir()}`,
+    `  last upload attempt: ${attempt ? `${when(attempt.at)} — ${attempt.ok ? "OK" : `failed: ${attempt.step} to ${attempt.host}: ${attempt.detail}`}` : "none recorded"}`,
+    `  last successful upload: ${lastOk ? when(lastOk) : "never"}`,
     `  log:      ${logFilePath()}`,
   )
   console.log(lines.join("\n"))
@@ -1875,6 +2037,7 @@ export {
   announceSession,
   announcedSessionId,
   takePresenceLock,
+  describeFailure,
   buildBundle,
   inCaptureScope,
   cmdHook,
