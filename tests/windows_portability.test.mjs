@@ -54,7 +54,8 @@ describe("line endings", () => {
   })
 
   test("no tracked file has a carriage return in the working tree (on Windows CI this is the autocrlf check)", () => {
-    const withCr = repoFiles().filter((f) => readFileSync(join(REPO, f)).includes(0x0d))
+    // .gitattributes marks images binary: git never converts them, and a PNG can hold 0x0D bytes.
+    const withCr = repoFiles().filter((f) => !/\.(png|jpe?g|gif|ico|webp)$/i.test(f) && readFileSync(join(REPO, f)).includes(0x0d))
     assert.deepEqual(withCr, [], `CRLF in: ${withCr.slice(0, 5).join(", ")}. A shell script with CRLF fails ("bash\\r"); check .gitattributes and core.autocrlf.`)
   })
 })

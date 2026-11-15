@@ -19,7 +19,9 @@ const write = (p, s) => {
 const EXCLUDE_SKILLS = ["creating-a-plugin"];
 const EXCLUDE_COMMANDS = ["new-plugin.md", "connect.md"];
 
-// [file, source text, replacement]. Every source text must still exist: drift fails the build.
+// [file, source text, replacement]. Every source text must still exist: drift fails the build, and the
+// error lists EVERY stale entry at once. When a skill's prose changes, update its source text here to the
+// new wording and keep the replacement saying the same thing for an app that has no hooks or bin/ tools.
 const REWRITES = [
   ["skills/remembering/SKILL.md",
     "The plugin gates the tool behind a permission prompt on every call, including `preflight` and `dry_run`, so expect the harness to ask — that is the gate working, not an error.",
@@ -70,15 +72,16 @@ write(".mcp.json", JSON.stringify({
 }, null, 2) + "\n");
 
 const applied = new Set();
+const problems = [];
 function copyText(rel) {
   let text = read(rel);
   REWRITES.forEach(([f, from, to], i) => {
     if (f !== rel) return;
-    if (!text.includes(from)) throw new Error(`rewrite #${i} no longer matches in ${f}: ${JSON.stringify(from)}`);
+    if (!text.includes(from)) { problems.push(`rewrite #${i} no longer matches in ${f}: ${JSON.stringify(from)}`); return; }
     text = text.replace(from, () => to);
     applied.add(i);
   });
-  for (const re of FORBIDDEN) if (re.test(text)) throw new Error(`${rel} still matches ${re} — add a rewrite or exclude it`);
+  for (const re of FORBIDDEN) if (re.test(text)) problems.push(`${rel} still matches ${re} — add a rewrite or exclude it`);
   write(rel, text);
 }
 
@@ -91,11 +94,12 @@ for (const s of fs.readdirSync(path.join(root, "skills")).sort()) {
 for (const c of fs.readdirSync(path.join(root, "commands")).sort()) {
   if (!EXCLUDE_COMMANDS.includes(c)) copyText(`commands/${c}`);
 }
-REWRITES.forEach((r, i) => { if (!applied.has(i)) throw new Error(`rewrite #${i} targets a file that was not copied: ${r[0]}`); });
+REWRITES.forEach((r, i) => { if (!applied.has(i) && !problems.some((p) => p.startsWith(`rewrite #${i} `))) problems.push(`rewrite #${i} targets a file that was not copied: ${r[0]}`); });
+if (problems.length) throw new Error(`${problems.length} problem(s), nothing is final:\n  ${problems.join("\n  ")}`);
 
 write("README.md", `# Bonez
 
-Bonez is your organization's context lake: one searchable graph over your code, decisions, tickets, pull requests, docs and the people behind them. This plugin connects Claude to it.
+The System Model is your organization's connected model of its code, tickets, people, services, agents and what they learned. Bonez keeps it, and this plugin connects Claude to it.
 
 ## What it adds
 

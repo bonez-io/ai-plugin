@@ -1,6 +1,6 @@
 # Bonez
 
-Bonez is your organization's context lake: one searchable graph over your code, decisions, tickets, pull requests, docs and the people behind them. This plugin connects Claude to it.
+The System Model is your organization's connected model of its code, tickets, people, services, agents and what they learned. Bonez keeps it, and this plugin connects Claude to it.
 
 ## What it adds
 

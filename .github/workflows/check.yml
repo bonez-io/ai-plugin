@@ -28,7 +28,7 @@ jobs:
           set -euo pipefail
           # Cursor's hooks.json REQUIRES "version": 1 at the top level. Without it the
           # file parses as JSON and is silently ignored: no beforeMCPExecution step is
-          # ever requested, so the write gate never runs and memory/rules writes go
+          # ever requested, so the write gate never runs and memory_save/rules_write writes go
           # through unguarded. Verified on Cursor 3.18.25 (2026-09-03) against the
           # marketplace-installed plugin; adding the field made the gate fire.
           jq -e '.version == 1' cursor/hooks/hooks.json >/dev/null
@@ -106,7 +106,7 @@ jobs:
       - name: Windows-portability tests (shared hash vectors, path normalisation, line endings, hook commands)
         run: ./tests/test_windows.sh
 
-      - name: Codex asks before graph_write and rules (approval_mode prompt, never approve)
+      - name: Codex asks before memory_save and rules_write (approval_mode prompt, never approve)
         run: ./tests/test_codex_approval.sh
 
       - name: Skills parity across harness legs
@@ -124,7 +124,7 @@ jobs:
           # of that skill folder is still byte-identical; tests/legs.test.mjs pins
           # the SKILL.md rewrite line by line). Codex deliberately forks
           # remembering and reviewing-with-org-rules because its write prompt comes from
-          # the per-tool approval_mode in codex/.mcp.json (and also fires for rules reads),
+          # the per-tool approval_mode in codex/.mcp.json (and, on the old `rules` tool, also fired for reads),
           # which the Claude wording does not say, plus the same creating-a-plugin
           # SKILL.md; anything beyond those three is drift. The two agent skills
           # (suggesting-agents, creating-an-agent) name no tool paths and no gate,
@@ -206,7 +206,7 @@ jobs:
           # pass even for a plugin that only works in-tree.
           standalone="$(mktemp -d)/bonez"
           cp -R cursor "$standalone"
-          out="$(cd "$standalone" && printf '%s' '{"hook_event_name":"beforeMCPExecution","tool_name":"memory","tool_input":"{\"op\":\"save\"}","url":"https://gateway.bonez.io/mcp"}' | ./hooks/gate-write.sh)"
+          out="$(cd "$standalone" && printf '%s' '{"hook_event_name":"beforeMCPExecution","tool_name":"memory_save","tool_input":"{}","url":"https://gateway.bonez.io/mcp"}' | ./hooks/gate-write.sh)"
           echo "$out" | grep -q '"permission":"ask"' || {
             echo "::error::the plugin is not self-contained — the gate did not fire from a standalone copy"; exit 1; }
           echo "ok: gate fires from a standalone plugin copy"
