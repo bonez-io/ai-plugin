@@ -1,20 +1,16 @@
 // Hooks run before the host's OAuth MCP connection is necessarily ready. Hand the lookup
 // to the agent on that connection. This command handles no network access or credentials.
 import { readFileSync } from "node:fs"
-import { execFileSync } from "node:child_process"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { git, originRepo } from "./lib/git.mjs"
 
 function fileRef(event) {
   const path = event.tool_input?.file_path ?? event.tool_input?.path
   if (typeof path !== "string" || !path || (!isAbsolute(path) && !event.cwd)) return
   const file = resolve(event.cwd || ".", path)
-  const git = (...args) => execFileSync("git", ["-C", dirname(file), ...args], {
-    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 600, maxBuffer: 8192,
-  }).trim()
   try {
-    const suffix = git("rev-parse", "--show-prefix") + basename(file)
-    const origin = git("config", "--get", "remote.origin.url").replace(/\/$/, "").replace(/\.git$/, "")
-    const repo = /^(?:https:\/\/|ssh:\/\/git@|git@)[a-zA-Z0-9.-]+[:/]([\w.-]+(?:\/[\w.-]+)+)$/.exec(origin)?.[1]
+    const suffix = git(dirname(file), "rev-parse", "--show-prefix") + basename(file)
+    const repo = originRepo(dirname(file))
     if (repo && suffix && !suffix.startsWith("../") && !/[\x00-\x1f\x7f]/.test(suffix)) return repo + "/" + suffix
   } catch {
     // A scratch file or unavailable Git cannot supply a verified graph ref.
@@ -26,6 +22,22 @@ const start = "For standalone questions, answer directly. When engineering work 
 const touch = "Use Bonez records delivered for this file. If none arrived and the file matters to the task, call memory_recall with refs for its owner/repo/path. A file lookup includes memories attached to its symbols. For a particular function use its exact graph symbol path (owner/repo/path::symbol). Batch related refs and reuse earlier reads. Open a relevant memory before applying its constraint; fetch the target if another session may be editing it."
 
 const host = process.argv[2]
+
+// Once session capture has announced this session (its start succeeded), the gateway records the
+// session's own reads and edits, and recall would show them back as overlapping work. Name the
+// session so the model leaves it out. Before that, or on a gateway that refused the start (one
+// that would also refuse the `session` argument), the text stays as it was.
+async function thisSession(event) {
+  if (host !== "claude" && host !== "cursor") return ""
+  try {
+    const { announcedSessionId } = await import("./bonez-session-sync.mjs")
+    const id = announcedSessionId(host, event)
+    if (!id) return ""
+    return ` This session's id is ${JSON.stringify(id)}. Pass "session": ${JSON.stringify(id)} to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.`
+  } catch {
+    return ""
+  }
+}
 try {
   const event = JSON.parse(readFileSync(0, "utf8").trim())
   const name = event.hook_event_name
@@ -47,6 +59,7 @@ try {
     context = "When a Memory states a prerequisite, preserve it in the plan. Check the source before assigning meaning to missing evidence. If this was a WorkItem and the user asked what happened, open a SessionWorkedOn neighbor or linked ticket/PR before answering. A session with only a title and status supplies attribution; use the WorkItem summary for the decision and say where the detail came from. Before sending an answer that uses a saved Memory, call memory_cite once. Pass only handles from the Memory records you relied on (id m:...), never the WorkItem, Session or ticket handles. Skip this tool entirely if you used only those other records. Cite the sources in your answer."
   }
   if (context) {
+    context += await thisSession(event)
     const output = host === "cursor" ? { additional_context: context }
       : { hookSpecificOutput: { hookEventName: name, additionalContext: context } }
     process.stdout.write(JSON.stringify(output))
