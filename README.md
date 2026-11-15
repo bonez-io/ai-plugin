@@ -356,7 +356,7 @@ One loop: **`system_model_search` → `system_model_schema` → `system_model_qu
 | `rules_write` | Save, update or delete binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
 | `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
-The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.0 reaches `stable`. This plugin's write gate still prompts on `graph_write` and `rules` saves until then.
+The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.0 reaches `stable`.
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
@@ -366,8 +366,8 @@ skills never use them.
 
 `hooks/gate-write.sh` is a `PreToolUse` hook: Claude Code asks you before **every `memory_save` call** (every op
 is a write; a `preflight` or `dry_run` asks too) and before **every `rules_write` call**. Reads, `rules_read`
-included, pass through untouched. Until the old names are removed, the same prompt covers `graph_write` and the
-`save`/`update`/`delete` ops of `rules` (and of the retired `memory` tool). `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
+included, pass through untouched. The gate does not cover the old names (`graph_write`, `rules`, `memory`): a plugin that
+installs fresh never sees them. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
 
 Codex has no hook for this and does not need one: its plugin sets `approval_mode = "prompt"` on `memory_save` and `rules_write` in `codex/.mcp.json`, so Codex asks before every call to either (see [OpenAI Codex](#openai-codex)).
 
