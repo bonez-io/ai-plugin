@@ -203,12 +203,14 @@ function resolveDataDir(hostDir) {
 const hookFolderPath = () => join(CANONICAL_DATA_DIR, "hook-folder.json")
 function rememberHookFolder() {
   const hostDir = process.env.CLAUDE_PLUGIN_DATA
-  if (!hostDir || readJsonSafe(hookFolderPath(), null)?.claude === hostDir) return
+  // The server address too: the plugin option is only in the hooks' environment.
+  const seen = readJsonSafe(hookFolderPath(), null)
+  if (!hostDir || (seen?.claude === hostDir && seen?.gateway === gatewayBaseUrl())) return
   // Only for someone who set capture up: settings exist somewhere.
   if (![hostDir, CANONICAL_DATA_DIR, ...legacyDataDirs()].some((d) => existsSync(join(d, "config.json")))) return
   try {
     mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
-    copyAtomic(`${JSON.stringify({ claude: hostDir })}\n`, hookFolderPath())
+    copyAtomic(`${JSON.stringify({ claude: hostDir, gateway: gatewayBaseUrl(), gatewaySource: gatewaySource() })}\n`, hookFolderPath())
   } catch {
     /* status then answers for this shell's own resolution */
   }
@@ -420,6 +422,44 @@ async function log(line) {
 // BONEZ_SESSION_SYNC=0 disables capture without touching the installed key or config — the
 // documented kill switch (SPEC §3.4).
 const disabledByEnv = () => process.env.BONEZ_SESSION_SYNC === "0"
+
+// Where the server address came from, in the order gatewayBaseUrl reads them.
+function gatewaySource() {
+  if (process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL) return "the plugin's server address option"
+  if (process.env.BONEZ_GATEWAY_URL) return "BONEZ_GATEWAY_URL"
+  if (process.env.BONEZ_MCP_URL) return "BONEZ_MCP_URL"
+  return "the default"
+}
+
+// The gateway host a stored OAuth sign-in was issued for: recorded at sign-in, or, for a sign-in
+// from before that, the host of the token's MCP audience (`https://<gateway>/mcp`). Undefined for
+// an API key or when it cannot be told; then nothing is compared. Reads claims only, never logs them.
+function signInHost(cfg) {
+  const oauth = cfg?.apiKey ? undefined : cfg?.oauth
+  if (!oauth) return undefined
+  try {
+    if (oauth.gateway) return new URL(oauth.gateway).host
+    const claims = JSON.parse(Buffer.from(String(oauth.accessToken).split(".")[1], "base64url").toString("utf8"))
+    const mcp = [].concat(claims.aud ?? []).find((a) => typeof a === "string" && /^https?:\/\/[^/]+\/mcp\/?$/.test(a))
+    return mcp ? new URL(mcp).host : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// A sign-in issued by one gateway is refused by another, so nothing is sent and the person is told.
+function signInMismatch(cfg, gatewayUrl) {
+  const signedIn = signInHost(cfg)
+  let target
+  try {
+    target = new URL(gatewayUrl).host
+  } catch {
+    return undefined
+  }
+  return signedIn && signedIn !== target ? { signedIn, target } : undefined
+}
+const mismatchText = (m) =>
+  `Bonez session capture is signed in to ${m.signedIn}, but the plugin's server address is ${m.target}, so nothing uploads. Sign in again (\`node "${SELF_PATH}" login\`) or change the plugin's server address.`
 
 function gatewayBaseUrl() {
   const hostOption = process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL
@@ -939,7 +979,8 @@ async function resolveBearer(cfg, gatewayUrl) {
     const stored = current.oauth ?? oauth
     if (stored.accessToken && stored.expiresAt && Date.now() < stored.expiresAt - TOKEN_SKEW_MS) return stored
     if (!stored.refreshToken) throw new Error("the stored access token expired and there is no refresh token — run `login` again")
-    const next = { ...(await refreshAccessToken(gatewayUrl, stored.refreshToken)), issuer: stored.issuer ?? oauth.issuer }
+    const next = { ...(await refreshAccessToken(gatewayUrl, stored.refreshToken)), issuer: stored.issuer ?? oauth.issuer,
+      ...(stored.gateway && { gateway: stored.gateway }) }
     saveConfig({ ...current, oauth: next })
     return next
   }, 15_000)
@@ -1250,6 +1291,12 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     await log("upload: skipped — session capture requires a Bonez-operated gateway")
     return
   }
+  const mismatch = signInMismatch(cfg, gatewayUrl)
+  if (mismatch) {
+    recordAttempt({ ok: false, step: "sign-in", host: mismatch.target, detail: `signed in to ${mismatch.signedIn}, not ${mismatch.target}`, short: `signed in to ${mismatch.signedIn}, not ${mismatch.target}` })
+    await log(`upload: session=${dedupKey} agent=${agent} not sent — signed in to ${mismatch.signedIn}, but the server address is ${mismatch.target} (from ${gatewaySource()})`)
+    return
+  }
   // Each step names itself and its host, so a failure says where and why (never a credential or
   // a URL's query string: the upload URL is presigned).
   let step = "token refresh"
@@ -1514,6 +1561,8 @@ async function announceSession(agent, cfg, payload, cwd) {
   if (existsSync(presencePath(id, "json"))) return skip("announced before (a resume), or refused")
   const gatewayUrl = gatewayBaseUrl()
   if (!captureGatewayAllowed(gatewayUrl)) return skip("not a Bonez-operated gateway")
+  const mismatch = signInMismatch(cfg, gatewayUrl)
+  if (mismatch) return skip(`signed in to ${mismatch.signedIn}, but the server address is ${mismatch.target}`)
   // A folder that is no Git checkout (a folder of several repositories, say) is announced with
   // no repository; its file touches are not sent, since they have no repository to be relative to.
   let root
@@ -1627,7 +1676,7 @@ async function drainPresence(id) {
   const announced = readJsonSafe(presencePath(id, "json"), null)
   if (disabledByEnv() || !cfg?.enabled || !hasCredential(cfg) || !announced?.repo) return true
   const gatewayUrl = gatewayBaseUrl()
-  if (!captureGatewayAllowed(gatewayUrl)) return true
+  if (!captureGatewayAllowed(gatewayUrl) || signInMismatch(cfg, gatewayUrl)) return true
   for (let i = 0; i < events.length; i += MAX_EVENTS_PER_CALL) {
     const res = await sessionsCall(cfg, gatewayUrl, id, "events", { events: events.slice(i, i + MAX_EVENTS_PER_CALL) })
     if (res.ok) continue
@@ -1698,6 +1747,8 @@ const shortDate = (ms) => `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMo
 // never counts. Either the last three attempts all failed, or the last one failed and nothing has
 // uploaded for three days.
 function captureNotice(cfg) {
+  const mismatch = signInMismatch(cfg, gatewayBaseUrl())
+  if (mismatch) return { reason: "mismatch", text: mismatchText(mismatch) }
   const attempts = readJsonSafe(healthPath(), {}).attempts ?? []
   const last = attempts.at(-1)
   if (!last || last.ok) return null
@@ -1848,7 +1899,7 @@ async function cmdLogin(rest) {
     enabled: true,
     scope,
     repos,
-    oauth: tokens,
+    oauth: { ...tokens, gateway: gatewayBaseUrl() },
     installedAt: current.installedAt ?? new Date().toISOString(),
   }
   delete cfg.apiKey
@@ -1944,6 +1995,18 @@ function describeDataDir() {
   return `${dir} (settings found through the fallback${hostDir ? `; the Claude Code folder ${hostDir} has none` : ""})`
 }
 
+// What `status` cannot see from a plain shell: the server address the Claude Code hook uses
+// (the plugin option is only in the hooks' environment), and whether the sign-in matches it.
+function hookGatewayLines(cfg) {
+  const lines = []
+  const hook = process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL ? undefined : readJsonSafe(hookFolderPath(), null)
+  const used = typeof hook?.gateway === "string" ? hook.gateway : gatewayBaseUrl()
+  if (used !== gatewayBaseUrl()) lines.push(`  the Claude Code hook uses: ${used} (from ${hook.gatewaySource ?? "its own environment"})`)
+  const mismatch = signInMismatch(cfg, used)
+  if (mismatch) lines.push(`  sign-in:  issued by ${mismatch.signedIn}, not ${mismatch.target}: uploads are not sent until you sign in again or change the server address`)
+  return lines
+}
+
 const when = (ms) => new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC"
 
 function cmdStatus() {
@@ -1980,7 +2043,8 @@ function cmdStatus() {
     else lines.push("              (none — nothing will upload until you add one)")
   }
   lines.push(
-    `  gateway:  ${gatewayBaseUrl()}`,
+    `  gateway:  ${gatewayBaseUrl()} (from ${gatewaySource()})`,
+    ...hookGatewayLines(cfg),
     `  clients:  Claude Code, Codex, Cursor (one sign-in, shared store)`,
     `  sessions synced: ${Object.keys(state).length}`,
     `  installed:${cfg.installedAt ?? "unknown"}`,

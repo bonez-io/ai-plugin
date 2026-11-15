@@ -2196,7 +2196,9 @@ describe("capture says when it is set up but not working", () => {
     assert.ok(!existsSync(join(home, ".bonez")), "nothing written for a person without capture")
     writeFileSync(join(hostDir, "config.json"), JSON.stringify({ enabled: false }))
     await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })
-    assert.deepEqual(readJsonOr(join(home, ".bonez", "session-sync", "hook-folder.json")), { claude: hostDir })
+    // It also writes down the server address it uses, with where that came from.
+    assert.deepEqual(readJsonOr(join(home, ".bonez", "session-sync", "hook-folder.json")),
+      { claude: hostDir, gateway: gateway.url, gatewaySource: "BONEZ_GATEWAY_URL" })
   })
 
   test("settings in an older folder the hook does not read: one line, then none that day", async () => {
@@ -2341,5 +2343,45 @@ describe("an expired sign-in is refreshed once, and the new token is used from t
       gateway.answers.authServer = null
       await as.close()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------- sign-in for another gateway
+
+describe("a sign-in issued by one gateway is never sent to another", () => {
+  test("nothing is sent; the log, the notice and status name both hosts", async () => {
+    const home = freshDir("mismatch")
+    const dataDir = join(home, "data")
+    mkdirSync(dataDir, { recursive: true })
+    // Shaped like the gateway's access token: its MCP audience names the gateway that issued it.
+    const b64 = (v) => Buffer.from(JSON.stringify(v)).toString("base64url")
+    const token = [b64({ alg: "RS256" }), b64({ aud: ["https://gateway.bonez.io/mcp", "https://example.auth0.com/userinfo"] }), "SIGNATUREPART"].join(".")
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [],
+      oauth: { accessToken: token, refreshToken: "rt-1", expiresAt: Date.now() + 3_600_000 } }))
+    const cwd = join(home, "work", "api")
+    mkdirSync(cwd, { recursive: true })
+    const project = join(home, ".claude", "projects", cwd.replace(/[/._]/g, "-"))
+    mkdirSync(project, { recursive: true })
+    cpSync(join(FIXTURES, "claude-transcript.jsonl"), join(project, "stale.jsonl"))
+    // The plugin's server address option points elsewhere (the stub gateway on loopback).
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_OPTION_BONEZ_URL: gateway.url }
+    const target = new URL(gateway.url).host
+    const before = { presign: gateway.calls.presign.length, start: gateway.calls.start.length }
+    const res = await runCli(["hook", "claude", "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "mm-1", cwd }) })
+    const notice = JSON.parse(res.stdout).systemMessage
+    assert.ok(notice.startsWith(`Bonez session capture is signed in to gateway.bonez.io, but the plugin's server address is ${target}, so nothing uploads. Sign in again (`), notice)
+    assert.doesNotMatch(notice, /rt-1|SIGNATUREPART|eyJ/)
+    const log = () => (existsSync(join(dataDir, "sync.log")) ? readFileSync(join(dataDir, "sync.log"), "utf8") : "")
+    await waitFor(() => /upload: session=stale agent=claude not sent/.test(log()))
+    assert.match(log(), new RegExp(`not sent — signed in to gateway\\.bonez\\.io, but the server address is ${target.replace(".", "\\.")} \\(from the plugin's server address option\\)`))
+    assert.match(log(), /start session=mm-1 agent=claude not announced — signed in to gateway\.bonez\.io/)
+    assert.doesNotMatch(log(), /rt-1|eyJ/)
+    assert.equal(gateway.calls.presign.length, before.presign)
+    assert.equal(gateway.calls.start.length, before.start)
+    // A hand-run status, without the option in its environment, still says what the hook uses.
+    const st = await runCli(["status"], { env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: dataDir } })
+    assert.match(st.stdout, /gateway: {2}https:\/\/gateway\.bonez\.io \(from the default\)/)
+    assert.match(st.stdout, new RegExp(`the Claude Code hook uses: ${gateway.url.replaceAll(".", "\\.")} \\(from the plugin's server address option\\)`))
+    assert.match(st.stdout, new RegExp(`sign-in: {2}issued by gateway\\.bonez\\.io, not ${target.replace(".", "\\.")}`))
   })
 })
