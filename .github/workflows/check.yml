@@ -18,7 +18,7 @@ jobs:
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json codex/.codex-plugin/plugin.json codex/.mcp.json .agents/plugins/marketplace.json; do
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json codex/.codex-plugin/plugin.json codex/.mcp.json .agents/plugins/marketplace.json claude-directory/.claude-plugin/plugin.json claude-directory/.mcp.json; do
             jq empty "$f"
             echo "ok: $f"
           done
@@ -42,13 +42,16 @@ jobs:
           server_version="$(jq -r '.version' server.json)"
           codex_version="$(jq -r '.version' codex/.codex-plugin/plugin.json)"
           cursor_version="$(jq -r '.version' cursor/.cursor-plugin/plugin.json)"
+          directory_version="$(jq -r '.version' claude-directory/.claude-plugin/plugin.json)"
           echo "plugin.json:      $plugin_version"
           echo "marketplace.json: $marketplace_version"
           echo "server.json:      $server_version"
           echo "codex plugin:     $codex_version"
           echo "cursor plugin:    $cursor_version"
+          echo "directory plugin: $directory_version"
           if [ "$plugin_version" != "$marketplace_version" ] || [ "$plugin_version" != "$server_version" ] \
-             || [ "$plugin_version" != "$codex_version" ] || [ "$plugin_version" != "$cursor_version" ]; then
+             || [ "$plugin_version" != "$codex_version" ] || [ "$plugin_version" != "$cursor_version" ] \
+             || [ "$plugin_version" != "$directory_version" ]; then
             echo "::error::Version drift between manifests — one version, everywhere (see PostHog's 1.1.58/1.0.56/1.1.52/1.0.54 drift for why)."
             exit 1
           fi
@@ -61,7 +64,8 @@ jobs:
           v="$(jq -r '.version' .claude-plugin/plugin.json)"
           for spec in '.mcp.json|.mcpServers.bonez.headers' \
                       'codex/.mcp.json|.mcpServers.bonez.http_headers' \
-                      'cursor/mcp.json|.mcpServers.bonez.headers'; do
+                      'cursor/mcp.json|.mcpServers.bonez.headers' \
+                      'claude-directory/.mcp.json|.mcpServers.bonez.headers'; do
             f="${spec%%|*}"; path="${spec##*|}"
             got="$(jq -r "$path[\"x-bonez-plugin-version\"]" "$f")"
             [ "$got" = "$v" ] || { echo "::error::$f sends x-bonez-plugin-version $got, plugin is $v"; exit 1; }
@@ -82,7 +86,7 @@ jobs:
       - name: bonez-session-sync.mjs syntax + vendored bundle
         run: |
           set -euo pipefail
-          for f in bin/*.mjs bin/lib/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/lib/*.mjs cursor/bin/vendor/*.mjs codex/bin/*.mjs codex/bin/lib/*.mjs skills/creating-a-plugin/templates/scripts/*.mjs tests/*.mjs tests/lib/*.mjs; do
+          for f in bin/*.mjs bin/lib/*.mjs bin/vendor/*.mjs cursor/bin/*.mjs cursor/bin/lib/*.mjs cursor/bin/vendor/*.mjs codex/bin/*.mjs codex/bin/lib/*.mjs skills/creating-a-plugin/templates/scripts/*.mjs scripts/*.mjs tests/*.mjs tests/lib/*.mjs; do
             node --check "$f"
             echo "ok: $f"
           done
@@ -334,6 +338,28 @@ jobs:
             grep -q '^description:' "$f" || { echo "::error::$f missing description"; exit 1; }
             echo "ok: $f"
           done
+
+      - name: claude-directory/ is the generated directory variant, and only that
+        run: |
+          set -euo pipefail
+          # claude-directory/ is what Anthropic's plugin directory reads (portal "Plugin path").
+          # It must equal the generator's output, and hold nothing the directory refuses from a
+          # non-Verified publisher: no hooks, no bin/, no userConfig, no scripts, only allowed file types.
+          node scripts/build-directory-plugin.mjs
+          git diff --exit-code claude-directory || {
+            echo "::error::claude-directory/ is stale — run node scripts/build-directory-plugin.mjs and commit the result."; exit 1; }
+          test -z "$(git ls-files --others --exclude-standard claude-directory)" || {
+            echo "::error::the generator produced files that are not committed"; exit 1; }
+          for d in hooks bin scripts; do
+            test ! -e "claude-directory/$d" || { echo "::error::claude-directory/$d must not exist"; exit 1; }
+          done
+          jq -e 'has("userConfig") | not' claude-directory/.claude-plugin/plugin.json >/dev/null \
+            || { echo "::error::claude-directory plugin.json must not declare userConfig"; exit 1; }
+          jq -e '.mcpServers.bonez.url == "https://gateway.bonez.io/mcp"' claude-directory/.mcp.json >/dev/null \
+            || { echo "::error::claude-directory .mcp.json must use the fixed https URL"; exit 1; }
+          bad="$(find claude-directory -type f | grep -vE '(/LICENSE|\.(md|txt|json|ya?ml|png|jpe?g|gif|webp))$' || true)"
+          test -z "$bad" || { echo "::error::file types the directory does not accept:"; echo "$bad"; exit 1; }
+          echo "ok: claude-directory is generated and directory-safe"
 
   # The same node tests on Windows, where the plugin's users are (Claude Code, Codex and Cursor on
   # Windows 11). A Windows runner defaults to core.autocrlf=true, so this also proves .gitattributes
