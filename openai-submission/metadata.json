@@ -23,7 +23,7 @@
     "prompts": [
       "Search Bonez for the duplicate-settlement issue in the PayZeno sample ledger. Explain the expected behavior and cite the source.",
       "Find the duplicate-settlement issue in the connected Linear workspace and show its current identifier, title, status and description. Only read it; do not change anything.",
-      "Orient me in the PayZeno review workspace: show the indexed record types and counts, standing rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and available Bonez agents. Only read; do not change or run anything.",
+      "Orient me in the PayZeno review workspace: show the indexed record types and counts, standing rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and available Bonez agents and environments. If an environment exists, inspect its configuration and build status. Only read; do not create, change, attach or run anything.",
       "Who calls Ledger.credit in payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py, and which tests cover it? I want to understand the impact before changing it.",
       "Remember my personal code-review preference for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py: show repo-qualified caller names and test filenames before recommending a change. I authorize saving this preference for me only; do not share it with the organization."
     ],
@@ -42,10 +42,10 @@
           "expected_behavior": "Discover a suitable Linear issue search or read operation, inspect its schema, then run it through vendor_read. Report the actual current identifier, title, status and description with a returned link. If a search result omits required fields, fetch the full issue through the discovered read operation. Use returned operation IDs and schema-valid inputs. Do not substitute an indexed ticket for a failed live read or call any write tool."
         },
         {
-          "description": "Read workspace structure, standing guidance and available agents. Empty rules or agent lists are valid and must be reported accurately.",
-          "prompt": "Orient me in the PayZeno review workspace: show the indexed record types and counts, standing rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and available Bonez agents. Only read; do not change or run anything.",
+          "description": "Read workspace structure, standing guidance, available agents and environments. Empty rules, agents or environment lists are valid and must be reported accurately. This case never attaches a machine or starts a build.",
+          "prompt": "Orient me in the PayZeno review workspace: show the indexed record types and counts, standing rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and available Bonez agents and environments. If an environment exists, inspect its configuration and build status. Only read; do not create, change, attach or run anything.",
           "tools_triggered": "system_model_schema, rules_read, vendor_search, vendor_info, vendor_read",
-          "expected_behavior": "Read the actual System Model overview and rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01. Discover the Bonez agent list operation, inspect its schema and execute with vendor_read. Report counts, rules and agents or empty lists accurately. Do not create, modify or run anything."
+          "expected_behavior": "Read the actual System Model overview and rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01. Discover the Bonez agent list and environment list/read operations, inspect their schemas and execute with vendor_read. Report counts, rules, agents and environments or empty lists accurately. If an environment exists, read its configuration and readiness; otherwise do not fabricate them. Do not create, modify or run agents, call vendor_write, environment_attach or environment_save, or start a build."
         },
         {
           "description": "Navigate indexed code relationships. Setup: payzeno-showcase-pilot-01/payzeno-showcase-pilot-01 at seed bbbd0722d407142c06af528941b01161e81f097f, with ledger.py and test_ledger.py indexed.",
@@ -58,12 +58,6 @@
           "prompt": "Remember my personal code-review preference for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py: show repo-qualified caller names and test filenames before recommending a change. I authorize saving this preference for me only; do not share it with the organization.",
           "tools_triggered": "system_model_search, system_model_fetch, memory_save",
           "expected_behavior": "Resolve and fetch the exact repository-qualified ledger.py; preserve payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py verbatim in the saved content. Call memory_save op=remember preflight=true with scope=personal, kind=preference, basis=stated, a short reason and the resolved anchor. Inspect similar matches; only equivalent active or pending personal memories prevent a new save. Save once with preflight=false when needed, then fetch the returned ID. Verify content, anchors, personal scope and actual state. Report any mismatch as failure, not success. Never request unrelated personal information or broaden scope. Honor host permission prompts."
-        },
-        {
-          "description": "Read available environments through the same complete operation catalog. Empty environment lists are valid. This is a read-only rehearsal and does not attach a machine or start a build.",
-          "prompt": "List the environments available in the PayZeno sample workspace. If one exists, inspect its configuration and build status. Do not create, attach, update or run anything.",
-          "tools_triggered": "vendor_search, vendor_info, vendor_read",
-          "expected_behavior": "Discover Bonez environment list and read operations, inspect their current schemas and use vendor_read. If no environments exist, report the empty list without fabricating a configuration. If one exists, read it and report actual configuration/readiness. Do not call vendor_write, environment_attach or environment_save."
         }
       ],
       "negative": [
@@ -81,7 +75,7 @@
         }
       ]
     },
-    "demo_recording_url": "https://cdn.bonez.io/plugin-review/bonez/0.11.1/20261116-a68db5/demo.mp4"
+    "demo_recording_url": "https://cdn.bonez.io/plugin-review/bonez/0.11.2/20261116-full-capabilities/demo.mp4"
   },
   "publication": {
     "countries": [],
