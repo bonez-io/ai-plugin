@@ -3,7 +3,7 @@
     "displayName": "Bonez",
     "developerName": "Bonez",
     "shortDescription": "Your team's system context",
-    "longDescription": "Bring your organization's System Model into ChatGPT and Codex. Search connected code, tickets, pull requests, documents and people; investigate dependencies and change impact; apply your organization's rules; and save useful decisions as durable memories. Read and manage connected GitHub and Linear issues, read GitHub pull requests and Slack channel history, and manage Bonez agents with your authorization. Requires a Bonez account and an organization with indexed data. Available records and actions depend on your account's access and configured integrations. This public package connects to Bonez Cloud. Local session capture, automatic recall hooks and local plugin-building utilities remain available through the repository's local installations.",
+    "longDescription": "Bring your organization's System Model into ChatGPT and Codex. Search connected code, tickets, pull requests, documents and people; investigate dependencies and change impact; apply your organization's rules; and save authorized decisions as durable memories. Discover and use live operations across your connected services, manage Bonez agents, and inspect or configure environments with your existing permissions. Requires a Bonez account and an organization with indexed data. Available records and actions depend on your account's access, configured integrations and runtime support. Some environment actions require an interactive Bonez session. This public package connects to Bonez Cloud. Local session capture, automatic recall hooks and local plugin-building utilities remain available through the repository's local installations.",
     "category": "Developer Tools",
     "websiteURL": "https://github.com/bonez-io/ai-plugin",
     "supportURL": "https://bonez.io/contact.html",
@@ -36,16 +36,16 @@
           "expected_behavior": "Search for PayZeno duplicate settlement or ledger and fetch at least one actual returned ticket, conversation or document reference before answering. Explain that redelivery of the same event ID must not add another ledger entry. Cite fetched evidence; do not claim a fix has shipped or expose credentials. Report missing indexing accurately."
         },
         {
-          "description": "Read the live synthetic Linear ticket through a named operation. Setup: the PayZeno sample Linear connection contains PAY-5.",
+          "description": "Read the live synthetic Linear ticket through generic operation discovery and execution. Setup: the PayZeno sample Linear connection contains PAY-5.",
           "prompt": "Find the duplicate-settlement issue in the connected Linear workspace and show its current identifier, title, status and description. Only read it; do not change anything.",
-          "tools_triggered": "linear_issue_search, linear_issue_read",
-          "expected_behavior": "Search the issue title for duplicate settlement using linear_issue_search, then read its returned identifier with linear_issue_read. Report the current title, status and duplicate-settlement description with a returned link. Do not substitute an indexed ticket for a failed live read or call any write tool."
+          "tools_triggered": "vendor_search, vendor_info, vendor_read",
+          "expected_behavior": "Discover the Linear issue search and read operations, inspect their schemas, then run them through vendor_read. Report the actual current identifier, title, status and description with a returned link. Use returned operation IDs and schema-valid inputs. Do not substitute an indexed ticket for a failed live read or call any write tool."
         },
         {
           "description": "Read workspace structure, standing guidance and available agents. Empty rules or agent lists are valid and must be reported accurately.",
           "prompt": "Orient me in the PayZeno review workspace: show the indexed record types and counts, standing rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and available Bonez agents. Only read; do not change or run anything.",
-          "tools_triggered": "system_model_schema, rules_read, bonez_agent_list",
-          "expected_behavior": "Call system_model_schema for the actual overview, rules_read with op=list and repo_id=payzeno-showcase-pilot-01/payzeno-showcase-pilot-01, and bonez_agent_list. Report actual counts, returned rules (including narrower-rule counts) and agents or empty lists. Do not infer complete coverage or create, modify or run anything."
+          "tools_triggered": "system_model_schema, rules_read, vendor_search, vendor_info, vendor_read",
+          "expected_behavior": "Read the actual System Model overview and rules for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01. Discover the Bonez agent list operation, inspect its schema and execute with vendor_read. Report counts, rules and agents or empty lists accurately. Do not create, modify or run anything."
         },
         {
           "description": "Navigate indexed code relationships. Setup: payzeno-showcase-pilot-01/payzeno-showcase-pilot-01 at seed bbbd0722d407142c06af528941b01161e81f097f, with ledger.py and test_ledger.py indexed.",
@@ -56,8 +56,14 @@
         {
           "description": "Authorized personal memory with preflight and readback. Setup: synthetic PayZeno reviewer account has bonez:memory scope and indexed ledger.py. This writes one personal test note. After the rehearsal, close the memory with its returned ID; do not delete source records.",
           "prompt": "Remember my personal code-review preference for payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py: show repo-qualified caller names and test filenames before recommending a change. I authorize saving this preference for me only; do not share it with the organization.",
-          "tools_triggered": "system_model_fetch, memory_preflight, memory_save",
-          "expected_behavior": "Resolve a real ledger.py anchor by fetching the repository-qualified file path or search then fetch. Call memory_preflight with scope=personal, kind=preference, the requested content, short description and about anchor. If no duplicate exists, call memory_save once with those inputs and fetch the returned ID. If a duplicate exists, report it without duplicating. Report the returned state exactly; never save with scope=org or request unrelated personal information. Honor host permission prompts."
+          "tools_triggered": "system_model_search, system_model_fetch, memory_save",
+          "expected_behavior": "Resolve and fetch the exact repository-qualified ledger.py; preserve payzeno-showcase-pilot-01/payzeno-showcase-pilot-01/ledger.py verbatim in the saved content. Call memory_save op=remember preflight=true with scope=personal, kind=preference, basis=stated, a short reason and the resolved anchor. Inspect similar matches; only equivalent active or pending personal memories prevent a new save. Save once with preflight=false when needed, then fetch the returned ID. Verify content, anchors, personal scope and actual state. Report any mismatch as failure, not success. Never request unrelated personal information or broaden scope. Honor host permission prompts."
+        },
+        {
+          "description": "Read available environments through the same complete operation catalog. Empty environment lists are valid. This is a read-only rehearsal and does not attach a machine or start a build.",
+          "prompt": "List the environments available in the PayZeno sample workspace. If one exists, inspect its configuration and build status. Do not create, attach, update or run anything.",
+          "tools_triggered": "vendor_search, vendor_info, vendor_read",
+          "expected_behavior": "Discover Bonez environment list and read operations, inspect their current schemas and use vendor_read. If no environments exist, report the empty list without fabricating a configuration. If one exists, read it and report actual configuration/readiness. Do not call vendor_write, environment_attach or environment_save."
         }
       ],
       "negative": [
@@ -79,6 +85,6 @@
   },
   "publication": {
     "countries": [],
-    "release_notes": "Public directory interface with 38 explicit tools, separate memory preflight/save/update/close actions, eleven aligned skills and revised reviewer cases. Existing local distributions retain their own interface."
+    "release_notes": "Preserve the full compact Bonez MCP: generic vendor discovery and separate read/write execution, environment tools and all memory operations. Improve public authorization, exact-anchor and memory-readback guidance; retain eleven remote skills and add environment review coverage."
   }
 }

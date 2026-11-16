@@ -29,7 +29,7 @@ fs.writeFileSync(path.join(output, "mcp.json"), JSON.stringify({
   mcpServers: {
     bonez: {
       type: "streamable-http",
-      url: "https://gateway.bonez.io/mcp?profile=directory",
+      url: "https://gateway.bonez.io/mcp",
       extensions: {
         "com.openai": {
           auth: {
@@ -45,7 +45,7 @@ fs.writeFileSync(path.join(output, "mcp.json"), JSON.stringify({
 
 // Reuse the existing remote-only workflows; they already exclude local utilities.
 fs.cpSync(path.join(root, "claude-directory/skills"), path.join(output, "skills"), { recursive: true });
-// Public workflows use only the fixed directory tools and explicit memory consent.
+// Public guidance preserves the full catalog and makes consent/readback explicit.
 fs.cpSync(path.join(root, "openai-submission/skills"), path.join(output, "skills"), { recursive: true });
 fs.mkdirSync(path.join(output, "assets"));
 fs.copyFileSync(path.join(root, "assets/bonez-icon-512.png"), path.join(output, "assets/icon.png"));
