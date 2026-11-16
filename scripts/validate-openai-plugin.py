@@ -101,10 +101,16 @@ with zipfile.ZipFile(args.archive) as archive:
         check(isinstance(frontmatter.get("description"), str) and bool(frontmatter["description"].strip()), f"invalid description: {name}")
         seen.add(skill_name)
         check(not re.search(r"CLAUDE_PLUGIN_ROOT|bonez-plugin-push|session-sync|\bBONEZ_", text), f"missing local runtime dependency: {name}")
+    vendor_skill = files["skills/using-vendor-operations/SKILL.md"].decode("utf-8")
+    for tool in ("vendor_search", "vendor_info", "vendor_read", "vendor_write", "vendor_status",
+                 "environment_attach", "environment_save", "environment_build_status"):
+        check(f"`{tool}`" in vendor_skill, f"public workflow lost capability: {tool}")
     remembering = files["skills/remembering/SKILL.md"].decode("utf-8")
     check('After every successful write, fetch the returned memory ID' in remembering, "memory writes need readback")
     check('Save only when the user requests or authorizes it' in remembering, "memory writes need user authorization")
     check('"kind": "convention"' not in remembering and '`kind: context`' not in remembering, "outdated memory kinds")
+    for operation in ("remember", "revise", "claim", "link", "unlink", "close", "propose"):
+        check(f"`{operation}`" in remembering, f"public memory operation lost: {operation}")
     mcp = json.loads(files["mcp.json"])
     check(mcp.get("$schema") == "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "MCP schema")
     check(set(mcp["mcpServers"]) == {"bonez"}, "one intended server")

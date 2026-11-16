@@ -6,10 +6,12 @@ OpenAI public submissions do not accept the local lifecycle hooks, session
 capture or plugin-building utilities in those distributions.
 
 `metadata.json` owns the listing, review cases and publication settings. Identity
-and version come from `codex/.codex-plugin/plugin.json`; the existing 512px PNG
-supplies both listing icons. The builder adapts the remembering skill to require
-explicit user authorization and write readback, and aligns its operation/kind
-examples with the live MCP schema. It does not promise a host approval policy.
+comes from `codex/.codex-plugin/plugin.json`; the public release version is in
+`version`. The existing 512px PNG supplies both listing icons. Two public skill
+overrides in `skills/` explain the complete vendor/environment interface and
+authorized memory workflows. The other nine remote skills come from `claude-directory/`.
+The public package requires explicit memory authorization and write readback.
+
 
 ## Build and inspect the actual archive
 
@@ -39,16 +41,14 @@ OAuth approval, reviewer login, passed portal cases or publication approval.
 - MCP endpoint: `https://gateway.bonez.io/mcp`. Protected-resource discovery and
   Auth0 discovery were verified. Public dynamic client registration, PKCE S256,
   email-code sign-in, token exchange, initialize and authenticated tools/list
-  succeeded in a development connection on 16 November 2026. All 24 exposed
-  tools declared boolean read-only, destructive and open-world annotations.
+  succeeded in a development connection on 16 November 2026. The ordinary MCP exposes 24 top-level tools, including generic vendor discovery/read/write and environment management. Release acceptance must verify the inventory and boolean annotations against the deployed gateway.
 - The package requests `bonez:read`, `bonez:memory`, `bonez:write`. It includes no
   client secret, custom MCP headers or native CLI client/callback override. Platform's actual
   callback and saved connection must still be tested independently.
 
 ## Review fixtures and demonstration
 
-The five positive cases cover evidence search/fetch, schema overview, an empty
-rule set, code callers/test relationships and an authorized personal memory.
+The six positive cases cover evidence search/fetch, live Linear reads, workspace/rules/agent orientation, code callers/test relationships, an authorized personal memory and environment discovery/read.
 Three negative cases cover access boundaries, credential extraction and
 unsupported public-plugin server administration. Expectations distinguish
 indexed/heuristic relationships from runtime coverage and a pending or retired
@@ -101,3 +101,45 @@ made Platform send the CIMD client ID `https://chatgpt.com/oauth/client.json`,
 which the current Auth0 tenant rejected as unknown. DCR is supported and was
 exercised in the development connection; verify Platform's saved settings after
 each upload before reconnecting.
+
+## Interface decision and review risk
+
+Use the same `/mcp` endpoint and capabilities as other Bonez clients. The earlier
+38-tool directory adapter removed most vendor operations and environment writes;
+Shay rejected that tradeoff. Public packaging must not reinstate a provider
+allowlist or remove operations merely to avoid advisory findings.
+
+The compact interface discovers operations and their schemas on demand, then
+runs them through separate read and write tools. It retains existing scope,
+tenancy, binding, schema and approval enforcement. It does not execute arbitrary
+caller-supplied code. Direct environment tools and the complete memory operation
+union remain available. Memory's destructive hint covers revisions, unlink and
+retirement; history retention does not make those actions non-destructive.
+
+Research checked 16 November 2026:
+
+- [PostHog's MCP source](https://github.com/PostHog/posthog/blob/master/services/mcp/README.md)
+  documents a default CLI `exec` surface for OpenAI clients and an optional
+  per-operation tools mode. This supports compact discovery as a practical
+  design; it does not establish Bonez's eligibility or an exception.
+- [Cloudflare Code Mode](https://developers.cloudflare.com/agents/tools/codemode/api-reference/)
+  supports discovery/description plus execution with controlled host access.
+  Bonez reuses its typed operation dispatcher rather than introducing a code runtime.
+- [OpenAI's guideline](https://developers.openai.com/plugins/plugin-guidelines)
+  asks for separately exposed operations and disallows using generic discovery
+  and execution to enable operations not exposed for review. The conflict is
+  explicit. Do not describe the compact package as policy-compliant or guaranteed
+  acceptance; submit accurate capability descriptions and disclose the scan
+  advisories for review. Do not conceal tools from reviewers or vary behavior by
+  reviewer identity or client User-Agent.
+
+The original draft had zero blocking findings and seven advisories, not an
+approval. The old hosted demo is evidence of the original full `/mcp` interface;
+it does not validate the revised skills or the additional environment case.
+Rehearse the current package and update recording evidence before upload.
+
+An earlier restricted-profile memory rehearsal saved the wrong repository path;
+later readback also changed from personal to organization scope after retirement.
+The test note was retired. This remains an unresolved acceptance issue until a
+current exact-anchor personal-memory rehearsal and lifecycle investigation pass.
+Packaging or an immediate successful readback alone does not resolve it.
