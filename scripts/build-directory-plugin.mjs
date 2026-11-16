@@ -57,7 +57,8 @@ fs.rmSync(out, { recursive: true, force: true });
 const { userConfig, ...rest } = manifest;
 write(".claude-plugin/plugin.json", JSON.stringify({
   ...rest,
-  documentationUrl: "https://github.com/bonez-io/ai-plugin#readme",
+  documentationUrl: "https://bonez.io/plugin/",
+  supportUrl: "https://bonez.io/support/",
   icon: "./assets/icon.png",
 }, null, 2) + "\n");
 
@@ -121,9 +122,10 @@ The first time Claude uses Bonez it opens a sign-in page: use your Bonez account
 ## Links
 
 - Bonez: https://bonez.io
-- Source and full documentation: https://github.com/bonez-io/ai-plugin
+- Documentation: https://bonez.io/plugin/
+- Source: https://github.com/bonez-io/ai-plugin
 - Privacy policy: https://bonez.io/privacy
-- Support: support@bonez.io
+- Support: https://bonez.io/support/ or support@bonez.io
 
 Customers who run their own Bonez server install from their server's install page instead of this plugin.
 `);
