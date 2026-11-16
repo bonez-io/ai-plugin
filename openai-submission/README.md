@@ -39,10 +39,10 @@ OAuth approval, reviewer login, passed portal cases or publication approval.
 - MCP endpoint: `https://gateway.bonez.io/mcp`. Protected-resource discovery and
   Auth0 discovery were verified. Public dynamic client registration, PKCE S256,
   email-code sign-in, token exchange, initialize and authenticated tools/list
-  succeeded in a development connection on 16 November 2026. All 25 exposed
+  succeeded in a development connection on 16 November 2026. All 24 exposed
   tools declared boolean read-only, destructive and open-world annotations.
 - The package requests `bonez:read`, `bonez:memory`, `bonez:write`. It includes no
-  client secret or native CLI client/callback override. Platform's actual
+  client secret, custom MCP headers or native CLI client/callback override. Platform's actual
   callback and saved connection must still be tested independently.
 
 ## Review fixtures and demonstration
@@ -90,3 +90,14 @@ Keep Linear 1SI-3800 under 1SI-3067 updated with actual results and remaining ga
 References:
 - https://developers.openai.com/plugins/build/plugins
 - https://developers.openai.com/plugins/deploy/submission
+
+Platform upload on 16 November 2026 rejected custom MCP `headers`, even though
+they are part of the portable transport format. The OpenAI builder therefore
+omits Bonez consumer/version telemetry headers; authentication remains declared
+only in `extensions.com.openai.auth`.
+
+OAuth uses explicit `client.mode: "dcr"`. Leaving registration selection implicit
+made Platform send the CIMD client ID `https://chatgpt.com/oauth/client.json`,
+which the current Auth0 tenant rejected as unknown. DCR is supported and was
+exercised in the development connection; verify Platform's saved settings after
+each upload before reconnecting.
