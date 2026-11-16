@@ -77,6 +77,11 @@ Every plugin config sends its version in an `x-bonez-plugin-version` header (CI 
 version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
 update signal for a tool that cannot update itself.
 
+### What is new in 0.11.2
+
+- **Session capture uploads only what was said.** A Claude Code transcript is uploaded as the person's and the agent's own messages. Copies of requests, compaction summaries and text the app injected are left out, so a summary the agent wrote is no longer saved as something the person stated, and a first prompt no longer arrives twice. A message that is real content but was not typed by the person (from another session, a task notification, a schedule, the host app) is marked as such.
+- **A slow session announce is logged.** The announce gives up after 4 seconds, under the hooks' own 5-second limit, instead of being cut with nothing written.
+
 ### What is new in 0.10.9
 
 - **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
@@ -363,7 +368,7 @@ One loop: **`system_model_search` → `system_model_schema` → `system_model_qu
 | `rules_write` | Save, update or delete binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
 | `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
-The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.1 reaches `stable`.
+The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.2 reaches `stable`.
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
