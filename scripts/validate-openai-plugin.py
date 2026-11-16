@@ -110,11 +110,11 @@ with zipfile.ZipFile(args.archive) as archive:
     check(set(mcp["mcpServers"]) == {"bonez"}, "one intended server")
     server = mcp["mcpServers"]["bonez"]
     check(server.get("type") == "streamable-http" and server.get("url") == "https://gateway.bonez.io/mcp", "MCP endpoint/transport")
-    check(set(server.get("headers", {})) == {"x-bonez-mcp-consumer", "x-bonez-plugin-version"}, "unexpected headers, possibly credentials")
-    check(server["headers"]["x-bonez-plugin-version"] == manifest["version"], "version header mismatch")
+    check("headers" not in server, "Platform app setup does not accept custom MCP headers")
     auth = server["extensions"]["com.openai"]["auth"]
     check(auth.get("type") == "oauth" and set(auth.get("baseScopes", [])) == {"bonez:read", "bonez:memory", "bonez:write"}, "OAuth method/scopes")
     check(not set(server) & {"oauth", "scopes", "tools", "http_headers"}, "local-only MCP settings")
+    check(auth.get("client") == {"mode": "dcr"}, "Use Auth0 dynamic registration, not the default CIMD client")
     check("clientSecret" not in auth, "OAuth secret must not be packaged")
     review = openai["review"]
     check(0 < len(review["prompts"]) <= 20 and all(isinstance(p, str) and p.strip() and len(p) <= 4000 for p in review["prompts"]), "invalid review prompts")

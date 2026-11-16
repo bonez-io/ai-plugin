@@ -5,7 +5,7 @@
       "url": "https://gateway.bonez.io/mcp",
       "headers": {
         "x-bonez-mcp-consumer": "claude-directory-plugin",
-        "x-bonez-plugin-version": "0.11.1"
+        "x-bonez-plugin-version": "0.11.2"
       }
     }
   }

@@ -77,6 +77,11 @@ Every plugin config sends its version in an `x-bonez-plugin-version` header (CI 
 version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
 update signal for a tool that cannot update itself.
 
+### What is new in 0.11.2
+
+- **Session capture uploads only what was said.** A Claude Code transcript is uploaded as the person's and the agent's own messages. Copies of requests, compaction summaries and text the app injected are left out, so a summary the agent wrote is no longer saved as something the person stated, and a first prompt no longer arrives twice. A message that is real content but was not typed by the person (from another session, a task notification, a schedule, the host app) is marked as such.
+- **A slow session announce is logged.** The announce gives up after 4 seconds, under the hooks' own 5-second limit, instead of being cut with nothing written.
+
 ### What is new in 0.10.9
 
 - **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
