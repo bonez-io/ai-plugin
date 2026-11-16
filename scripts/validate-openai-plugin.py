@@ -125,8 +125,8 @@ with zipfile.ZipFile(args.archive) as archive:
     review = openai["review"]
     check(0 < len(review["prompts"]) <= 20 and all(isinstance(p, str) and p.strip() and len(p) <= 4000 for p in review["prompts"]), "invalid review prompts")
     cases = review["test_cases"]
-    for kind, minimum in (("positive", 5), ("negative", 3)):
-        check(len(cases[kind]) >= minimum, f"insufficient {kind} cases")
+    for kind, expected_count in (("positive", 5), ("negative", 3)):
+        check(len(cases[kind]) == expected_count, f"expected exactly {expected_count} {kind} cases")
         for case in cases[kind]:
             required = ["description", "prompt"] + (["tools_triggered", "expected_behavior"] if kind == "positive" else [])
             check(all(isinstance(case.get(k), str) and case[k].strip() for k in required), f"incomplete {kind} case")

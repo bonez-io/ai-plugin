@@ -48,7 +48,7 @@ OAuth approval, reviewer login, passed portal cases or publication approval.
 
 ## Review fixtures and demonstration
 
-The six positive cases cover evidence search/fetch, live Linear reads, workspace/rules/agent orientation, code callers/test relationships, an authorized personal memory and environment discovery/read.
+The five positive cases cover evidence search/fetch, live Linear reads, workspace/rules/agent/environment orientation, code callers/test relationships and an authorized personal memory. The portal requires exactly five positive cases; workspace orientation includes environment discovery/read.
 Three negative cases cover access boundaries, credential extraction and
 unsupported public-plugin server administration. Expectations distinguish
 indexed/heuristic relationships from runtime coverage and a pending or retired
