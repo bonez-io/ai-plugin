@@ -29,14 +29,11 @@ fs.writeFileSync(path.join(output, "mcp.json"), JSON.stringify({
     bonez: {
       type: "streamable-http",
       url: "https://gateway.bonez.io/mcp",
-      headers: {
-        "x-bonez-mcp-consumer": "openai-directory-plugin",
-        "x-bonez-plugin-version": source.version,
-      },
       extensions: {
         "com.openai": {
           auth: {
             type: "oauth",
+            client: { mode: "dcr" },
             baseScopes: ["bonez:read", "bonez:memory", "bonez:write"],
           },
         },
