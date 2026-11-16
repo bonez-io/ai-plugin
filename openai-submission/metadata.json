@@ -39,7 +39,7 @@
           "description": "Read the live synthetic Linear ticket through generic operation discovery and execution. Setup: the PayZeno sample Linear connection contains PAY-5.",
           "prompt": "Find the duplicate-settlement issue in the connected Linear workspace and show its current identifier, title, status and description. Only read it; do not change anything.",
           "tools_triggered": "vendor_search, vendor_info, vendor_read",
-          "expected_behavior": "Discover the Linear issue search and read operations, inspect their schemas, then run them through vendor_read. Report the actual current identifier, title, status and description with a returned link. Use returned operation IDs and schema-valid inputs. Do not substitute an indexed ticket for a failed live read or call any write tool."
+          "expected_behavior": "Discover a suitable Linear issue search or read operation, inspect its schema, then run it through vendor_read. Report the actual current identifier, title, status and description with a returned link. If a search result omits required fields, fetch the full issue through the discovered read operation. Use returned operation IDs and schema-valid inputs. Do not substitute an indexed ticket for a failed live read or call any write tool."
         },
         {
           "description": "Read workspace structure, standing guidance and available agents. Empty rules or agent lists are valid and must be reported accurately.",
