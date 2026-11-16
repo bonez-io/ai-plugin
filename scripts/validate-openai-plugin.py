@@ -101,6 +101,9 @@ with zipfile.ZipFile(args.archive) as archive:
         check(isinstance(frontmatter.get("description"), str) and bool(frontmatter["description"].strip()), f"invalid description: {name}")
         seen.add(skill_name)
         check(not re.search(r"CLAUDE_PLUGIN_ROOT|bonez-plugin-push|session-sync|\bBONEZ_", text), f"missing local runtime dependency: {name}")
+    for name, data in files.items():
+        if name.startswith("skills/") and name.endswith(".md"):
+            check(not re.search(r"\bvendor_(search|info|read|write)\b", data.decode("utf-8")), f"unsupported generic tool in {name}")
     remembering = files["skills/remembering/SKILL.md"].decode("utf-8")
     check('After every successful write, fetch the returned memory ID' in remembering, "memory writes need readback")
     check('Save only when the user requests or authorizes it' in remembering, "memory writes need user authorization")
@@ -109,7 +112,7 @@ with zipfile.ZipFile(args.archive) as archive:
     check(mcp.get("$schema") == "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "MCP schema")
     check(set(mcp["mcpServers"]) == {"bonez"}, "one intended server")
     server = mcp["mcpServers"]["bonez"]
-    check(server.get("type") == "streamable-http" and server.get("url") == "https://gateway.bonez.io/mcp", "MCP endpoint/transport")
+    check(server.get("type") == "streamable-http" and server.get("url") == "https://gateway.bonez.io/mcp?profile=directory", "MCP endpoint/transport")
     check("headers" not in server, "Platform app setup does not accept custom MCP headers")
     auth = server["extensions"]["com.openai"]["auth"]
     check(auth.get("type") == "oauth" and set(auth.get("baseScopes", [])) == {"bonez:read", "bonez:memory", "bonez:write"}, "OAuth method/scopes")

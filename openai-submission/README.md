@@ -6,10 +6,12 @@ OpenAI public submissions do not accept the local lifecycle hooks, session
 capture or plugin-building utilities in those distributions.
 
 `metadata.json` owns the listing, review cases and publication settings. Identity
-and version come from `codex/.codex-plugin/plugin.json`; the existing 512px PNG
-supplies both listing icons. The builder adapts the remembering skill to require
-explicit user authorization and write readback, and aligns its operation/kind
-examples with the live MCP schema. It does not promise a host approval policy.
+comes from `codex/.codex-plugin/plugin.json`; the public release version is in
+`version`. The existing 512px PNG supplies both listing icons. Four public skill
+overrides in `skills/` align memory, vendor actions and agents with the fixed
+public interface. The other seven remote skills come from `claude-directory/`.
+The public package requires explicit memory authorization and write readback.
+
 
 ## Build and inspect the actual archive
 
@@ -36,19 +38,18 @@ OAuth approval, reviewer login, passed portal cases or publication approval.
 - Website: public ai-plugin repository. The support, privacy and terms pages at
   bonez.io were opened and checked on 16 November 2026. This was a content check,
   not an audit of backend retention or a new legal attestation.
-- MCP endpoint: `https://gateway.bonez.io/mcp`. Protected-resource discovery and
+- MCP endpoint: `https://gateway.bonez.io/mcp?profile=directory`. Protected-resource discovery and
   Auth0 discovery were verified. Public dynamic client registration, PKCE S256,
   email-code sign-in, token exchange, initialize and authenticated tools/list
-  succeeded in a development connection on 16 November 2026. All 24 exposed
-  tools declared boolean read-only, destructive and open-world annotations.
+  succeeded in a development connection on 16 November 2026. The public profile exposes 38 fixed tools; release acceptance must verify the
+  inventory and boolean annotations against the deployed gateway.
 - The package requests `bonez:read`, `bonez:memory`, `bonez:write`. It includes no
   client secret, custom MCP headers or native CLI client/callback override. Platform's actual
   callback and saved connection must still be tested independently.
 
 ## Review fixtures and demonstration
 
-The five positive cases cover evidence search/fetch, schema overview, an empty
-rule set, code callers/test relationships and an authorized personal memory.
+The five positive cases cover evidence search/fetch, live Linear reads, workspace/rules/agent orientation, code callers/test relationships and an authorized personal memory.
 Three negative cases cover access boundaries, credential extraction and
 unsupported public-plugin server administration. Expectations distinguish
 indexed/heuristic relationships from runtime coverage and a pending or retired
