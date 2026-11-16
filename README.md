@@ -152,8 +152,7 @@ The plugin's [`codex/.mcp.json`](codex/.mcp.json) sets `approval_mode = "prompt"
 and Codex's own prompt is the gate. Two differences from the Claude Code and Cursor gate:
 
 - **Per tool, not per argument.** Reads are separate tools (`rules_read`, `system_model_*`), so they never
-  prompt. The old `graph_write` and `rules` names are not in the plugin's file: the server no longer lists
-  them, so a Codex session is never offered them.
+  prompt.
 - **No hook.** A Codex `PreToolUse` hook can only allow or deny a call: `permissionDecision: "ask"` is
   parsed but not supported, so a hook cannot reproduce the Claude Code ask. The plugin ships none for this.
   `BONEZ_MCP_GATE_DISABLE` therefore has no effect on Codex.
@@ -344,7 +343,7 @@ MCP-scoped key never reaches the import routes. `plugins` is a third such lane, 
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 | `plugins` | Only `bonez-plugin-push.mjs` needs this, and only for CI or a machine without a browser: signed in, it needs no key. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
-**On servers released before Linear 1SI-2292, the vendor tools (then `vendor_operation`) ignore the key's scope**: those servers check scope for `rules` writes and `graph_write` only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the vendor operations in the systems your organization connected on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
+**On servers released before Linear 1SI-2292, the vendor tools ignore the key's scope**: those servers check scope for rule and memory writes only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the vendor operations in the systems your organization connected on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
 ## The tools
 
@@ -363,8 +362,6 @@ One loop: **`system_model_search` → `system_model_schema` → `system_model_qu
 | `rules_write` | Save, update or delete binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
 | `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
 
-The old names (`graph_*`, `rules`, `tool_search`, `vendor_operation`, `vendor_operation_status`) keep working on the server as hidden aliases, unlisted, until 30 days after plugin 0.11.1 reaches `stable`.
-
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
 skills never use them.
@@ -373,8 +370,7 @@ skills never use them.
 
 `hooks/gate-write.sh` is a `PreToolUse` hook: Claude Code asks you before **every `memory_save` call** (every op
 is a write; a `preflight` or `dry_run` asks too) and before **every `rules_write` call**. Reads, `rules_read`
-included, pass through untouched. The gate does not cover the old names (`graph_write`, `rules`, `memory`): a plugin that
-installs fresh never sees them. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
+included, pass through untouched. `BONEZ_MCP_GATE_DISABLE=1` turns the prompts off for headless runs (PowerShell: `$env:BONEZ_MCP_GATE_DISABLE = "1"`). On Windows the hook is `bash "<plugin root>/hooks/gate-write.sh"`, run by Git Bash (see [Windows](#windows)).
 
 Codex has no hook for this and does not need one: its plugin sets `approval_mode = "prompt"` on `memory_save` and `rules_write` in `codex/.mcp.json`, so Codex asks before every call to either (see [OpenAI Codex](#openai-codex)).
 
@@ -386,7 +382,7 @@ Codex has no hook for this and does not need one: its plugin sets `approval_mode
 
 - **No write gate.** The write gate above does not cover `vendor_write`, on any leg. The server has its own approval step for a write that waits (`vendor_status` checks it), and the plugin's own publish tool runs through `vendor_write`, so a prompt here would fire on every push. `tests/test_gate.sh` pins the boundary.
 - **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any `vendor_write`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_write` off your Claude Code allow-list, so its default permission mode asks on every call, or, on Codex, uncomment the `vendor_write` `approval_mode = "prompt"` stanza in [`codex/config.toml`](codex/config.toml).
-- **Servers before Linear 1SI-2292 do not check the key's scope for vendor operations (then `vendor_operation`)** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
+- **Servers before Linear 1SI-2292 do not check the key's scope for vendor operations** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
 
 **Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them through the same tools. Reads: `bonez.agent.list.v2`, `bonez.agent.read.v2`, `bonez.trigger.list.v1`, `bonez.trigger.options.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`; `/bonez:agents` lists the agents. Writes (they need the `write` scope; the skills ask first): `bonez.agent.create.v2` (with triggers: a schedule, a Linear or GitHub event, a person), `bonez.agent.update.v1` (edit, pause, retire), `bonez.agent.run.v2` and `bonez.session.bind.v1`. On an older server `vendor_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
