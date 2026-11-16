@@ -361,6 +361,25 @@ jobs:
           test -z "$bad" || { echo "::error::file types the directory does not accept:"; echo "$bad"; exit 1; }
           echo "ok: claude-directory is generated and directory-safe"
 
+  openai-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and inspect the portable OpenAI upload
+        run: |
+          set -euo pipefail
+          python -m pip install 'PyYAML>=6,<7' 'Pillow>=11,<13'
+          package_dir="$(mktemp -d)"
+          node scripts/build-openai-plugin.mjs "$package_dir/bonez"
+          python -m zipfile -c "$package_dir/bonez.zip" "$package_dir/bonez"
+          python scripts/validate-openai-plugin.py "$package_dir/bonez.zip" --require-review-materials
+
   # The same node tests on Windows, where the plugin's users are (Claude Code, Codex and Cursor on
   # Windows 11). A Windows runner defaults to core.autocrlf=true, so this also proves .gitattributes
   # keeps the checkout LF. The write gate runs under Git Bash, the shell Claude Code uses for hooks.
