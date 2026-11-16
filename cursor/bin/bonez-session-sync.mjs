@@ -25,10 +25,10 @@
 // `install` / `status` / `enable` / `disable` are the human-facing subcommands — those DO
 // print, since a person typed the command and is waiting on the answer.
 //
-// Vendors @bonez/agent-import's prebuilt bundle verbatim from harness-ui
-// (packages/agent-import/bundle/agent-import.bundle.mjs, commit b07910990c4ba2e70e13c9656f61
-// 198fa2cba90c) at bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install
-// needed. Do not hand-edit that file; re-vendor it verbatim when harness-ui's source changes.
+// Vendors @bonez/agent-import's prebuilt bundle verbatim from bonez-io/bonez-core
+// (libs/agent-import/bundle/agent-import.bundle.mjs, commit 7dbcbb44e) at
+// bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install needed.
+// Do not hand-edit that file; re-vendor it verbatim when that library's source changes.
 import {
   appendFileSync,
   closeSync,
