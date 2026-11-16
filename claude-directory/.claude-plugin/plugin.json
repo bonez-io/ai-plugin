@@ -20,6 +20,7 @@
     "blast-radius",
     "mcp"
   ],
-  "documentationUrl": "https://github.com/bonez-io/ai-plugin#readme",
+  "documentationUrl": "https://bonez.io/plugin/",
+  "supportUrl": "https://bonez.io/support/",
   "icon": "./assets/icon.png"
 }
