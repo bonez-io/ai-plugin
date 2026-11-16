@@ -60,7 +60,12 @@ Use the dedicated synthetic PayZeno reviewer workspace. Its seed repository is
 PAY-5 and the sample payment discussion describe duplicate webhook settlement.
 No customer repository or real payment data is required. Reviewer identity and
 login instructions belong only in Platform's secure access fields, never here
-or in the ZIP.
+or in the ZIP. The current Platform form explicitly supports its designated
+reviewer mailbox with magic-link/email-code sign-in, matching Plugin Creator's
+review-materials guidance. Use that supported form option for the prepared
+sample-workspace invitation; do not require access to the creator's mailbox.
+The generic submission documentation currently disagrees with this UI, so do
+not redesign account authentication based on that prose alone.
 
 The development rehearsal loads the exact generated skills through Codex's local
 skill discovery and connects the same production MCP endpoint with the approved
@@ -134,12 +139,15 @@ Research checked 16 November 2026:
   reviewer identity or client User-Agent.
 
 The original draft had zero blocking findings and seven advisories, not an
-approval. The old hosted demo is evidence of the original full `/mcp` interface;
-it does not validate the revised skills or the additional environment case.
-Rehearse the current package and update recording evidence before upload.
+approval. After the full-capability server release, the fresh scan cleared both
+environment annotation findings. Generic-interface advisories still need explicit
+review; do not interpret a non-blocking scan result as policy approval.
 
 An earlier restricted-profile memory rehearsal saved the wrong repository path;
 later readback also changed from personal to organization scope after retirement.
-The test note was retired. This remains an unresolved acceptance issue until a
-current exact-anchor personal-memory rehearsal and lifecycle investigation pass.
-Packaging or an immediate successful readback alone does not resolve it.
+The test note was retired. Core PR2370 prevents personal-memory review from
+widening its owner audience. Production acceptance on 16 November 2026 verified
+the exact requested file and preference through pending, active and retired
+states, including delayed active and retired readbacks; every read remained
+personal. Evidence and the bounded acceptance results are tracked in 1SI-3828.
+This does not establish a retrospective audit of historical memories.
