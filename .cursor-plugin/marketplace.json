@@ -11,9 +11,8 @@
   "plugins": [
     {
       "name": "bonez",
-      "source": "./cursor",
+      "source": "cursor-directory",
       "version": "0.11.2",
-      "logo": "assets/logo.svg",
       "category": "productivity",
       "license": "MIT",
       "homepage": "https://bonez.io",
@@ -22,7 +21,7 @@
         "name": "Bonez",
         "url": "https://bonez.io"
       },
-      "description": "Bring your organization's System Model into Cursor — search across code, decisions, tickets, PRs, docs, and people; code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP. With an approval gate on memory_save and rules_write.",
+      "description": "Bring your organization's System Model into Cursor — search across code, decisions, tickets, PRs, docs, and people; code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
       "keywords": [
         "context",
         "system-model",
