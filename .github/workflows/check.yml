@@ -18,7 +18,7 @@ jobs:
       - name: JSON validity of all manifests
         run: |
           set -euo pipefail
-          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json codex/.codex-plugin/plugin.json codex/.mcp.json .agents/plugins/marketplace.json claude-directory/.claude-plugin/plugin.json claude-directory/.mcp.json; do
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .mcp.json server.json hooks/hooks.json cursor/mcp.json cursor/hooks/hooks.json cursor/.cursor-plugin/plugin.json .cursor-plugin/marketplace.json codex/.codex-plugin/plugin.json codex/.mcp.json .agents/plugins/marketplace.json claude-directory/.claude-plugin/plugin.json claude-directory/.mcp.json cursor-directory/.cursor-plugin/plugin.json cursor-directory/mcp.json; do
             jq empty "$f"
             echo "ok: $f"
           done
@@ -43,6 +43,7 @@ jobs:
           codex_version="$(jq -r '.version' codex/.codex-plugin/plugin.json)"
           cursor_version="$(jq -r '.version' cursor/.cursor-plugin/plugin.json)"
           directory_version="$(jq -r '.version' claude-directory/.claude-plugin/plugin.json)"
+          cursor_dir_version="$(jq -r '.version' cursor-directory/.cursor-plugin/plugin.json)"
           echo "plugin.json:      $plugin_version"
           echo "marketplace.json: $marketplace_version"
           echo "server.json:      $server_version"
@@ -51,7 +52,7 @@ jobs:
           echo "directory plugin: $directory_version"
           if [ "$plugin_version" != "$marketplace_version" ] || [ "$plugin_version" != "$server_version" ] \
              || [ "$plugin_version" != "$codex_version" ] || [ "$plugin_version" != "$cursor_version" ] \
-             || [ "$plugin_version" != "$directory_version" ]; then
+             || [ "$plugin_version" != "$directory_version" ] || [ "$plugin_version" != "$cursor_dir_version" ]; then
             echo "::error::Version drift between manifests — one version, everywhere (see PostHog's 1.1.58/1.0.56/1.1.52/1.0.54 drift for why)."
             exit 1
           fi
@@ -65,7 +66,8 @@ jobs:
           for spec in '.mcp.json|.mcpServers.bonez.headers' \
                       'codex/.mcp.json|.mcpServers.bonez.http_headers' \
                       'cursor/mcp.json|.mcpServers.bonez.headers' \
-                      'claude-directory/.mcp.json|.mcpServers.bonez.headers'; do
+                      'claude-directory/.mcp.json|.mcpServers.bonez.headers' \
+                      'cursor-directory/mcp.json|.mcpServers.bonez.headers'; do
             f="${spec%%|*}"; path="${spec##*|}"
             got="$(jq -r "$path[\"x-bonez-plugin-version\"]" "$f")"
             [ "$got" = "$v" ] || { echo "::error::$f sends x-bonez-plugin-version $got, plugin is $v"; exit 1; }
@@ -360,6 +362,26 @@ jobs:
           bad="$(find claude-directory -type f | grep -vE '(/LICENSE|\.(md|txt|json|ya?ml|png|jpe?g|gif|webp))$' || true)"
           test -z "$bad" || { echo "::error::file types the directory does not accept:"; echo "$bad"; exit 1; }
           echo "ok: claude-directory is generated and directory-safe"
+
+      - name: cursor-directory is generated and marketplace-safe
+        run: |
+          set -euo pipefail
+          # The Cursor Marketplace reviews markdown and skills by hand: no hooks, bin/, scripts, no variables.
+          node scripts/build-cursor-directory.mjs
+          git diff --exit-code cursor-directory || {
+            echo "::error::cursor-directory/ is stale — run node scripts/build-cursor-directory.mjs and commit the result."; exit 1; }
+          test -z "$(git ls-files --others --exclude-standard cursor-directory)" || {
+            echo "::error::the generator produced files that are not committed"; exit 1; }
+          for d in hooks bin scripts; do
+            test ! -e "cursor-directory/$d" || { echo "::error::cursor-directory/$d must not exist"; exit 1; }
+          done
+          jq -e 'has("variables") | not' cursor-directory/.cursor-plugin/plugin.json >/dev/null \
+            || { echo "::error::cursor-directory plugin.json must not declare variables"; exit 1; }
+          jq -e '.mcpServers.bonez.url == "https://gateway.bonez.io/mcp"' cursor-directory/mcp.json >/dev/null \
+            || { echo "::error::cursor-directory mcp.json must use the fixed https URL"; exit 1; }
+          jq -e '.plugins[0].source == "cursor-directory"' .cursor-plugin/marketplace.json >/dev/null \
+            || { echo "::error::.cursor-plugin/marketplace.json must point at cursor-directory"; exit 1; }
+          echo "ok: cursor-directory is generated and marketplace-safe"
 
   openai-package:
     runs-on: ubuntu-latest
