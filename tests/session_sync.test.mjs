@@ -2608,13 +2608,14 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.doesNotMatch(res.stdout, /\x1b/)
     assert.deepEqual(res.stdout.trim().split("\n").map((l) => l.trim()), [
       "Finish in your browser",
-      "1  Open this page and sign in:",
+      "1  Open the Bonez page below and sign in",
       pairUrl(),
       "2  Sign in to Bonez in each tool when it asks",
       "3  Choose whether Bonez saves your sessions",
       "",
-      "Keep this terminal open. It finishes setup when you answer in the browser.",
-      "Closing it is safe: setup then finishes the next time you use a coding tool.",
+      "Keep this terminal open.",
+      "It finishes setup when you answer in the browser.",
+      "Closing it is safe: it finishes the next time you use a coding tool.",
       "",
       "· Waiting for you in the browser…",
       "✓ Signed in to Bonez in the browser",
@@ -2729,7 +2730,7 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.equal(joined.recent_sessions, 2)
     assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
     const lines = res.stdout.trim().split("\n").map((l) => l.trim())
-    assert.equal(lines[1], "1  Go back to the Bonez page in your browser")
+    assert.equal(lines[1], "1  Continue in the Bonez page you started from")
     assert.deepEqual(lines.slice(-5), [
       "· Waiting for you in the browser…",
       "✓ Session saving is on",
@@ -2959,9 +2960,9 @@ describe("connect: the setup page in the browser and this machine share a pairin
 
   test("--demo plays the installer with no network and no file", async () => {
     reset()
-    for (const variant of ["a", "b"]) {
+    for (const header of ["mark", "wordmark"]) {
       const { home, env } = connectEnv()
-      const res = await runCli(["connect", "--demo", variant, "--speed=50"], { env })
+      const res = await runCli(["connect", "--demo", header, "--speed=50"], { env })
       assert.equal(res.status, 0, res.stderr)
       assert.match(res.stdout, /Keep this terminal open/)
       assert.match(res.stdout, /All set\./)
@@ -3008,7 +3009,81 @@ describe("the installer's terminal view degrades cleanly (1SI-4098)", () => {
     }
     assert.equal(terminalCaps({ stream: { isTTY: false }, env: {}, platform: "darwin" }).live, false)
     const win = terminalCaps({ stream: { isTTY: true }, env: { TERM: "xterm" }, platform: "win32" })
+    assert.equal(win.links, false)
     assert.equal(win.unicode, false)
     assert.equal(terminalCaps({ stream: { isTTY: true }, env: { WT_SESSION: "1" }, platform: "win32" }).unicode, true)
+  })
+})
+
+describe("the installer's screen: the Bonez mark, columns, the panel, links and the width (1SI-4098)", () => {
+  const term = ({ columns = 80, env = { TERM: "xterm-256color" }, platform = "darwin" } = {}) => {
+    let out = ""
+    const stream = { isTTY: true, columns, write: (s) => { out += s } }
+    return { stream, env, platform, text: () => out }
+  }
+  const lines = (text) => text.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").split("\n")
+
+  test("the header is the drawn mark in ink with the word beside it, or the drawn wordmark; ASCII gets the word", async () => {
+    const { createView, terminalCaps, MARK, WORDMARK } = await import("../bin/lib/connect-tui.mjs")
+    assert.equal(MARK.length, 7)
+    assert.ok(MARK.every((row) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(row) && [...row].length <= 12))
+    assert.equal(WORDMARK.length, 4)
+    const t = term()
+    const view = createView({ out: t.stream, caps: terminalCaps(t) })
+    view.header("mark")
+    const shown = lines(t.text())
+    assert.equal(shown[3], `  ${MARK[2]}   bonez`)
+    assert.equal(shown[4], `  ${MARK[3]}   Connecting your coding tools`)
+    assert.ok(t.text().includes(`  ${MARK[0]}\n`), "the mark is never coloured")
+    const w = term()
+    createView({ out: w.stream, caps: terminalCaps(w) }).header("wordmark")
+    assert.deepEqual(lines(w.text()).slice(1, 5), WORDMARK.map((r) => `  ${r}`))
+    const a = term({ platform: "win32" })
+    createView({ out: a.stream, caps: terminalCaps(a) }).header("mark")
+    assert.deepEqual(lines(a.text()).filter(Boolean), ["  bonez  Connecting your coding tools"])
+  })
+
+  test("tool rows are columns that fit the width; a next step that does not fit goes under the state", async () => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    const t = term()
+    const view = createView({ out: t.stream, caps: terminalCaps(t) })
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.tool("done", "Cursor", "added", "Next: a step far too long to share its line with the tool's name and state, so it wraps")
+    const shown = lines(t.text())
+    assert.equal(shown[0], "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate")
+    assert.equal(shown[1], "  ✓ Cursor        added")
+    assert.match(shown[2], /^ {18}Next: a step far too long/)
+    assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Claude Code/)
+  })
+
+  test("a long link is a short label where the terminal has links, and short lines that fit elsewhere", async () => {
+    const { createView, terminalCaps, CLAUDE_CONNECTOR_DEMO_URL: url } = await import("../bin/lib/connect-tui.mjs")
+    const fallback = ["https://claude.ai/customize/connectors", "Add custom connector: https://gateway.bonez.io/mcp"]
+    const it = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    createView({ out: it.stream, caps: terminalCaps(it) }).toolLink("todo", "Claude app", "optional", "Add Bonez as a connector", url, fallback)
+    assert.ok(it.text().includes(`\x1b]8;;${url}\x1b\\Add Bonez as a connector ↗\x1b]8;;\x1b\\`))
+    const ap = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
+    createView({ out: ap.stream, caps: terminalCaps(ap) }).toolLink("todo", "Claude app", "optional", "Add Bonez as a connector", url, fallback)
+    assert.doesNotMatch(ap.text(), /\x1b\]8/)
+    assert.ok(lines(ap.text()).every((l) => l.length <= 80))
+    assert.deepEqual(lines(ap.text()).slice(1, 3).map((l) => l.trim()), fallback)
+  })
+
+  test("the panel stays inside 80 columns, says where to continue, and keeps the waiting time under its edge", async () => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    for (const [joining, first] of [[true, "1  Continue in the Bonez page you started from"], [false, "1  Sign in on the Bonez page that just opened"]]) {
+      const t = term()
+      const view = createView({ out: t.stream, caps: terminalCaps(t) })
+      view.finish({ joining, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: true })
+      view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+      view.close()
+      const shown = lines(t.text())
+      assert.ok(shown.every((l) => [...l].length <= 80), shown.join("\n"))
+      assert.ok(shown.some((l) => l.includes(first)))
+      assert.ok(shown.some((l) => l.includes("Keep this terminal open.")))
+      assert.equal(shown.some((l) => l.includes("pair=K7QM-4XPA")), !joining)
+      const edge = shown.find((l) => l.includes("╰")).length
+      assert.equal(shown.find((l) => l.includes("min left")).length, edge, "the time ends under the panel's edge")
+    }
   })
 })

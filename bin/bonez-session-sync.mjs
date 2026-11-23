@@ -2157,8 +2157,10 @@ function parseConnectArgs(rest) {
     else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
     else if (a === "--nonce") o.nonce = rest[++i]
     // The demo: the whole installer with fake timing, no network, no file touched.
-    else if (a === "--demo") o.demo = ["a", "b"].includes(rest[i + 1]) ? rest[++i] : "a"
-    else if (a.startsWith("--demo=")) o.demo = a.slice("--demo=".length) === "b" ? "b" : "a"
+    // --demo wordmark shows the drawn wordmark in place of the mark and the word.
+    else if (a === "--demo") o.demo = ["mark", "wordmark"].includes(rest[i + 1]) ? rest[++i] : "mark"
+    else if (a.startsWith("--demo=")) o.demo = a.slice("--demo=".length) === "wordmark" ? "wordmark" : "mark"
+    else if (a === "--joining") o.demoJoining = true
     else if (a.startsWith("--until=")) o.until = a.slice("--until=".length)
     else if (a.startsWith("--speed=")) o.speed = Math.max(0.1, Number(a.slice("--speed=".length)) || 1)
   }
@@ -2456,7 +2458,7 @@ async function cmdConnect(rest) {
   const o = parseConnectArgs(rest)
   if (o.demo) {
     const { playDemo } = await import("./lib/connect-tui.mjs")
-    await playDemo({ variant: o.demo, until: o.until, speed: o.speed })
+    await playDemo({ header: o.demo, until: o.until, speed: o.speed, joining: o.demoJoining })
     return
   }
   if (o.detach) {
@@ -2548,8 +2550,8 @@ async function cmdConnect(rest) {
 }
 
 async function connectView() {
-  const { createView, tuiVariant } = await import("./lib/connect-tui.mjs")
-  return createView({ variant: tuiVariant() })
+  const { createView } = await import("./lib/connect-tui.mjs")
+  return createView()
 }
 
 // The foreground: shows what the background helper reports, until it is done. Closing the terminal ends
@@ -3071,7 +3073,7 @@ async function main() {
       console.log("usage:")
       console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach] [--pair CODE.SECRET]")
       console.log("                                                                  set up Bonez in the browser")
-      console.log("  bonez-session-sync.mjs connect --demo [a|b] [--until=tools|waiting|signin|backfill|done]")
+      console.log("  bonez-session-sync.mjs connect --demo [mark|wordmark] [--joining] [--until=adding|tools|waiting|signin|backfill|done]")
       console.log("                                                                  preview the installer's screen")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
