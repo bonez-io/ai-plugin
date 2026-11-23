@@ -531,6 +531,14 @@ async function cmdHook(agent, event) {
 
   const claudeStart = agent === "claude" && event === "session-start"
   if (claudeStart) rememberHookFolder()
+  // A setup answered in the browser after its terminal closed is finished here (1SI-4098).
+  if (event === "session-start") {
+    try {
+      await collectPendingAtStart()
+    } catch {
+      /* silent: the next start asks again */
+    }
+  }
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
     // never installed, or explicitly disabled. Settings left in a folder the hook no longer
@@ -538,7 +546,8 @@ async function cmdHook(agent, event) {
     if (claudeStart && !cfg && strandedSettings().length) notifyOnce("stranded", "Bonez session capture is set up, but its settings are in an older folder this plugin no longer reads, so nothing uploads.")
     // Never set up on this machine: open the setup page once, then offer it on later starts
     // (1SI-4098). A config that exists but is off is a choice someone made, and is left alone.
-    else if (!cfg && event === "session-start" && !(await openConnectOnce(agent))) await offerCapture(agent)
+    // A setup still waiting for its answer in the browser is not offered again.
+    else if (!cfg && event === "session-start" && !readPending() && !(await openConnectOnce(agent))) await offerCapture(agent)
     return
   }
 
@@ -1885,7 +1894,13 @@ function offerText(agent, verifyUrl) {
   )
 }
 
-function enabledText(agent) {
+function enabledText(agent, state = {}) {
+  if (state.enabledVia === "connect") {
+    return (
+      "Bonez is saving your sessions on this computer now: you turned it on in the browser." +
+      (state.backfillStartedAt ? " Your sessions from the last 14 days are being added in the background." : "")
+    )
+  }
   return (
     "Bonez session capture is on: sessions on this machine are now saved to your team's Bonez when they end. " +
     `To add your recent sessions too: ${captureCmd(agent, "backfill")}`
@@ -1911,7 +1926,7 @@ function announceEnabled(agent) {
   const state = readOptin()
   if (!state.enabledAt || state.announcedAt) return false
   writeOptin({ ...state, announcedAt: Date.now() })
-  emitNotice(agent, enabledText(agent))
+  emitNotice(agent, enabledText(agent, state))
   return true
 }
 
@@ -2141,6 +2156,11 @@ function parseConnectArgs(rest) {
     else if (a === "--detach") o.detach = true
     else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
     else if (a === "--nonce") o.nonce = rest[++i]
+    // The demo: the whole installer with fake timing, no network, no file touched.
+    else if (a === "--demo") o.demo = ["a", "b"].includes(rest[i + 1]) ? rest[++i] : "a"
+    else if (a.startsWith("--demo=")) o.demo = a.slice("--demo=".length) === "b" ? "b" : "a"
+    else if (a.startsWith("--until=")) o.until = a.slice("--until=".length)
+    else if (a.startsWith("--speed=")) o.speed = Math.max(0.1, Number(a.slice("--speed=".length)) || 1)
   }
   if (!CONNECT_OPENERS.has(o.opener)) o.opener = "installer"
   // A hook's background `connect` makes its own pairing: a BONEZ_PAIR left in the environment is not for it.
@@ -2159,8 +2179,286 @@ function markConnect(nonce, fields) {
   if (state.connect?.nonce === nonce) writeOptin({ ...state, connect: { ...state.connect, ...fields } })
 }
 
+// ---- the pending pairing: setup survives a closed terminal (1SI-4098)
+//
+// The installer used to wait in the foreground: close the terminal, answer in the browser, and the key the
+// page minted was never collected. Now the pairing is written down as soon as there is one
+// (pending-connect.json, 0600), a detached poller waits for the answer whether or not the terminal stays
+// open, and every session start that finds a pairing nobody is polling asks once and finishes the setup.
+// The foreground only shows what the poller reports (connect-progress.json).
+const pendingPath = () => join(CANONICAL_DATA_DIR, "pending-connect.json")
+const progressPath = () => join(CANONICAL_DATA_DIR, "connect-progress.json")
+// The gateway keeps an answered key it could not hand over for 7 days; past that, a pairing is gone.
+const PENDING_KEEP_MS = 8 * DAY_MS
+const HOOK_COLLECT_TIMEOUT_MS = 1500
+const POLLER_STALE_MS = 60_000
+const WORKER_START_GRACE_MS = 10_000
+const CONNECT_TOOL_LABELS = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode", "claude-app": "Claude app" }
+
+function writeCanonical(path, value) {
+  mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
+function readPending() {
+  const p = readJsonSafe(pendingPath(), null)
+  return p && typeof p.code === "string" && typeof p.secret === "string" && typeof p.gateway === "string" ? p : undefined
+}
+
+function writePending(p) {
+  writeCanonical(pendingPath(), p)
+}
+
+function clearPending(code) {
+  const p = readPending()
+  if (!p || (code !== undefined && p.code !== code)) return
+  try {
+    unlinkSync(pendingPath())
+  } catch {
+    /* gone already */
+  }
+}
+
+function readProgress(code) {
+  const p = readJsonSafe(progressPath(), null)
+  return p && p.code === code ? p : undefined
+}
+
+function reportProgress(code, patch) {
+  try {
+    writeCanonical(progressPath(), { ...(readProgress(code) ?? {}), ...patch, code, at: Date.now() })
+  } catch {
+    /* the view only; the work goes on */
+  }
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err?.code === "EPERM"
+  }
+}
+
+// Someone is polling this pairing right now (the installer's background helper, or a hook's).
+function pollerAlive(code) {
+  const p = readProgress(code)
+  return Boolean(p && !p.finished && p.pid !== process.pid && pidAlive(p.pid) && Date.now() - (p.heartbeatAt ?? 0) < POLLER_STALE_MS)
+}
+
+function pairingResult(gateway, code, secret, timeoutMs) {
+  return fetchJson(`${gateway}/connect/pairing-result`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, secret }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+}
+
+const validKey = (key) => typeof key === "string" && key.startsWith("bnz_")
+
+// Save the sessions key the way `connect` always has: every repo, from the setup page, for the gateway it
+// was paired with. `announce`: the next session start says it once (a hook collected it, nobody saw it).
+function saveConnectedKey(key, gateway, { announce = false, backfill = false } = {}) {
+  const cfg = { enabled: true, scope: "global", repos: [], apiKey: key, gateway, installedAt: new Date().toISOString(), via: "connect" }
+  saveConfig(cfg)
+  // An offer still in flight sees its pending link gone and stops.
+  const { declinedAt: _no, pending: _offer, announcedAt: _said, backfillStartedAt: _bf, ...state } = readOptin()
+  const now = Date.now()
+  writeOptin({ ...state, enabledAt: now, enabledVia: "connect", ...(backfill && { backfillStartedAt: now }), ...(!announce && { announcedAt: now }) })
+  return cfg
+}
+
+// The last 14 days of every harness, one session at a time.
+async function connectBackfill(cfg, onProgress = () => {}) {
+  const since = Date.now() - CONNECT_RECENT_DAYS * DAY_MS
+  const { targets } = allBackfillTargets(BACKFILL_AGENTS, loadState(), since)
+  const total = targets.length
+  let added = 0
+  let done = 0
+  onProgress(0, total)
+  for (const t of targets) {
+    try {
+      if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) added++
+    } catch (err) {
+      await log(`connect: backfill ${t.sessionId} failed — ${err instanceof Error ? err.message : String(err)}`)
+    }
+    onProgress(++done, total)
+  }
+  return { total, added }
+}
+
+// Polls one pairing until it is answered, expires or is gone, then saves the key and adds the recent
+// sessions. Runs detached (the installer's helper, a hook's), or in the foreground when no helper could
+// start. Says what happens in sync.log and reports it to the view through connect-progress.json.
+async function waitForAnswer(p, { nonce } = {}) {
+  const say = (line) => log(`connect: ${line}`)
+  const report = (patch) => reportProgress(p.code, patch)
+  const finish = async (fields, line) => {
+    report({ ...fields, finished: true })
+    if (fields.error) markConnect(nonce, { error: fields.error })
+    if (line) await say(line)
+  }
+  const intervalMs = CONNECT_POLL_MS ?? Math.max(1, Number(p.pollInterval) || 2) * 1000
+  report({ pid: process.pid, heartbeatAt: Date.now(), finished: false })
+  let errors = 0
+  let answer
+  for (;;) {
+    if (Date.now() > p.expiresAt + intervalMs) {
+      clearPending(p.code)
+      const error = "The setup link expired. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    await sleep(intervalMs)
+    let res
+    try {
+      res = await pairingResult(p.gateway, p.code, p.secret, CONNECT_HTTP_TIMEOUT_MS)
+    } catch {
+      res = undefined
+    }
+    report({ heartbeatAt: Date.now() })
+    if (res?.status === 404) {
+      clearPending(p.code)
+      const error = "The setup link is no longer valid. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    if (!res?.ok) {
+      // The pairing stays written down: the next session start picks the answer up.
+      if (++errors >= CONNECT_MAX_POLL_ERRORS) {
+        const error = "Lost contact with Bonez while waiting. Setup finishes the next time you use a coding tool."
+        return finish({ error }, error)
+      }
+      continue
+    }
+    errors = 0
+    const { status, tools } = res.json
+    if (Array.isArray(tools)) {
+      const signedIn = tools.filter((t) => t && t.signed_in && CONNECT_TOOL_IDS.includes(t.id)).map((t) => t.id)
+      report({ tools: signedIn })
+    }
+    if (status === "expired") {
+      clearPending(p.code)
+      const error = "The setup link expired. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    if (status === "answered") {
+      answer = res.json.sessions ?? {}
+      break
+    }
+    if (status === "claimed" && !readProgress(p.code)?.claimed) {
+      report({ claimed: true })
+      if (!p.joining) await say("You're signed in. Finish the steps in your browser…")
+    }
+  }
+
+  if (!answer.on) {
+    clearPending(p.code)
+    markConnect(nonce, { result: "off" })
+    return finish({ answer: { on: false } }, "Session saving stays off. You can turn it on later with /bonez:capture on.")
+  }
+  if (!validKey(answer.key)) {
+    clearPending(p.code)
+    const error = "Session saving was turned on, but this computer did not get its key. Run this again."
+    return finish({ error }, error)
+  }
+  // The page already said it is on, so the next session start does not say it again.
+  const cfg = saveConnectedKey(answer.key, p.gateway)
+  clearPending(p.code)
+  markConnect(nonce, { result: "on" })
+  report({ answer: { on: true, backfill: Boolean(answer.backfill) }, saved: true })
+  await say("Session saving is on.")
+
+  if (answer.backfill) {
+    if (disabledByEnv()) {
+      report({ backfill: { skipped: "env" } })
+      await say("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
+    } else {
+      const { total, added } = await connectBackfill(cfg, (done, n) => report({ backfill: { done, total: n }, heartbeatAt: Date.now() }))
+      report({ backfill: { done: total, total, added } })
+      if (!total) await say("No recent sessions to add.")
+      else await say(`Adding ${total} recent session${total === 1 ? "" : "s"}… ${added}/${total}`)
+      if (added < total) await say(`${total - added} were skipped or failed (see ${logFilePath()}). Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+    }
+  }
+  return finish({ ok: true }, "All set. You can close the setup page.")
+}
+
+// Session start: a pairing that nobody is polling (the terminal and its helper are gone, or the computer
+// restarted) gets one quick question. Answered with a key: setup finishes here. Gone or expired: forgotten.
+// Still waiting: a helper starts polling again. One request, a short timeout, and silence on any failure.
+async function collectPendingAtStart() {
+  const p = readPending()
+  if (!p) return
+  if (!captureGatewayAllowed(p.gateway) || !(Number(p.expiresAt) > 0) || Date.now() > p.expiresAt + PENDING_KEEP_MS) {
+    clearPending(p.code)
+    return
+  }
+  if (pollerAlive(p.code)) return
+  let res
+  try {
+    res = await pairingResult(p.gateway, p.code, p.secret, HOOK_COLLECT_TIMEOUT_MS)
+  } catch {
+    return
+  }
+  if (res.status === 404 || res.status === 410) {
+    clearPending(p.code)
+    await log("connect: the pending setup is gone from the server; forgotten")
+    return
+  }
+  if (!res.ok) return
+  const { status, sessions } = res.json
+  if (status === "expired") {
+    clearPending(p.code)
+    await log("connect: the pending setup expired before it was answered; forgotten")
+    return
+  }
+  if (status !== "answered") {
+    if (Date.now() < p.expiresAt) spawnWorker(["_connect-wait", p.code])
+    return
+  }
+  if (!sessions?.on) {
+    clearPending(p.code)
+    reportProgress(p.code, { answer: { on: false }, finished: true })
+    await log("connect: answered in the browser while no terminal waited: session saving stays off")
+    return
+  }
+  if (!validKey(sessions.key)) {
+    // Collected by someone else already, or the server hands a key out once and it went missing.
+    clearPending(p.code)
+    await log("connect: answered in the browser, but there was no key left to collect")
+    return
+  }
+  saveConnectedKey(sessions.key, p.gateway, { announce: true, backfill: Boolean(sessions.backfill) && !disabledByEnv() })
+  clearPending(p.code)
+  reportProgress(p.code, { answer: { on: true, backfill: Boolean(sessions.backfill) }, saved: true, finished: true, ok: true })
+  await log("connect: collected the key a closed terminal left behind — session saving is on (global)")
+  if (sessions.backfill && !disabledByEnv()) spawnWorker(["_connect-backfill"])
+}
+
+async function cmdConnectWaitWorker(code) {
+  const p = readPending()
+  if (!p || p.code !== code || pollerAlive(code)) return
+  await waitForAnswer(p)
+}
+
+async function cmdConnectBackfillWorker() {
+  const cfg = loadConfig()
+  if (!cfg?.enabled || !cfg.apiKey || disabledByEnv()) return
+  const { total, added } = await connectBackfill(cfg)
+  await log(`connect: added ${added}/${total} recent sessions in the background`)
+}
+
 async function cmdConnect(rest) {
   const o = parseConnectArgs(rest)
+  if (o.demo) {
+    const { playDemo } = await import("./lib/connect-tui.mjs")
+    await playDemo({ variant: o.demo, until: o.until, speed: o.speed })
+    return
+  }
   if (o.detach) {
     if (!startConnectWorker(o)) {
       console.error("Could not start the Bonez setup in the background.")
@@ -2168,11 +2466,12 @@ async function cmdConnect(rest) {
     }
     return
   }
-  const say = o.quiet ? (line) => log(`connect: ${line}`) : async (line) => console.log(line)
+  const view = o.quiet ? undefined : await connectView()
+  const say = o.quiet ? (line) => log(`connect: ${line}`) : async () => {}
   const fail = async (line) => {
     markConnect(o.nonce, { error: line })
     if (o.quiet) await log(`connect: ${line}`)
-    else console.error(line)
+    else view.fail(line)
     process.exitCode = 1
   }
 
@@ -2224,97 +2523,109 @@ async function cmdConnect(rest) {
 
   const { url, code, secret } = pairing
   const expiresAt = Number(pairing.expires_at) > 0 ? Number(pairing.expires_at) * 1000 : Date.now() + 30 * 60_000
+  const pending = { code, secret, gateway: base, expiresAt, pollInterval: pairing.poll_interval, joining, opener: o.opener, createdAt: Date.now() }
+  // Written down before anything else, so an answer given after this terminal is gone is still collected.
+  writePending(pending)
+  writeCanonical(progressPath(), { code, at: Date.now() })
   // Opened once per machine: the session-start hook does not open another page after this.
   const optin = readOptin()
   writeOptin({ ...optin, connectOpenedAt: optin.connectOpenedAt ?? Date.now() })
+  let opened = false
   if (joining) {
     markConnect(o.nonce, { expiresAt })
     await say("Continue on the Bonez page in your browser.")
   } else {
     markConnect(o.nonce, { url, expiresAt })
-    const opened = o.open && openInBrowser(url)
+    opened = o.open && openInBrowser(url)
     await say(opened ? `Opened the Bonez setup page in your browser: ${url}` : `Open this page in your browser to finish setting up Bonez: ${url}`)
-    await say("Waiting for you in the browser…")
   }
 
-  const intervalMs = CONNECT_POLL_MS ?? Math.max(1, Number(pairing.poll_interval) || 2) * 1000
-  let last = "waiting"
-  let errors = 0
-  let answer
+  // The hook's own background child is already detached: it polls itself.
+  if (o.quiet) return waitForAnswer(pending, { nonce: o.nonce })
+
+  view.finish({ joining, url, opened })
+  return watchConnect(view, pending, { started: spawnWorker(["_connect-wait", code]) })
+}
+
+async function connectView() {
+  const { createView, tuiVariant } = await import("./lib/connect-tui.mjs")
+  return createView({ variant: tuiVariant() })
+}
+
+// The foreground: shows what the background helper reports, until it is done. Closing the terminal ends
+// only this; Ctrl-C says the setup goes on. If no helper runs, this process polls itself.
+async function watchConnect(view, p, { started }) {
+  const { code } = p
+  const t0 = Date.now()
+  let takenOver = started ? undefined : waitForAnswer(p)
+  const leave = (line) => {
+    view.stopLive()
+    if (line) view.note(line)
+    process.exit(0)
+  }
+  process.on("SIGINT", () => leave("Stopped watching. Setup goes on in the background and finishes when you answer in the browser."))
+  process.on("SIGHUP", () => process.exit(0))
+  process.on("SIGTERM", () => leave())
+
+  const shown = { claimed: false, tools: new Set(), answer: false, saved: false, backfill: false }
+  view.waiting(`Waiting for you in the browser${view.caps.unicode ? "…" : "..."}`, p.expiresAt)
   for (;;) {
-    if (Date.now() > expiresAt + intervalMs) return fail("The setup link expired. Run this again to get a new one.")
-    await sleep(intervalMs)
-    let res
-    try {
-      res = await fetchJson(`${base}/connect/pairing-result`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code, secret }),
-        signal: AbortSignal.timeout(CONNECT_HTTP_TIMEOUT_MS),
-      })
-    } catch {
-      res = undefined
+    await sleep(120)
+    const pr = readProgress(code) ?? {}
+    if (pr.claimed && !shown.claimed) {
+      shown.claimed = true
+      if (!p.joining) view.done("Signed in to Bonez in the browser")
     }
-    if (res?.status === 404) return fail("The setup link is no longer valid. Run this again to get a new one.")
-    if (!res?.ok) {
-      if (++errors >= CONNECT_MAX_POLL_ERRORS) return fail("Lost contact with Bonez while waiting. Run this again.")
-      continue
+    for (const id of pr.tools ?? []) {
+      if (shown.tools.has(id)) continue
+      shown.tools.add(id)
+      view.done(`${CONNECT_TOOL_LABELS[id] ?? id} signed in`)
     }
-    errors = 0
-    const status = res.json.status
-    if (status === "expired") return fail("The setup link expired. Run this again to get a new one.")
-    if (status === "answered") {
-      answer = res.json.sessions ?? {}
-      break
-    }
-    if (status === "claimed" && last !== "claimed" && !joining) await say("You're signed in. Finish the steps in your browser…")
-    if (typeof status === "string") last = status
-  }
-
-  if (!answer.on) {
-    markConnect(o.nonce, { result: "off" })
-    await say("Session saving stays off. You can turn it on later with /bonez:capture on.")
-    return
-  }
-  if (typeof answer.key !== "string" || !answer.key.startsWith("bnz_")) {
-    return fail("Session saving was turned on, but this computer did not get its key. Run this again.")
-  }
-  const cfg = { enabled: true, scope: "global", repos: [], apiKey: answer.key, gateway: gatewayBaseUrl(), installedAt: new Date().toISOString(), via: "connect" }
-  saveConfig(cfg)
-  // The page already said it is on, so the next session start does not say it again. An offer
-  // still in flight sees its pending link gone and stops.
-  const { declinedAt: _no, pending: _offer, ...state } = readOptin()
-  writeOptin({ ...state, enabledAt: Date.now(), announcedAt: Date.now() })
-  markConnect(o.nonce, { result: "on" })
-  await say("Session saving is on.")
-
-  if (answer.backfill) {
-    if (disabledByEnv()) {
-      await say("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
-    } else {
-      const { targets } = allBackfillTargets(BACKFILL_AGENTS, loadState(), since)
-      if (!targets.length) await say("No recent sessions to add.")
-      else {
-        const n = targets.length
-        const head = `Adding ${n} recent session${n === 1 ? "" : "s"}…`
-        const live = !o.quiet && process.stdout.isTTY
-        if (live) process.stdout.write(`${head} 0/${n}`)
-        let added = 0
-        for (const t of targets) {
-          try {
-            if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) added++
-          } catch (err) {
-            await log(`connect: backfill ${t.sessionId} failed — ${err instanceof Error ? err.message : String(err)}`)
-          }
-          if (live) process.stdout.write(`\r${head} ${added}/${n}`)
-        }
-        if (live) process.stdout.write("\n")
-        else await say(`${head} ${added}/${n}`)
-        if (added < n) await say(`${n - added} were skipped or failed (see ${logFilePath()}). Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+    if (pr.answer && !shown.answer) {
+      shown.answer = true
+      if (!pr.answer.on) {
+        view.stopLive()
+        view.skipped("Session saving stays off", "Turn it on later in Settings > Bonez Plugin, or with /bonez:capture on")
       }
     }
+    if (pr.saved && !shown.saved) {
+      shown.saved = true
+      view.stopLive()
+      view.done("Session saving is on")
+    }
+    const bf = pr.backfill
+    if (bf && !shown.backfill) {
+      if (bf.skipped) {
+        shown.backfill = true
+        view.note("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
+      } else if (bf.added !== undefined) {
+        shown.backfill = true
+        view.stopLive()
+        if (!bf.total) view.done("No recent sessions to add")
+        else {
+          const what = `recent session${bf.total === 1 ? "" : "s"}`
+          view.done(bf.added === bf.total ? `Added ${bf.total} ${what}` : `Added ${bf.added} of ${bf.total} ${what}`, `from the last ${CONNECT_RECENT_DAYS} days`)
+        }
+        if (bf.added < bf.total) view.note(`${bf.total - bf.added} were skipped or failed. Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+      } else if (bf.total) {
+        view.progress(bf.done ?? 0, bf.total)
+      }
+    }
+    if (pr.finished) {
+      if (takenOver) await takenOver
+      if (pr.error) {
+        view.fail(pr.error)
+        process.exitCode = 1
+      } else if (pr.ok) view.allSet()
+      else view.stopLive()
+      return
+    }
+    // The helper died before it finished (or never said it started): this process polls instead. The
+    // pairing is still written down, so a session start can finish it if this terminal closes too.
+    if (!takenOver && Date.now() - t0 > WORKER_START_GRACE_MS && !(pidAlive(pr.pid) && Date.now() - (pr.heartbeatAt ?? 0) < POLLER_STALE_MS)) {
+      takenOver = waitForAnswer({ ...p, ...(readPending()?.code === code ? {} : { expiresAt: 0 }) })
+    }
   }
-  await say("All set. You can close the setup page.")
 }
 
 // Hook path, on a machine with no capture settings: open the setup page once (a detached
@@ -2707,6 +3018,16 @@ async function main() {
       // An idle keep-alive socket would hold the process open for seconds after the last line.
       process.exit(process.exitCode ?? 0)
       break
+    case "_connect-wait":
+    case "_connect-backfill":
+      try {
+        if (cmd === "_connect-wait") await cmdConnectWaitWorker(rest[0])
+        else await cmdConnectBackfillWorker()
+      } catch (err) {
+        await log(`connect: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      process.exit(0)
+      break
     case "_upload":
       try {
         await cmdUpload(rest[0], rest[1], rest[2])
@@ -2750,6 +3071,8 @@ async function main() {
       console.log("usage:")
       console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach] [--pair CODE.SECRET]")
       console.log("                                                                  set up Bonez in the browser")
+      console.log("  bonez-session-sync.mjs connect --demo [a|b] [--until=tools|waiting|signin|backfill|done]")
+      console.log("                                                                  preview the installer's screen")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
       console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")

@@ -2604,14 +2604,27 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.equal(created.plugin_version, JSON.parse(readFileSync(join(REPO_ROOT, ".claude-plugin", "plugin.json"), "utf8")).version)
     assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
     assert.equal(gw.calls.pairingResult.length, 3)
-    assert.deepEqual(res.stdout.trim().split("\n"), [
-      `Open this page in your browser to finish setting up Bonez: ${pairUrl()}`,
-      "Waiting for you in the browser…",
-      "You're signed in. Finish the steps in your browser…",
-      "Session saving is on.",
-      "Adding 2 recent sessions… 2/2",
-      "All set. You can close the setup page.",
+    // No terminal: plain lines, no escape code, no spinner.
+    assert.doesNotMatch(res.stdout, /\x1b/)
+    assert.deepEqual(res.stdout.trim().split("\n").map((l) => l.trim()), [
+      "Finish in your browser",
+      "1  Open this page and sign in:",
+      pairUrl(),
+      "2  Sign in to Bonez in each tool when it asks",
+      "3  Choose whether Bonez saves your sessions",
+      "",
+      "Keep this terminal open. It finishes setup when you answer in the browser.",
+      "Closing it is safe: setup then finishes the next time you use a coding tool.",
+      "",
+      "· Waiting for you in the browser…",
+      "✓ Signed in to Bonez in the browser",
+      "✓ Session saving is on",
+      "✓ Added 2 recent sessions  from the last 14 days",
+      "",
+      "All set. You can close this terminal and the setup page.",
     ])
+    // Collected: nothing is left for a session start to pick up.
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
     const cfg = readStore(home, "config.json")
     assert.equal(cfg.enabled, true)
     assert.equal(cfg.scope, "global")
@@ -2639,8 +2652,9 @@ describe("connect: the setup page in the browser and this machine share a pairin
     const res = await runCli(["connect", "--no-open"], { env })
     assert.equal(res.status, 0, res.stderr)
     assert.equal(gw.calls.pairings[0].body.opener, "installer")
-    assert.match(res.stdout, /Session saving stays off\./)
+    assert.match(res.stdout, /– Session saving stays off/)
     assert.equal(readStore(home, "config.json"), undefined)
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
     assert.equal(gw.calls.presign.length, 0)
   })
 
@@ -2714,12 +2728,16 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.deepEqual(joined.tools, [{ id: "claude-code", installed: true }, { id: "codex", installed: true }])
     assert.equal(joined.recent_sessions, 2)
     assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
-    assert.deepEqual(res.stdout.trim().split("\n"), [
-      "Continue on the Bonez page in your browser.",
-      "Session saving is on.",
-      "Adding 2 recent sessions… 2/2",
-      "All set. You can close the setup page.",
+    const lines = res.stdout.trim().split("\n").map((l) => l.trim())
+    assert.equal(lines[1], "1  Go back to the Bonez page in your browser")
+    assert.deepEqual(lines.slice(-5), [
+      "· Waiting for you in the browser…",
+      "✓ Session saving is on",
+      "✓ Added 2 recent sessions  from the last 14 days",
+      "",
+      "All set. You can close this terminal and the setup page.",
     ])
+    assert.doesNotMatch(res.stdout, /Signed in to Bonez/, "the page was signed in already")
     assert.doesNotMatch(res.stdout, /http/, "no link to open: the page is open already")
     assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_4")
     assert.ok(readStore(home, "optin.json").connectOpenedAt)
@@ -2795,5 +2813,202 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.equal((await runCli(["hook", "claude", "session-start"], { env: off.env, input })).stdout, "")
     assert.equal(readStore(off.home, "optin.json"), undefined)
     assert.equal(gw.calls.pairings.length, 1)
+  })
+
+  test("tool sign-ins the gateway reports are shown as they arrive", async () => {
+    reset({
+      steps: ["claimed", "answered"],
+      tools: [{ id: "codex", signed_in: true }, { id: "cursor", signed_in: false }],
+      sessions: { on: true, backfill: false, key: "bnz_connect_key_6" },
+    })
+    const { env } = connectEnv()
+    const res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.match(res.stdout, /✓ Codex signed in/)
+    assert.doesNotMatch(res.stdout, /Cursor signed in/)
+  })
+
+  // ---- the terminal closes before the answer (1SI-4098): the setup still finishes
+
+  const startInput = JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-9", cwd: "/tmp/c" })
+  const startConnect = (env) => {
+    const child = spawn(process.execPath, [SCRIPT, "connect"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    child.stdout.resume()
+    child.stderr.resume()
+    return { child, closed: new Promise((r) => child.on("close", r)) }
+  }
+  const helperPid = async (home) => waitFor(() => readStore(home, "connect-progress.json")?.pid, { timeoutMs: 8000 })
+  const writePending = (home, fields) => {
+    mkdirSync(store(home), { recursive: true })
+    writeFileSync(join(store(home), "pending-connect.json"), JSON.stringify({
+      code: "K7QM-4XPA", secret: "s3cret-poll-token", gateway: gw.url, expiresAt: Date.now() + 25 * 60_000, ...fields,
+    }), { mode: 0o600 })
+  }
+
+  test("the pairing is written down at once, and the helper finishes alone when the window closes", async () => {
+    reset({ steps: ["waiting"], sessions: { on: true, backfill: false, key: "bnz_connect_key_7" } })
+    const { home, env } = connectEnv()
+    const { child, closed } = startConnect(env)
+    const pid = await helperPid(home)
+    const pending = readStore(home, "pending-connect.json")
+    assert.deepEqual([pending.code, pending.secret, pending.gateway], ["K7QM-4XPA", "s3cret-poll-token", gw.url])
+    assert.equal((statSync(join(store(home), "pending-connect.json")).mode & 0o777).toString(8), "600")
+    assert.notEqual(pid, child.pid, "the waiting runs in a process of its own")
+    child.kill("SIGHUP") // the terminal window closes
+    await closed
+    gw.answers.pairing.steps = ["answered"] // then the person answers in the browser
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_7")
+    assert.equal(readStore(home, "config.json").via, "connect")
+    await waitFor(() => readStore(home, "connect-progress.json")?.finished)
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+  })
+
+  test("terminal and helper both gone before the answer: the next session start collects the key and adds the sessions", async () => {
+    reset({ steps: ["waiting"], sessions: { on: true, backfill: true, key: "bnz_connect_key_8" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const { child, closed } = startConnect(env)
+    const pid = await helperPid(home)
+    child.kill("SIGHUP")
+    process.kill(pid, "SIGKILL") // a restart, say: nothing is waiting any more
+    await closed
+    gw.answers.pairing.steps = ["answered"]
+    const before = gw.calls.pairingResult.length
+
+    const res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.ok(res.ms < 4500, `hook took ${res.ms}ms`)
+    assert.equal(gw.calls.pairingResult.length, before + 1, "one request")
+    const cfg = readStore(home, "config.json")
+    assert.deepEqual([cfg.apiKey, cfg.scope, cfg.via, cfg.gateway, cfg.enabled], ["bnz_connect_key_8", "global", "connect", gw.url, true])
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    // Nobody saw the answer arrive, so this start says it, once.
+    assert.match(JSON.parse(res.stdout).systemMessage, /^Bonez is saving your sessions on this computer now.*being added in the background\.$/)
+    await waitFor(() => gw.calls.presign.length === 2, { timeoutMs: 8000 })
+    assert.ok(gw.calls.presign.every((c) => c.headers.authorization === "Bearer bnz_connect_key_8"))
+    assert.equal((await runCli(["hook", "claude", "session-start"], { env, input: startInput })).stdout, "")
+  })
+
+  test("a pending pairing still waiting, with nobody polling: the start says nothing and a helper takes it up", async () => {
+    reset({ steps: ["claimed"], sessions: { on: true, backfill: false, key: "bnz_connect_key_9" } })
+    const { home, env } = connectEnv()
+    writePending(home)
+    const res = await runCli(["hook", "codex", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.ok(readStore(home, "pending-connect.json"))
+    await helperPid(home)
+    gw.answers.pairing.steps = ["answered"]
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_9")
+  })
+
+  test("an expired, unknown or long-gone pending pairing is cleared and nothing is saved", async () => {
+    reset({ steps: ["expired"] })
+    let { home, env } = connectEnv()
+    writePending(home, { expiresAt: Date.now() - 60_000 })
+    let res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    assert.equal(readStore(home, "config.json"), undefined)
+
+    reset({ issuedSecret: "x", secret: "the-server-forgot-it" })
+    ;({ home, env } = connectEnv())
+    writePending(home)
+    res = await runCli(["hook", "cursor", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_too_late" } })
+    ;({ home, env } = connectEnv())
+    writePending(home, { expiresAt: Date.now() - 9 * 86_400_000 })
+    res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(gw.calls.pairingResult.length, 0, "past the gateway's 7 days: not even asked")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    assert.equal(readStore(home, "config.json"), undefined)
+  })
+
+  test("the session start stays silent and fast when the gateway is down or hangs, and keeps the pairing", async () => {
+    const closed = await new Promise((r) => { const srv = createServer().listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => r(port)) }) })
+    let { home, env } = connectEnv()
+    writePending(home, { gateway: `http://127.0.0.1:${closed}` })
+    let res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(res.status, 0)
+    assert.equal(res.stdout, "")
+    assert.equal(res.stderr, "")
+    assert.ok(res.ms < 2500, `hook took ${res.ms}ms`)
+    assert.ok(readStore(home, "pending-connect.json"), "kept for the next start")
+
+    const sockets = []
+    const hang = await new Promise((r) => { const srv = createServer((s) => sockets.push(s)).listen(0, "127.0.0.1", () => r(srv)) })
+    try {
+      ;({ home, env } = connectEnv())
+      writePending(home, { gateway: `http://127.0.0.1:${hang.address().port}` })
+      res = await runCli(["hook", "codex", "session-start"], { env, input: startInput })
+      assert.equal(res.stdout, "")
+      assert.ok(res.ms < 3500, `hook took ${res.ms}ms against a gateway that never answers`)
+      assert.ok(readStore(home, "pending-connect.json"))
+    } finally {
+      for (const s of sockets) s.destroy()
+      hang.close()
+    }
+  })
+
+  test("--demo plays the installer with no network and no file", async () => {
+    reset()
+    for (const variant of ["a", "b"]) {
+      const { home, env } = connectEnv()
+      const res = await runCli(["connect", "--demo", variant, "--speed=50"], { env })
+      assert.equal(res.status, 0, res.stderr)
+      assert.match(res.stdout, /Keep this terminal open/)
+      assert.match(res.stdout, /All set\./)
+      assert.doesNotMatch(res.stdout, /\x1b/)
+      assert.deepEqual(readdirSync(home), [], "nothing written")
+    }
+    assert.equal(Object.values(gw.calls).reduce((n, c) => n + c.length, 0), 0, "nothing sent")
+  })
+})
+
+describe("the installer's terminal view degrades cleanly (1SI-4098)", () => {
+  const tty = (extra = {}) => {
+    let out = ""
+    return { stream: { isTTY: true, columns: 80, write: (s) => { out += s }, ...extra }, text: () => out }
+  }
+  test("a terminal gets colour marks and a spinner; NO_COLOR keeps the spinner without colour", async () => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    const t = tty()
+    const view = createView({ out: t.stream, caps: terminalCaps({ stream: t.stream, env: { TERM: "xterm-256color" }, platform: "darwin" }) })
+    view.waiting("Waiting for you in the browser…", Date.now() + 60_000)
+    view.done("Session saving is on")
+    view.close()
+    assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Session saving is on/, "the mark is green, the words are not")
+    assert.match(t.text(), /\x1b\[33m⠋/)
+    const n = tty()
+    const plainColour = createView({ out: n.stream, caps: terminalCaps({ stream: n.stream, env: { TERM: "xterm", NO_COLOR: "" }, platform: "darwin" }) })
+    plainColour.waiting("Waiting", 0)
+    plainColour.done("Done")
+    plainColour.close()
+    assert.doesNotMatch(n.text(), /\x1b\[\d+m/)
+    assert.match(n.text(), /⠋ Waiting/)
+  })
+  test("TERM=dumb, CI or a pipe: plain lines, no escape code; a Windows console gets ASCII marks", async () => {
+    const { terminalCaps, createView } = await import("../bin/lib/connect-tui.mjs")
+    for (const env of [{ TERM: "dumb" }, { TERM: "xterm", CI: "true" }]) {
+      const t = tty()
+      const view = createView({ out: t.stream, caps: terminalCaps({ stream: t.stream, env, platform: "darwin" }) })
+      view.waiting("Waiting", Date.now() + 60_000)
+      view.progress(1, 3)
+      view.done("Done")
+      view.close()
+      assert.doesNotMatch(t.text(), /\x1b/)
+      assert.equal(t.text(), "  · Waiting\n  ✓ Done\n")
+    }
+    assert.equal(terminalCaps({ stream: { isTTY: false }, env: {}, platform: "darwin" }).live, false)
+    const win = terminalCaps({ stream: { isTTY: true }, env: { TERM: "xterm" }, platform: "win32" })
+    assert.equal(win.unicode, false)
+    assert.equal(terminalCaps({ stream: { isTTY: true }, env: { WT_SESSION: "1" }, platform: "win32" }).unicode, true)
   })
 })
