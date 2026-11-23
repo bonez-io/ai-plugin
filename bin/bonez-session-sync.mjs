@@ -673,17 +673,21 @@ function findCodexCatchupTarget(currentSessionId) {
 //
 // So: flush on the NEXT sessionStart instead, from disk. Scoped to the current workspace's
 // transcript directory, because that is the one case where the new session's workspace_roots
-// is also the right workspace for the old conversation — Cursor's project directories are the
-// workspace path with "/" swapped for "-", so the mapping is exact rather than guessed. One
-// conversation per start, newest first, skipping anything sync-state already has.
+// is also the right workspace for the old conversation. One conversation per start, newest first,
+// skipping anything sync-state already has.
+//
+// Cursor names a project directory after the workspace path with every run of characters other than
+// ASCII letters and digits turned into one "-", and none at either end; case is kept. Checked against
+// every workspace Cursor recorded on a real Mac (workspaceStorage/*/workspace.json against
+// ~/.cursor/projects, 36 of 36): `/Users/me/Library/Application Support/Cursor/Workspaces/17719/workspace.json`
+// is `Users-me-Library-Application-Support-Cursor-Workspaces-17719-workspace-json`, `/Users/me/.bonez/a/ses_1`
+// is `Users-me-bonez-a-ses-1`. Mapping only "/" missed 7 of them. Lossy like Claude's, so it maps path to
+// directory only. A Windows root (`c:\Users\me\proj`, `/c:/Users/me/proj`) comes out `c-Users-me-proj` by the
+// same rule (unverified on Windows; its file system is case-insensitive, so the drive letter's case does not
+// matter). Non-ASCII letters are assumed to map like punctuation (not seen yet).
 function cursorProjectSlug(workspaceRoot) {
   if (!workspaceRoot) return null
-  // A Windows root (`c:\Users\me\proj`, or `/c:/Users/me/proj`) gets the same rule once its
-  // separators are "/" and its drive colon is gone: `c-Users-me-proj`. (Unverified on Windows: the
-  // exact slug Cursor writes there has not been looked at; the file system is case-insensitive
-  // there, so a drive letter in the other case still finds the directory.)
-  const root = isWindowsPath(workspaceRoot) ? workspaceRoot.replace(/\\/g, "/").replace(/^\/?([A-Za-z]):/, "$1") : workspaceRoot
-  return root.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
+  return workspaceRoot.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || null
 }
 
 // A path from a Windows machine: a drive letter (`C:\x`, `C:/x`, `/c:/x`) or a UNC share. Told apart

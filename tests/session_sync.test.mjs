@@ -968,7 +968,7 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
   test("flushes the PREVIOUS conversation, never the one just starting", async () => {
     const home = freshDir("cursor-catchup")
     const root = "/tmp/bonez-session-sync-fixture-repo"
-    const slug = "tmp-bonez-session-sync-fixture-repo" // workspace path with "/" -> "-"
+    const slug = "tmp-bonez-session-sync-fixture-repo" // every run of non-alphanumerics -> "-"
     seedWorkspace(home, slug, ["old-convo", "new-convo"])
     const past = new Date(Date.now() - 60_000)
     utimesSync(join(home, ".cursor", "projects", slug, "agent-transcripts", "old-convo", "old-convo.jsonl"), past, past)
@@ -1030,6 +1030,37 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     assert.equal(mod.cursorProjectSlug("/tmp/repo/"), "tmp-repo")
     assert.equal(mod.cursorProjectSlug(""), null)
     assert.equal(mod.cursorProjectSlug(undefined), null)
+    // Dots, spaces, underscores and other punctuation: each run is one "-", as in the directories Cursor wrote.
+    assert.equal(
+      mod.cursorProjectSlug("/Users/shay/Library/Application Support/Cursor/Workspaces/1771945206117/workspace.json"),
+      "Users-shay-Library-Application-Support-Cursor-Workspaces-1771945206117-workspace-json",
+    )
+    assert.equal(
+      mod.cursorProjectSlug("/Users/shay/.bonez/profiles/local/data/bonez/bonez-sessions/ses_10a8fbec1ffe2Uf8NN6aTdYCIe"),
+      "Users-shay-bonez-profiles-local-data-bonez-bonez-sessions-ses-10a8fbec1ffe2Uf8NN6aTdYCIe",
+    )
+    assert.equal(mod.cursorProjectSlug("/Users/shay/Projects/bonez/sample_3"), "Users-shay-Projects-bonez-sample-3")
+    assert.equal(mod.cursorProjectSlug("/Users/me/My Projects/app.v2 (copy)/"), "Users-me-My-Projects-app-v2-copy")
+    assert.equal(mod.cursorProjectSlug("/"), null)
+  })
+
+  test("the catch-up finds a workspace whose path has dots, spaces and underscores", async () => {
+    const home = freshDir("cursor-dotted")
+    const root = "/tmp/Bonez Fixtures/api.v2_x"
+    seedWorkspace(home, "tmp-Bonez-Fixtures-api-v2-x", ["dotted-convo"])
+    const dataDir = freshDir("cursor-dotted-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "brand-new", workspace_roots: [root] }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gateway.calls.presign.length, before + 1)
+    assert.ok(JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["dotted-convo"])
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
   })
 })
 
