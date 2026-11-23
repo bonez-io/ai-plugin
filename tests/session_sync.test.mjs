@@ -70,7 +70,9 @@ function runCli(args, { env = {}, input = "" } = {}) {
       cwd: REPO_ROOT,
       // The catch-up's quiet period would hold back the transcripts these tests just wrote. The
       // in-process check below runs with the real ten minutes.
-      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", ...env },
+      // The capture offer (1SI-4098) would start a real device flow from any test that starts a
+      // session with nothing set up; only its own tests turn it back on.
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -2192,8 +2194,9 @@ describe("capture says when it is set up but not working", () => {
     const { home, env } = homeWith("no-capture")
     const hostDir = join(home, ".claude", "plugins", "data", "bonez-bonez")
     mkdirSync(hostDir, { recursive: true })
+    // (The stub gateway runs no device flow, so the capture offer has no link and stays silent.)
     assert.equal((await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })).stdout, "")
-    assert.ok(!existsSync(join(home, ".bonez")), "nothing written for a person without capture")
+    assert.ok(!existsSync(join(home, ".bonez", "session-sync", "hook-folder.json")), "no folder written down for a person without capture")
     writeFileSync(join(hostDir, "config.json"), JSON.stringify({ enabled: false }))
     await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })
     // It also writes down the server address it uses, with where that came from.
@@ -2383,5 +2386,160 @@ describe("a sign-in issued by one gateway is never sent to another", () => {
     assert.match(st.stdout, /gateway: {2}https:\/\/gateway\.bonez\.io \(from the default\)/)
     assert.match(st.stdout, new RegExp(`the Claude Code hook uses: ${gateway.url.replaceAll(".", "\\.")} \\(from the plugin's server address option\\)`))
     assert.match(st.stdout, new RegExp(`sign-in: {2}issued by gateway\\.bonez\\.io, not ${target.replace(".", "\\.")}`))
+  })
+})
+
+describe("capture offer: one click turns capture on (1SI-4098)", () => {
+  const offerEnv = (as, extra = {}) => {
+    const home = freshDir("offer")
+    return {
+      home,
+      env: {
+        HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "",
+        BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client", BONEZ_DEVICE_POLL_FLOOR_MS: "50",
+        BONEZ_CAPTURE_OFFER: "", ...extra,
+      },
+    }
+  }
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const optin = (home) => (existsSync(join(store(home), "optin.json")) ? JSON.parse(readFileSync(join(store(home), "optin.json"), "utf8")) : {})
+  const start = (agent, env) =>
+    runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "offer-1", cwd: "/tmp/offer", source: "startup" }) })
+
+  test("never set up: one line with the approval link, then capture is on once approved, said once", async () => {
+    const as = await startStubOAuth({ pendingPolls: 2 })
+    try {
+      const { home, env } = offerEnv(as)
+      const first = await start("claude", env)
+      assert.ok(first.ms < 4500, `hook took ${first.ms}ms`)
+      const msg = JSON.parse(first.stdout).systemMessage
+      assert.match(msg, /^Bonez can save your coding sessions to your team's Bonez/)
+      assert.ok(msg.includes(`${as.url}/activate?user_code=WXYZ-1234`), msg)
+      assert.match(msg, /Never: \/bonez:capture off$/)
+      assert.equal(as.calls.device[0].scope, "bonez:sessions offline_access")
+      // The same day: nothing more.
+      assert.equal((await start("claude", env)).stdout, "")
+      // The person approves (the stub approves after two polls); the worker saves a global config.
+      await waitFor(() => existsSync(join(store(home), "config.json")), { timeoutMs: 8000 })
+      const cfg = JSON.parse(readFileSync(join(store(home), "config.json"), "utf8"))
+      assert.equal(cfg.enabled, true)
+      assert.equal(cfg.scope, "global")
+      assert.equal(cfg.via, "offer")
+      assert.equal(cfg.oauth.refreshToken, "rt-1")
+      assert.equal(cfg.apiKey, undefined)
+      assert.equal((statSync(join(store(home), "config.json")).mode & 0o777).toString(8), "600")
+      const on = await start("claude", env)
+      assert.match(JSON.parse(on.stdout).systemMessage, /^Bonez session capture is on: .* \/bonez:capture backfill$/)
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 1)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("a link still pending is shown again on a later day, not a new one", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      await start("claude", env)
+      const state = optin(home)
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ ...state, lastShownAt: Date.now() - 21 * 3_600_000 }))
+      const again = await start("claude", env)
+      assert.ok(JSON.parse(again.stdout).systemMessage.includes("/activate?user_code=WXYZ-1234"))
+      assert.equal(as.calls.device.length, 1)
+      assert.equal(optin(home).shown, 2)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("after three offers it waits a week", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      mkdirSync(store(home), { recursive: true })
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ shown: 3, lastShownAt: Date.now() - 2 * 86_400_000 }))
+      assert.equal((await start("claude", env)).stdout, "")
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ shown: 3, lastShownAt: Date.now() - 8 * 86_400_000 }))
+      assert.match(JSON.parse((await start("claude", env)).stdout).systemMessage, /Turn it on with one click/)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("decline: off, and never asked again; `on` withdraws the no and prints the link", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      const no = await runCli(["decline"], { env })
+      assert.match(no.stdout, /will not ask again/)
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ ...optin(home), lastShownAt: 0 }))
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 0)
+      const on = await runCli(["on"], { env })
+      assert.equal(on.status, 0, on.stderr)
+      assert.ok(on.stdout.includes(`${as.url}/activate?user_code=WXYZ-1234`), on.stdout)
+      assert.equal(optin(home).declinedAt, undefined)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("Codex gets a systemMessage, Cursor asks its agent to relay the line", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const codex = JSON.parse((await start("codex", offerEnv(as).env)).stdout)
+      assert.match(codex.systemMessage, /Turn it on with one click: .*Never: node ".*bonez-session-sync\.mjs" decline$/)
+      const cursor = JSON.parse((await start("cursor", offerEnv(as).env)).stdout)
+      assert.match(cursor.additional_context, /^Tell the user this once, .*"Bonez can save your coding sessions.*\/bonez-capture off"$/)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("no offer with BONEZ_CAPTURE_OFFER=0, for a gateway capture does not serve, or once set up by hand", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      assert.equal((await start("claude", offerEnv(as, { BONEZ_CAPTURE_OFFER: "0" }).env)).stdout, "")
+      assert.equal((await start("claude", offerEnv(as, { BONEZ_GATEWAY_URL: "https://bonez.example.com" }).env)).stdout, "")
+      const { home, env } = offerEnv(as)
+      mkdirSync(store(home), { recursive: true })
+      writeFileSync(join(store(home), "config.json"), JSON.stringify({ enabled: false, scope: "global", repos: [], apiKey: TEST_KEY }))
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 0)
+    } finally {
+      await as.close()
+    }
+  })
+})
+
+describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
+  test("dry run lists each harness's sessions newest first, by the id their own hooks upload under", async () => {
+    const home = freshDir("backfill-all")
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    const put = (path, fixture, ageMs) => {
+      mkdirSync(dirname(path), { recursive: true })
+      cpSync(join(FIXTURES, fixture), path)
+      const t = new Date(Date.now() - ageMs)
+      utimesSync(path, t, t)
+    }
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    put(join(home, ".claude", "projects", "-work-api", "claude-old.jsonl"), "claude-transcript.jsonl", 3 * 86_400_000)
+    put(join(home, ".codex", "sessions", "2026", "11", "20", `rollout-2026-11-20T10-00-00-${uuid}.jsonl`), "codex-rollout.jsonl", 2 * 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-1", "cur-1.jsonl"), "cursor-transcript.jsonl", 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "other", "not-a-chat.jsonl"), "cursor-transcript.jsonl", 3_600_000)
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url, CODEX_HOME: join(home, ".codex") }
+    const dry = await runCli(["backfill", "--dry-run"], { env })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Sessions not yet uploaded at their current content: 3/)
+    const order = [...dry.stdout.matchAll(/^ {2}\d{4}-\d\d-\d\d \d\d:\d\d {2}(\S+(?: \S+)?) +(\S+)$/gm)].map((m) => [m[1].trim(), m[2]])
+    assert.deepEqual(order, [["Cursor", "cur-1"], ["Codex", uuid], ["Claude Code", "claude-old"]])
+    assert.doesNotMatch(dry.stdout, /not-a-chat/)
+    const only = await runCli(["backfill", "--dry-run", "--agent=codex"], { env })
+    assert.match(only.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Codex: 1/)
+    const bad = await runCli(["backfill", "--agent=vim"], { env })
+    assert.equal(bad.status, 1)
   })
 })

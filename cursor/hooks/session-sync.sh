@@ -29,8 +29,8 @@
 #   BONEZ_SESSION_SYNC=0 — disable capture without uninstalling (honoured inside the .mjs).
 #   BONEZ_NODE           — path to node, if it is not on PATH (see the probe below).
 #
-# Exits 0 with no output on every path — a hook that prints or fails is a hook the user
-# notices, and there is nothing here worth interrupting them for.
+# Exits 0 on every path, and prints nothing except the session-start capture offer: a hook that
+# prints or fails is a hook the user notices, and nothing else here is worth interrupting them for.
 trap 'exit 0' EXIT
 set -u
 
@@ -63,6 +63,12 @@ if [ "$EVENT" = recall ]; then
   exit 0
 fi
 
-# stdin (the hook payload JSON) passes straight through.
-"$NODE_BIN" "$SYNC" hook cursor "$EVENT" >/dev/null 2>&1
+# stdin (the hook payload JSON) passes straight through. A session start may answer with the
+# capture offer (1SI-4098): one `additional_context` JSON object the .mjs writes only when it
+# has something to say, so its stdout passes through on that event. Every other event stays quiet.
+if [ "$EVENT" = session-start ]; then
+  "$NODE_BIN" "$SYNC" hook cursor "$EVENT" 2>/dev/null
+else
+  "$NODE_BIN" "$SYNC" hook cursor "$EVENT" >/dev/null 2>&1
+fi
 exit 0

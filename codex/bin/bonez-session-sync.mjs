@@ -530,12 +530,17 @@ async function cmdHook(agent, event) {
     // never installed, or explicitly disabled. Settings left in a folder the hook no longer
     // reads are neither: say so, once a day.
     if (claudeStart && !cfg && strandedSettings().length) notifyOnce("stranded", "Bonez session capture is set up, but its settings are in an older folder this plugin no longer reads, so nothing uploads.")
+    // Never set up on this machine: offer it (1SI-4098). A config that exists but is off is a
+    // choice someone made, and is left alone.
+    else if (!cfg && event === "session-start") await offerCapture(agent)
     return
   }
 
   const raw = readStdinSync()
   if (!raw || !raw.trim()) return
-  if (claudeStart) {
+  if (event === "session-start" && announceEnabled(agent)) {
+    /* the one "capture is on" line after a yes from the offer; nothing else this start */
+  } else if (claudeStart) {
     const notice = captureNotice(cfg)
     if (notice) notifyOnce(notice.reason, notice.text)
   }
@@ -629,8 +634,8 @@ function findCodexCatchupTarget(currentSessionId) {
   withMtime.sort((a, b) => b.mtime - a.mtime)
   const newest = withMtime[0]
   if (!newest) return null
-  const sessionId = newest.p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? newest.p
-  return { sessionId, transcriptPath: newest.p }
+  // The rollout's UUID, the `session_id` its own SessionEnd uploads under (1SI-4098).
+  return { sessionId: codexTranscriptId(newest.p), transcriptPath: newest.p }
 }
 
 // Cursor's own SessionStart catch-up — and unlike Codex's, this one is not defensive
@@ -694,14 +699,14 @@ function isSidechainTranscript(path) {
 
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
-function staleTranscriptTargets(root, { excludeId, state, cap }) {
+function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId }) {
   if (!root || !existsSync(root)) return []
-  const files = walkFiles(root, (p) => p.endsWith(".jsonl")).filter(
+  const files = walkFiles(root, (p) => p.endsWith(".jsonl") && match(p)).filter(
     (p) => !excludeId || !p.endsWith(`${excludeId}.jsonl`),
   )
   const candidates = files
     .map((p) => {
-      const id = p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
+      const id = idOf(p)
       let mtime
       try {
         mtime = statSync(p).mtimeMs
@@ -777,6 +782,26 @@ function findClaudeCatchupTargets(currentSessionId, workspaceRoot, state) {
 // caller batches), and no current session to exclude.
 function findClaudeBackfillTargets(state) {
   return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0 })
+}
+
+// A transcript's session id is its file name, except for Codex, whose rollout files are named
+// `rollout-<timestamp>-<session id>.jsonl`: the id is the UUID at the end, the same `session_id`
+// its SessionEnd hook uploads under, so a backfill never sends a session a second time.
+const transcriptId = (p) => p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
+const UUID_TAIL_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+const codexTranscriptId = (p) => transcriptId(p).match(UUID_TAIL_RE)?.[1] ?? transcriptId(p)
+
+// Every harness's history, for `backfill` (1SI-4098). Cursor keeps other files under projects/,
+// so only its agent-transcripts count.
+const BACKFILL_AGENTS = ["claude", "codex", "cursor"]
+function findBackfillTargets(agent, state) {
+  if (agent === "claude") return findClaudeBackfillTargets(state)
+  if (agent === "codex") {
+    return staleTranscriptTargets(join(paths.codexHome, "sessions"), { excludeId: null, state, cap: 0, idOf: codexTranscriptId })
+  }
+  return staleTranscriptTargets(join(HOME, ".cursor", "projects"), {
+    excludeId: null, state, cap: 0, match: (p) => /[\\/]agent-transcripts[\\/]/.test(p),
+  })
 }
 
 // ------------------------------------------------------------------- credential (key or OAuth)
@@ -855,7 +880,7 @@ function formBody(fields) {
 
 const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" }
 
-async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
+async function deviceLogin(gatewayUrl, { onPrompt = console.log, onCode = () => {} } = {}) {
   if (!OAUTH_CLIENT_ID) {
     throw new Error(
       "OAuth login is not configured in this build.\n" +
@@ -878,6 +903,7 @@ async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
   }
   const { device_code: deviceCode, user_code: userCode, expires_in: expiresIn } = start.json
   const verifyUrl = start.json.verification_uri_complete || start.json.verification_uri
+  onCode({ verifyUrl, userCode, expiresIn: expiresIn ?? 900, complete: Boolean(start.json.verification_uri_complete) })
   onPrompt(
     [
       "",
@@ -1786,6 +1812,209 @@ function notifyOnce(reason, text) {
   }
 }
 
+// -------------------------------------------------------------------------------- opt-in offer (1SI-4098)
+
+// Capture used to stay off until someone ran `login` by hand, and nothing told anyone to, so no
+// customer ever turned it on. Now a session start on a machine that never set capture up offers it
+// with a ready approval link: one click in the browser and capture is on, for every repo. The
+// offer is the device flow `login` runs, started by a detached worker so the hook stays fast.
+//
+// The state lives in the shared store (one per machine, whichever client asked), not the
+// config: there is no config until the person says yes, and a "no" must not look like an install.
+const optinPath = () => join(CANONICAL_DATA_DIR, "optin.json")
+const OFFER_FIRST_SHOWS = 3 // the first few offers, at most one a day…
+const OFFER_DAILY_MS = 20 * 60 * 60 * 1000
+const OFFER_WEEKLY_MS = 7 * DAY_MS // …then at most one a week, until a yes or a no
+const OFFER_WAIT_MS = 3500 // how long the hook waits for the worker's link (3 round trips: ~2.4s on prod Auth0)
+const OFFER_LINK_MIN_MS = 3 * 60_000 // a pending link with less time left than this is not shown
+
+function readOptin() {
+  return readJsonSafe(optinPath(), {})
+}
+
+function writeOptin(next) {
+  try {
+    mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(optinPath(), next, 0o600)
+  } catch {
+    /* the offer is advisory */
+  }
+}
+
+// Whether this start may show the offer: never after a no, never with BONEZ_CAPTURE_OFFER=0 (for CI
+// and shared machines), never for a gateway capture does not serve, and on a slowing schedule otherwise.
+function offerDue(state, now = Date.now()) {
+  if (process.env.BONEZ_CAPTURE_OFFER === "0" || !OAUTH_CLIENT_ID) return false
+  if (state.declinedAt || state.enabledAt) return false
+  if (!captureGatewayAllowed(gatewayBaseUrl())) return false
+  const shown = state.shown ?? 0
+  if (!state.lastShownAt) return true
+  const gap = now - state.lastShownAt
+  return shown < OFFER_FIRST_SHOWS ? gap > OFFER_DAILY_MS : gap > OFFER_WEEKLY_MS
+}
+
+// How the person runs a capture subcommand from where they are: the plugin's slash command where
+// the client has one, the script itself otherwise.
+function captureCmd(agent, sub) {
+  if (agent === "claude") return `/bonez:capture ${sub}`
+  if (agent === "cursor") return `/bonez-capture ${sub}`
+  return `node "${SELF_PATH}" ${sub === "off" ? "decline" : sub}`
+}
+
+function offerText(agent, verifyUrl) {
+  return (
+    `Bonez can save your coding sessions to your team's Bonez, so it learns from them (secrets are removed on this machine first). ` +
+    `Turn it on with one click: ${verifyUrl} — Not now: ignore this. Never: ${captureCmd(agent, "off")}`
+  )
+}
+
+function enabledText(agent) {
+  return (
+    "Bonez session capture is on: sessions on this machine are now saved to your team's Bonez when they end. " +
+    `To add your recent sessions too: ${captureCmd(agent, "backfill")}`
+  )
+}
+
+// What each client can show the person at session start. Claude Code shows a hook's
+// `systemMessage` to the person and keeps it out of the model's context; Codex shows it as a
+// warning in its UI (developers.openai.com/codex/hooks). Cursor's sessionStart has no field the
+// person sees (`user_message` is not enforced there), so its offer reaches the person through the
+// agent, as context it is asked to relay once (cursor.com/docs/agent/hooks).
+function emitNotice(agent, text) {
+  if (agent === "cursor") {
+    const relay = `Tell the user this once, at the start of your first reply, word for word, then carry on with their request: "${text}"`
+    process.stdout.write(JSON.stringify({ additional_context: relay }))
+    return
+  }
+  process.stdout.write(JSON.stringify({ systemMessage: text }))
+}
+
+// The first session start after the person approved the offer says so, once.
+function announceEnabled(agent) {
+  const state = readOptin()
+  if (!state.enabledAt || state.announcedAt) return false
+  writeOptin({ ...state, announcedAt: Date.now() })
+  emitNotice(agent, enabledText(agent))
+  return true
+}
+
+// Hook path: no config on this machine. Show the "capture is on" line once after a yes, or the
+// offer when it is due. Waits at most OFFER_WAIT_MS for the worker's link; with no link in time it
+// says nothing and counts nothing, so the next start tries again.
+async function offerCapture(agent) {
+  if (announceEnabled(agent)) return
+  const state = readOptin()
+  if (!offerDue(state)) return
+  let pending = state.pending
+  if (!(pending?.verifyUrl && pending.expiresAt - Date.now() > OFFER_LINK_MIN_MS)) {
+    const nonce = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+    writeOptin({ ...state, pending: { nonce, startedAt: Date.now() } })
+    if (!spawnWorker(["_optin", nonce])) return
+    const deadline = Date.now() + OFFER_WAIT_MS
+    pending = undefined
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100))
+      const p = readOptin().pending
+      if (p?.nonce !== nonce) return // another start took over the offer
+      if (p.verifyUrl) {
+        pending = p
+        break
+      }
+      if (p.error) return
+    }
+    if (!pending) return
+  }
+  const now = Date.now()
+  writeOptin({ ...readOptin(), lastShownAt: now, shown: (state.shown ?? 0) + 1 })
+  emitNotice(agent, offerText(agent, pending.verifyUrl))
+}
+
+// Detached worker: runs the device flow the offer links to, and turns capture on, for every repo,
+// when the person approves. Leaves the state as it found it on any failure, so the offer comes back.
+async function cmdOptinWorker(nonce) {
+  const ours = () => readOptin().pending?.nonce === nonce
+  try {
+    const tokens = await deviceLogin(gatewayBaseUrl(), {
+      onPrompt: () => {},
+      onCode: ({ verifyUrl, expiresIn }) => {
+        if (!ours()) throw new Error("superseded")
+        writeOptin({ ...readOptin(), pending: { nonce, verifyUrl, expiresAt: Date.now() + expiresIn * 1000 } })
+      },
+    })
+    if (!ours()) return
+    if (!tokens.refreshToken) throw new Error("no refresh token was issued")
+    if (loadConfig()) return // set up by hand meanwhile; that choice stands
+    saveConfig({
+      enabled: true,
+      scope: "global",
+      repos: [],
+      oauth: { ...tokens, gateway: gatewayBaseUrl() },
+      installedAt: new Date().toISOString(),
+      via: "offer",
+    })
+    const { pending: _done, ...rest } = readOptin()
+    writeOptin({ ...rest, enabledAt: Date.now() })
+    await log("opt-in: approved in the browser — capture is on (global)")
+  } catch (err) {
+    if (ours()) {
+      const { pending: _gone, ...rest } = readOptin()
+      writeOptin(rest)
+    }
+    await log(`opt-in: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// Start the offer's flow by hand (the slash command's "on"): print the approval link and return at
+// once, while a detached worker waits for the approval. Unlike `login` it never blocks, so an
+// agent's shell tool can run it. A previous "no" is withdrawn by asking for this.
+async function cmdOn() {
+  if (refuseForeignGateway("on")) return
+  const cfg = loadConfig()
+  if (cfg?.enabled && hasCredential(cfg)) {
+    console.log("bonez session capture: already on. `status` shows the last upload.")
+    return
+  }
+  const { declinedAt: _no, ...state } = readOptin()
+  const nonce = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+  writeOptin({ ...state, pending: { nonce, startedAt: Date.now() } })
+  if (!spawnWorker(["_optin", nonce])) {
+    console.error("bonez session capture: could not start the sign-in. Run `login --global` instead.")
+    process.exitCode = 1
+    return
+  }
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100))
+    const p = readOptin().pending
+    if (p?.nonce !== nonce) break
+    if (p.verifyUrl) {
+      console.log(
+        [
+          "Open this link and approve, to turn Bonez session capture on for every repo on this machine:",
+          `  ${p.verifyUrl}`,
+          `The link works for ${Math.max(1, Math.round((p.expiresAt - Date.now()) / 60_000))} minutes. Nothing else to do: capture turns on when you approve.`,
+          "Check with `status` afterwards.",
+        ].join("\n"),
+      )
+      return
+    }
+  }
+  console.error(`bonez session capture: the sign-in did not start. See ${logFilePath()}, or run \`login --global\`.`)
+  process.exitCode = 1
+}
+
+function cmdDecline() {
+  const state = readOptin()
+  const { pending: _gone, ...rest } = state
+  writeOptin({ ...rest, declinedAt: Date.now() })
+  const cfg = loadConfig()
+  if (cfg?.enabled) {
+    cfg.enabled = false
+    saveConfig(cfg)
+  }
+  console.log("bonez session capture: off, and Bonez will not ask again. Turn it on any time with `login --global`.")
+}
+
 // -------------------------------------------------------------------------------- human-facing commands
 
 function parseInstallArgs(rest) {
@@ -1922,7 +2151,7 @@ function cmdLogout() {
   console.log("bonez session capture: credential removed and capture disabled. Run `login` to set it up again.")
 }
 
-// A deliberate, human-run sweep of local Claude Code history. Deliberately NOT reachable from
+// A deliberate, human-run sweep of local Claude Code, Codex and Cursor history. NOT reachable from
 // any hook: it publishes a large volume of past conversation to the org's System Model in one go, and
 // that is a decision someone makes on purpose, once, not a side effect of opening a terminal.
 //
@@ -1934,6 +2163,13 @@ async function cmdBackfill(rest) {
   const limitArg = args.find((a) => a.startsWith("--limit="))
   const parsedLimit = limitArg ? Number.parseInt(limitArg.slice("--limit=".length), 10) : Number.NaN
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : CLAUDE_BACKFILL_BATCH
+  const agentArg = args.find((a) => a.startsWith("--agent="))?.slice("--agent=".length)
+  if (agentArg && !BACKFILL_AGENTS.includes(agentArg)) {
+    console.error(`--agent must be one of: ${BACKFILL_AGENTS.join(", ")}`)
+    process.exitCode = 1
+    return
+  }
+  const agents = agentArg ? [agentArg] : BACKFILL_AGENTS
 
   if (disabledByEnv()) {
     console.error("BONEZ_SESSION_SYNC=0 is set — unset it before running a backfill.")
@@ -1942,20 +2178,28 @@ async function cmdBackfill(rest) {
   }
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
-    console.error("Session capture is not installed or is disabled. Run `login` (or `install`) first.")
+    console.error("Session capture is not on. Run `on` (or `login --global`) first.")
     process.exitCode = 1
     return
   }
 
-  const targets = findClaudeBackfillTargets(loadState())
+  // One list across every harness, newest first, so a run sends the most recent work wherever it ran.
+  const state = loadState()
+  const names = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" }
+  const perAgent = agents.map((agent) => ({ agent, targets: findBackfillTargets(agent, state) }))
+  const targets = perAgent
+    .flatMap(({ agent, targets: ts }) => ts.map((t) => ({ ...t, agent })))
+    .sort((a, b) => b.mtime - a.mtime)
   if (!targets.length) {
-    console.log("Nothing to backfill — every Claude Code transcript on this machine is already current.")
+    console.log("Nothing to backfill: every session on this machine is already uploaded at its current content.")
     return
   }
 
   const batch = targets.slice(0, limit)
-  console.log(`Claude Code transcripts not yet uploaded at their current content: ${targets.length}`)
-  console.log(`This run would upload ${batch.length} of them (newest first).`)
+  console.log(`Sessions not yet uploaded at their current content: ${targets.length}`)
+  for (const { agent, targets: ts } of perAgent) if (ts.length) console.log(`  ${names[agent]}: ${ts.length}`)
+  console.log(`This run ${dryRun ? "would upload" : "uploads"} ${batch.length} of them (newest first):`)
+  for (const t of batch) console.log(`  ${new Date(t.mtime).toISOString().slice(0, 16).replace("T", " ")}  ${names[t.agent].padEnd(11)} ${t.sessionId}`)
   if (targets.length > batch.length) {
     console.log(`Re-run to continue; each run picks up where the last one stopped.`)
   }
@@ -1973,7 +2217,7 @@ async function cmdBackfill(rest) {
       // Sequential and one-at-a-time on purpose: every upload writes sync-state, so an
       // interrupt (Ctrl-C, a dropped network) leaves everything already done recorded as done
       // and the rest simply not started. That is what makes re-running safe.
-      await uploadOne({ agent: "claude", cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
+      await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
       uploaded++
       console.log("ok")
     } catch (err) {
@@ -2101,6 +2345,20 @@ async function main() {
       // it either way, but exiting promptly is still the tidier default.
       process.exit(0)
       break
+    case "_optin":
+      try {
+        await cmdOptinWorker(rest[0])
+      } catch {
+        /* logged inside; a detached worker has nobody to tell */
+      }
+      process.exit(0)
+      break
+    case "decline":
+      cmdDecline()
+      break
+    case "on":
+      await cmdOn()
+      break
     case "_upload":
       try {
         await cmdUpload(rest[0], rest[1], rest[2])
@@ -2139,9 +2397,11 @@ async function main() {
       await cmdBackfill(rest)
       return
     default:
-      console.log("bonez-session-sync — capture Claude Code / Codex sessions into bonez")
+      console.log("bonez-session-sync — capture Claude Code, Codex and Cursor sessions into bonez")
       console.log("")
       console.log("usage:")
+      console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
+      console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
       console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")
       console.log("  bonez-session-sync.mjs logout")
       console.log("  bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
@@ -2149,10 +2409,8 @@ async function main() {
       console.log("  bonez-session-sync.mjs status")
       console.log("  bonez-session-sync.mjs disable")
       console.log("  bonez-session-sync.mjs enable")
-      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N]")
-      console.log("                                                                  upload past")
-      console.log("                                                                  Claude Code")
-      console.log("                                                                  history")
+      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N] [--agent=claude|codex|cursor]")
+      console.log("                                                                  upload past sessions")
       process.exitCode = cmd ? 1 : 0
   }
 }

@@ -268,12 +268,7 @@ Worth knowing when debugging: an existing install keeps working indefinitely off
 its refresh token, so "it works in Codex" says nothing about whether a NEW client
 can connect.
 
-**Session-capture gap.** Cursor is not wired for session capture. Its transcripts
-are opt-in and this repo has no parser for their on-disk format; both
-`bin/bonez-session-sync.mjs` (format-specific parsers) and the gateway's wire
-enum would need a Cursor case. Rather than ship a guess, the plugin carries **no**
-`sessionEnd` hook — Claude Code and Codex remain the two legs that capture
-sessions.
+**Session capture** works in Cursor too: see [Session capture](#session-capture), Cursor leg.
 
 ### Branding
 
@@ -423,7 +418,22 @@ The same three lines are the always-loaded part where the harness has a slot for
 Your Claude Code, Codex and Cursor conversations already hold everything the harness itself
 learns from — what you tried, what broke, what you decided. This plugin can capture them into the same
 `bonez` System Model the desktop app's manual "Import history" feature feeds, so the org
-learns from them too. It is **off by default** and stays off until you explicitly install it.
+learns from them too. It is **off until you say yes**: on a machine where it was never set up, a
+session start offers it once, with a link. One click in the browser turns it on for every repo on
+the machine. The step-by-step guide, with a test of both backfill and live capture, is
+[docs/session-capture.md](docs/session-capture.md).
+
+**The offer (Claude Code, Codex, Cursor).** When no capture settings exist on the machine, a session
+start shows one line: "Bonez can save your coding sessions to your team's Bonez … Turn it on with one
+click: <link> — Not now: ignore this. Never: /bonez:capture off". A background process has already
+started the same device sign-in `login` uses; approving the link is all it takes, and the next
+session start says "Bonez session capture is on" once. It asks at most once a day for the first three
+times, then once a week, and never again after `decline` (`/bonez:capture off`). It never asks when
+settings exist (capture on, or switched off on purpose), with `BONEZ_CAPTURE_OFFER=0` (for CI and
+shared machines), or when the plugin points at a server capture does not serve. Claude Code and Codex
+show the line to you directly (Codex shows hook messages only after you trust the plugin's hooks in
+`/hooks` or **Review hooks**). Cursor has no such field at session start, so its agent is asked to
+repeat the line in its first reply.
 
 **Bonez's own gateways only.** Capture signs in to Bonez's own identity provider and uploads to Bonez's own
 import pipeline, so it is not for a customer's Bonez server. `login` and `install` refuse any gateway host
@@ -446,11 +456,13 @@ presign → PUT → complete pipeline the desktop importer uses. v1 captures con
 not `CLAUDE.md`, auto-memories, commands, or subagents (those change on a different cadence; a
 separate follow-up).
 
-**Install (once per machine):**
+**Turn it on by hand (once per machine):** `/bonez:capture on` in Claude Code, `/bonez-capture on` in
+Cursor, or in a terminal:
 
 ```bash
-bonez-session-sync.mjs login --repo /path/to/repo   # repeat --repo for more
-bonez-session-sync.mjs login --global               # every repo on this machine
+bonez-session-sync.mjs on                           # prints the link and returns; every repo
+bonez-session-sync.mjs login --repo /path/to/repo   # waits in the terminal; repeat --repo for more
+bonez-session-sync.mjs login --global               # waits in the terminal; every repo on this machine
 ```
 
 That opens a browser, you sign in the same way you did for the MCP server itself — GitHub,
@@ -483,12 +495,14 @@ bonez-session-sync.mjs install bnz_... --global
 
 | Command | Does |
 | --- | --- |
+| `on` | Print the one-click link and return at once; a background process turns capture on (every repo) when you approve. Withdraws an earlier `decline`. What `/bonez:capture on` runs. |
+| `decline` | Capture off, and no more offers. What `/bonez:capture off` runs. |
 | `login [--repo <path>]... [--global]` | Browser sign-in, then turn capture on. Repo-scoped by default; `--global` captures every repo on this machine. Also re-authorizes an existing install. |
 | `logout` | Discard the credential and stop capture. |
 | `install <bnz_...key> [--repo <path>]... [--global]` | The headless lane: store a sessions-scoped key (mode 600) and turn capture on. Same scope options. |
 | `status` | Enabled/disabled, which credential, scope, repos, sessions synced so far, the folder the Claude Code hook reads its settings from (and whether they were found there or through the fallback), and the time and result of the last upload attempt and of the last successful one. The same answer from a plain shell as under the hook. Never prints a key or token. |
 | `disable` / `enable` | Turn capture off/on without discarding the credential. |
-| `backfill [--dry-run] [--limit=N]` | Upload Claude Code history that predates capture being on. Newest first, in bounded batches; sub-agent transcripts are part of their lead session and are never uploaded on their own; re-run to continue. Start with `--dry-run` to see the volume first. |
+| `backfill [--dry-run] [--limit=N] [--agent=claude\|codex\|cursor]` | Upload Claude Code, Codex and Cursor history that predates capture being on, in one list across the three. Newest first, in bounded batches; sub-agent transcripts are part of their lead session and are never uploaded on their own; re-run to continue. Start with `--dry-run` to see the volume first. |
 
 **Catching up on what was missed.** Capture normally happens at `SessionEnd`. When that never
 fires — a crash, a kill, or the plugin having been disabled for a while — the next session
@@ -499,8 +513,8 @@ before old history, and skips a transcript written in the last 10 minutes: that 
 probably still running, and its own end (or a later start) sends it. A sub-agent's transcript (under `<session>/subagents/`, its lines marked
 `isSidechain`) is part of its lead session and is never uploaded as a session of its own.
 
-It is not a way to import a year of history. For that, `backfill` sweeps every project
-directory on the machine and uploads everything not already current:
+It is not a way to import a year of history. For that, `backfill` sweeps Claude Code's, Codex's
+and Cursor's history on the machine and uploads everything not already current:
 
 ```bash
 bonez-session-sync.mjs backfill --dry-run   # how much would this publish?
@@ -518,8 +532,8 @@ appears when the last three upload attempts all failed, when the last attempt fa
 has uploaded for three days, or when the settings sit in an older folder
 the hook no longer reads (running `status` moves them). The line is shown to you, not added to the
 model's context. It is worked out from what the uploader recorded, locally: a session it skips on purpose (empty,
-unchanged, out of scope) or has not reached yet (still open) never counts. Cursor's and Codex's session-start hooks
-have no field for a message to the person, so they show nothing; `status` works the same there. A
+unchanged, out of scope) or has not reached yet (still open) never counts. This line is Claude Code's only;
+`status` gives the same answer everywhere. A
 failed upload also writes its cause to `sync.log`: the step (token refresh, presign, upload,
 complete), the host, and the error code and message.
 
@@ -597,7 +611,7 @@ bookkeeping (under `presence/` beside the credential) is removed at its end, and
 than three days is swept at the next start. Codex is not announced: its transcript id is
 not its hook's session id, so the announcement would never meet its own upload.
 
-**Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Review them in Codex. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires the capture login.
+**Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Codex skips a plugin's hooks until you trust them: open `/hooks` (CLI) or **Review hooks** (app) once after installing or updating. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires capture to be on (the offer's link, `on`, or `login`).
 
 **Recall in Claude Code, Codex and Cursor:** On the first prompt of a session the plugin fetches the Bonez seed: your memories, work in flight, and what is relevant to this repo (from the checkout's `origin` remote) and to the prompt. It adds the seed to the agent's context and passes the session's id, so the session's own activity is left out. Later prompts do not fetch it again. Claude Code fetches it with an `mcp_tool` hook on its signed-in Bonez connection, which has no access to the repo, so its seed is built from the prompt alone. Codex and Cursor hooks can only run commands, so the hook calls the server itself, with the repo and the prompt. It uses an API key installed for session capture (`install <bnz_...>`, sent only to Bonez-operated servers) or a `bonez-plugin-push login` sign-in for that server. Capture's own `login` is upload-only and cannot read the System Model. The fetch gives up after about three seconds, and the prompt then goes ahead without it. A server from before the session argument refuses it, and the hook asks once more without it. The startup guidance still tells the agent to call `memory_recall` on its signed-in Bonez MCP connection when no seed arrived. Claude’s Read/Edit/Write hook resolves a repository file locally and supplies its System Model ref so the model can recall relevant records. Scratch files outside a repository produce no recall hint. File-tool guidance and the session-context skill direct the agent to look up a repo-qualified file, ticket or PR, fetch the relevant WorkItem and inspect its evidence. Agents using shell tools follow the same skill. Only a memory used in an answer should be reported through `memory_cite`. A server without the new tools supports graph search and fetch for anchored memories. Capture consent and graph sign-in are separate.
 
@@ -680,7 +694,7 @@ tests/            gate tests + session-capture + plugin hash and push tests + Wi
 codex/            OpenAI Codex leg — AGENTS.md, skills/ (+ new-plugin, the plugin creator), prompts/ (context, search, agents), bin/ (plugin tools), .mcp.json (the server, sign-in and `approval_mode = "prompt"` on `memory_save` and `rules_write`), config.toml (see Other clients → OpenAI Codex; native prompts, no write hook)
 assets/           the bonez mark — logo.svg (opaque tile) + bonez-mark-{light,dark}.svg
 .cursor-plugin/   marketplace.json — this repo is a Cursor marketplace too
-cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, rules/ (the always-apply rule), commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate works, no session capture)
+cursor/           the Cursor PLUGIN — .cursor-plugin/plugin.json, mcp.json, skills/, rules/ (the always-apply rule), commands/ (incl. bonez-new-plugin), hooks/, bin/ (see Other clients → Cursor; write gate and session capture work)
 ```
 
 One gate script, two hook harnesses: `hooks/gate-write.sh` serves Claude Code's `PreToolUse`
