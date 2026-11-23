@@ -1,5 +1,5 @@
 {
-  "description": "Permission gate for bonez writes (prompts before the bonez MCP `memory_save` and `rules_write` tools run; reads such as `rules_read` pass through untouched), plus opt-in session capture: at SessionEnd it hands the transcript to bonez-session-sync.mjs; at SessionStart it flushes any session in this workspace whose SessionEnd never fired (a crash, a kill, or the plugin having been disabled) and announces the session to Bonez, and after Read/Edit/Write it records the repository-relative path of the file touched (README \u2014 Live sessions). Both are a silent no-op until `login` (or, headless, `install`) has been run (see README \u2014 Session capture).",
+  "description": "Bonez in Claude Code. PreToolUse: asks before the bonez MCP `memory_save` and `rules_write` tools run; reads pass through. SessionStart: tells the agent how to use Bonez (call memory_recall once when the work needs project context), and for session saving: finishes a setup the browser answered after its terminal closed, opens the setup page once on a computer that never set it up, uploads sessions in this workspace whose SessionEnd never fired, and announces this session. PostToolUse: after Read/Edit/Write, the file's System Model ref for the agent and, with saving on, the repository-relative path for live sessions; after system_model_fetch, how to use what it returned. UserPromptSubmit: when a prompt names a file path, a reminder to recall that file. No network call here. SessionEnd: hands the transcript to a background upload. Session saving does nothing until it is turned on (README: Session capture).",
   "hooks": {
     "PreToolUse": [
       {
@@ -76,19 +76,6 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/bonez-recall-hook.mjs\" claude",
             "timeout": 5
-          },
-          {
-            "type": "mcp_tool",
-            "server": "plugin:bonez:bonez",
-            "tool": "memory_recall",
-            "input": {
-              "message": "${prompt}",
-              "session": "${session_id}",
-              "format": "claude_user_prompt_submit"
-            },
-            "timeout": 3,
-            "once": true,
-            "statusMessage": "Loading Bonez context"
           }
         ]
       }

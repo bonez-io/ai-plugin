@@ -562,11 +562,20 @@ describe("standalone capture and memory hooks", () => {
 })
 
 describe("first-prompt seed (1SI-3585)", () => {
-  test("Claude fetches it with an mcp_tool hook on its own sign-in, once, within three seconds", () => {
+  test("Claude makes no Bonez call per prompt: the agent recalls once on its own sign-in, as the SessionStart context asks", () => {
+    // Claude Code honours `once` only in skill frontmatter, and `if` only on tool events
+    // (code.claude.com/docs/en/hooks, "Common fields"), so an mcp_tool UserPromptSubmit hook runs, and blocks,
+    // on every prompt. No hook of any kind calls a Bonez tool.
     const hooks = JSON.parse(read("", "hooks/hooks.json")).hooks
-    const seed = hooks.UserPromptSubmit.flatMap((g) => g.hooks).filter((h) => h.type === "mcp_tool")
-    assert.deepEqual(seed.map((h) => [h.server, h.tool, h.input, h.once, h.timeout <= 3]),
-      [["plugin:bonez:bonez", "memory_recall", { message: "${prompt}", session: "${session_id}", format: "claude_user_prompt_submit" }, true, true]])
+    const all = Object.values(hooks).flatMap((groups) => groups.flatMap((g) => g.hooks))
+    assert.deepEqual(all.filter((h) => h.type !== "command"), [])
+    assert.ok(all.every((h) => !("once" in h)), "`once` is ignored in a plugin's hooks.json")
+    const start = hooks.SessionStart.flatMap((g) => g.hooks).find((h) => /recall-hook/.test(h.command)).command
+    const out = spawnSync("bash", ["-c", start], {
+      cwd: REPO, encoding: "utf8", env: { ...process.env, CLAUDE_PLUGIN_ROOT: REPO },
+      input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "s-1" }),
+    })
+    assert.match(JSON.parse(out.stdout).hookSpecificOutput.additionalContext, /call memory_recall with \{\} once/)
   })
 
   for (const [leg, event, field] of [["codex", "UserPromptSubmit", "session_id"], ["cursor", "beforeSubmitPrompt", "conversation_id"]]) {

@@ -1,7 +1,8 @@
 // Most lookups are handed to the agent on the host's own MCP connection, which may not be ready
-// when a hook runs. The exception is the session seed on the first prompt: Claude Code fetches it
-// with an mcp_tool hook on its own sign-in (hooks/hooks.json). Codex and Cursor hooks can only run
-// commands, so for them this script fetches it (seed below), with a credential stored on this machine.
+// when a hook runs. In Claude Code all of them are: the SessionStart context asks the agent to call
+// memory_recall once on its own sign-in. (An mcp_tool UserPromptSubmit hook cannot run once per
+// session there, because `once` is honoured only in skill frontmatter, so it ran on every prompt.) Codex
+// and Cursor fetch the session seed on the first prompt here (seed below), with a credential stored on this machine.
 import { readFileSync, writeFileSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { homedir, tmpdir } from "node:os"
