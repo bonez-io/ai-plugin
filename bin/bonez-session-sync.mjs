@@ -428,6 +428,7 @@ function gatewaySource() {
   if (process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL) return "the plugin's server address option"
   if (process.env.BONEZ_GATEWAY_URL) return "BONEZ_GATEWAY_URL"
   if (process.env.BONEZ_MCP_URL) return "BONEZ_MCP_URL"
+  if (!gatewayBaseUrl().startsWith("https://gateway.bonez.io")) return "the setup page you paired with"
   return "the default"
 }
 
@@ -467,6 +468,11 @@ function gatewayBaseUrl() {
   if (process.env.BONEZ_GATEWAY_URL) return process.env.BONEZ_GATEWAY_URL.replace(/\/+$/, "")
   const mcpUrl = process.env.BONEZ_MCP_URL
   if (mcpUrl) return mcpUrl.replace(/\/mcp\/?$/, "")
+  // The gateway `connect` paired with (1SI-4098): its key is only good there. Codex and Cursor hooks have no
+  // plugin option naming the server, so without this a key from qa (or a local lab) would go to the default.
+  // Resolved without `dataDir()`, whose answer is cached for the process on first use.
+  const paired = readJsonSafe(join(resolveDataDir(process.env.CLAUDE_PLUGIN_DATA), "config.json"), {})?.gateway
+  if (typeof paired === "string" && captureGatewayAllowed(paired)) return paired.replace(/\/+$/, "")
   return "https://gateway.bonez.io"
 }
 
@@ -2245,7 +2251,7 @@ async function cmdConnect(rest) {
   if (typeof answer.key !== "string" || !answer.key.startsWith("bnz_")) {
     return fail("Session saving was turned on, but this computer did not get its key. Run this again.")
   }
-  const cfg = { enabled: true, scope: "global", repos: [], apiKey: answer.key, installedAt: new Date().toISOString(), via: "connect" }
+  const cfg = { enabled: true, scope: "global", repos: [], apiKey: answer.key, gateway: gatewayBaseUrl(), installedAt: new Date().toISOString(), via: "connect" }
   saveConfig(cfg)
   // The page already said it is on, so the next session start does not say it again. An offer
   // still in flight sees its pending link gone and stops.

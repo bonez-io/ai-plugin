@@ -2618,6 +2618,11 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.deepEqual(cfg.repos, [])
     assert.equal(cfg.apiKey, "bnz_connect_key_1")
     assert.equal(cfg.via, "connect")
+    // The key is only good on the gateway it was paired with, so the config names it: a Codex or Cursor hook
+    // has no plugin option saying which server, and must not send it to the default.
+    assert.equal(cfg.gateway, gw.url)
+    const st = await runCli(["status"], { env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "" } })
+    assert.match(st.stdout, new RegExp(`gateway: {2}${gw.url.replaceAll(".", "\\.")}`))
     assert.ok(cfg.installedAt)
     assert.equal((statSync(join(store(home), "config.json")).mode & 0o777).toString(8), "600")
     assert.equal(gw.calls.presign.length, 2)
