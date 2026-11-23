@@ -530,9 +530,9 @@ async function cmdHook(agent, event) {
     // never installed, or explicitly disabled. Settings left in a folder the hook no longer
     // reads are neither: say so, once a day.
     if (claudeStart && !cfg && strandedSettings().length) notifyOnce("stranded", "Bonez session capture is set up, but its settings are in an older folder this plugin no longer reads, so nothing uploads.")
-    // Never set up on this machine: offer it (1SI-4098). A config that exists but is off is a
-    // choice someone made, and is left alone.
-    else if (!cfg && event === "session-start") await offerCapture(agent)
+    // Never set up on this machine: open the setup page once, then offer it on later starts
+    // (1SI-4098). A config that exists but is off is a choice someone made, and is left alone.
+    else if (!cfg && event === "session-start" && !(await openConnectOnce(agent))) await offerCapture(agent)
     return
   }
 
@@ -699,7 +699,7 @@ function isSidechainTranscript(path) {
 
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
-function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId }) {
+function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId, since = 0 }) {
   if (!root || !existsSync(root)) return []
   const files = walkFiles(root, (p) => p.endsWith(".jsonl") && match(p)).filter(
     (p) => !excludeId || !p.endsWith(`${excludeId}.jsonl`),
@@ -722,6 +722,7 @@ function staleTranscriptTargets(root, { excludeId, state, cap, match = () => tru
       // come back as often as it actually changes; uploadOne's own content-hash check then
       // drops the ones where the mtime moved but the content did not.
       if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      if (mtime < since) return null // older than the caller asked for (`backfill --since-days`)
       if (Date.now() - mtime < CATCHUP_QUIET_MS) return null // probably still running
       if (isSidechainTranscript(p)) return null // read only for the stale ones
       return { transcriptPath: p, sessionId: id, mtime }
@@ -780,8 +781,8 @@ function findClaudeCatchupTargets(currentSessionId, workspaceRoot, state) {
 // `backfill` sweeps EVERY project directory, not just the current workspace — the whole point
 // is the history a per-workspace drip can never reach. Same staleness rule, no cap here (the
 // caller batches), and no current session to exclude.
-function findClaudeBackfillTargets(state) {
-  return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0 })
+function findClaudeBackfillTargets(state, since = 0) {
+  return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0, since })
 }
 
 // A transcript's session id is its file name, except for Codex, whose rollout files are named
@@ -794,14 +795,23 @@ const codexTranscriptId = (p) => transcriptId(p).match(UUID_TAIL_RE)?.[1] ?? tra
 // Every harness's history, for `backfill` (1SI-4098). Cursor keeps other files under projects/,
 // so only its agent-transcripts count.
 const BACKFILL_AGENTS = ["claude", "codex", "cursor"]
-function findBackfillTargets(agent, state) {
-  if (agent === "claude") return findClaudeBackfillTargets(state)
+function findBackfillTargets(agent, state, since = 0) {
+  if (agent === "claude") return findClaudeBackfillTargets(state, since)
   if (agent === "codex") {
-    return staleTranscriptTargets(join(paths.codexHome, "sessions"), { excludeId: null, state, cap: 0, idOf: codexTranscriptId })
+    return staleTranscriptTargets(join(paths.codexHome, "sessions"), { excludeId: null, state, cap: 0, idOf: codexTranscriptId, since })
   }
   return staleTranscriptTargets(join(HOME, ".cursor", "projects"), {
-    excludeId: null, state, cap: 0, match: (p) => /[\\/]agent-transcripts[\\/]/.test(p),
+    excludeId: null, state, cap: 0, match: (p) => /[\\/]agent-transcripts[\\/]/.test(p), since,
   })
+}
+
+// Every harness's backfill targets in one list, newest first.
+function allBackfillTargets(agents, state, since = 0) {
+  const perAgent = agents.map((agent) => ({ agent, targets: findBackfillTargets(agent, state, since) }))
+  const targets = perAgent
+    .flatMap(({ agent, targets: ts }) => ts.map((t) => ({ ...t, agent })))
+    .sort((a, b) => b.mtime - a.mtime)
+  return { perAgent, targets }
 }
 
 // ------------------------------------------------------------------- credential (key or OAuth)
@@ -1359,6 +1369,7 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   await log(
     `upload: session=${dedupKey} agent=${agent} messages=${messageCount} redactions=${scrubReport.total} bytes=${gz.length} upload_id=${pre.json.upload_id} OK`,
   )
+  return true
 }
 
 async function cmdUpload(agent, event, payloadFile) {
@@ -2015,6 +2026,294 @@ function cmdDecline() {
   console.log("bonez session capture: off, and Bonez will not ask again. Turn it on any time with `login --global`.")
 }
 
+// -------------------------------------------------------------------------------- connect (1SI-4098)
+
+// The setup page in the browser and this machine share a pairing (specs/plugin-connect/CONTRACT.md in
+// the workspace): `connect` creates it, the person signs in and answers on the page, and `connect`
+// picks the answer up here: a sessions key to save, and whether to add the recent sessions too.
+const CONNECT_RECENT_DAYS = 14
+const CONNECT_TOOL_IDS = ["claude-code", "codex", "cursor", "opencode", "claude-app"]
+const CONNECT_OPENERS = new Set(["claude-code", "codex", "cursor", "opencode", "installer"])
+const CONNECT_OPENER_FOR = { claude: "claude-code", codex: "codex", cursor: "cursor" }
+const CONNECT_MAX_POLL_ERRORS = 10
+const CONNECT_HTTP_TIMEOUT_MS = 15_000
+// Only so the tests need not wait the server's two seconds a poll.
+const _parsedConnectPoll = Number.parseInt(process.env.BONEZ_CONNECT_POLL_MS ?? "", 10)
+const CONNECT_POLL_MS = Number.isFinite(_parsedConnectPoll) && _parsedConnectPoll > 0 ? _parsedConnectPoll : undefined
+
+const newNonce = () => createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+
+function onPath(name) {
+  const win = process.platform === "win32"
+  for (const dir of (process.env.PATH ?? "").split(win ? ";" : ":")) {
+    if (!dir) continue
+    for (const ext of win ? ["", ".exe", ".cmd", ".bat"] : [""]) if (existsSync(join(dir, name + ext))) return true
+  }
+  return false
+}
+
+// The tools on this machine the setup page lists. BONEZ_CONNECT_TOOLS=claude-code,codex replaces the
+// detection (tests; an empty value means none).
+function detectTools() {
+  const override = process.env.BONEZ_CONNECT_TOOLS
+  let ids
+  if (override !== undefined) {
+    ids = override.split(",").map((s) => s.trim()).filter((s) => CONNECT_TOOL_IDS.includes(s))
+  } else {
+    const home = homedir()
+    const localAppData = process.env.LOCALAPPDATA
+    const found = {
+      "claude-code": existsSync(join(home, ".claude")) || onPath("claude"),
+      codex: Boolean(process.env.CODEX_HOME && existsSync(process.env.CODEX_HOME)) || existsSync(join(home, ".codex")),
+      cursor: existsSync(join(home, ".cursor")),
+      opencode: existsSync(join(home, ".config", "opencode")) || onPath("opencode"),
+      "claude-app":
+        process.platform === "darwin"
+          ? existsSync("/Applications/Claude.app") || existsSync(join(home, "Applications", "Claude.app"))
+          : process.platform === "win32" && Boolean(localAppData && existsSync(join(localAppData, "AnthropicClaude"))),
+    }
+    ids = CONNECT_TOOL_IDS.filter((id) => found[id])
+  }
+  return [...new Set(ids)].map((id) => ({ id, installed: true }))
+}
+
+// The version of the plugin this script ships in (any of its three manifests).
+function pluginVersion() {
+  for (const dir of [".claude-plugin", ".codex-plugin", ".cursor-plugin"]) {
+    const v = readJsonSafe(join(SELF_PATH, "..", "..", dir, "plugin.json"), null)?.version
+    if (typeof v === "string") return v
+  }
+  return undefined
+}
+
+// The page link comes from the server and goes to a shell command, so only a plain http(s) link is opened.
+function safeBrowserUrl(u) {
+  try {
+    const p = new URL(u)
+    return (p.protocol === "https:" || p.protocol === "http:") && /^[A-Za-z0-9:/?#=&.,_~%+-]+$/.test(u)
+  } catch {
+    return false
+  }
+}
+
+function openInBrowser(url) {
+  let cmd = "xdg-open"
+  let args = [url]
+  if (process.platform === "darwin") cmd = "open"
+  else if (process.platform === "win32") {
+    // `start`'s first quoted argument is a window title; `&` would end the command in cmd.
+    cmd = "cmd"
+    args = ["/c", "start", '""', url.replace(/&/g, "^&")]
+  } else if (!onPath("xdg-open")) return false
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: process.platform === "win32" })
+    child.on("error", () => {})
+    child.unref()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function parseConnectArgs(rest) {
+  const o = { opener: "installer", open: process.env.BONEZ_CONNECT_NO_OPEN !== "1", detach: false, quiet: false, nonce: undefined }
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]
+    if (a === "--opener") o.opener = rest[++i]
+    else if (a.startsWith("--opener=")) o.opener = a.slice("--opener=".length)
+    else if (a === "--no-open") o.open = false
+    else if (a === "--detach") o.detach = true
+    else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
+    else if (a === "--nonce") o.nonce = rest[++i]
+  }
+  if (!CONNECT_OPENERS.has(o.opener)) o.opener = "installer"
+  return o
+}
+
+function startConnectWorker({ opener, open = true, nonce }) {
+  return spawnWorker(["connect", "--quiet", "--opener", opener, ...(open ? [] : ["--no-open"]), ...(nonce ? ["--nonce", nonce] : [])])
+}
+
+// What the detached child tells the hook that started it (by nonce): the page link, or that it failed.
+function markConnect(nonce, fields) {
+  if (!nonce) return
+  const state = readOptin()
+  if (state.connect?.nonce === nonce) writeOptin({ ...state, connect: { ...state.connect, ...fields } })
+}
+
+async function cmdConnect(rest) {
+  const o = parseConnectArgs(rest)
+  if (o.detach) {
+    if (!startConnectWorker(o)) {
+      console.error("Could not start the Bonez setup in the background.")
+      process.exitCode = 1
+    }
+    return
+  }
+  const say = o.quiet ? (line) => log(`connect: ${line}`) : async (line) => console.log(line)
+  const fail = async (line) => {
+    markConnect(o.nonce, { error: line })
+    if (o.quiet) await log(`connect: ${line}`)
+    else console.error(line)
+    process.exitCode = 1
+  }
+
+  const base = gatewayBaseUrl()
+  if (!captureGatewayAllowed(base)) {
+    if (o.quiet) return fail("not a Bonez-operated gateway")
+    markConnect(o.nonce, { error: "not a Bonez-operated gateway" })
+    refuseForeignGateway("connect")
+    return
+  }
+
+  const since = Date.now() - CONNECT_RECENT_DAYS * DAY_MS
+  const recent = allBackfillTargets(BACKFILL_AGENTS, loadState(), since).targets.length
+  let pairing
+  try {
+    const res = await fetchJson(`${base}/connect/pairings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        opener: o.opener,
+        tools: detectTools(),
+        recent_sessions: Math.min(recent, 10_000),
+        host: hostname().slice(0, 64),
+        ...(pluginVersion() && { plugin_version: pluginVersion() }),
+      }),
+      signal: AbortSignal.timeout(CONNECT_HTTP_TIMEOUT_MS),
+    })
+    if (res.status === 404) throw new Error("this Bonez server does not offer the setup page yet")
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (typeof res.json.code !== "string" || typeof res.json.secret !== "string" || !safeBrowserUrl(res.json.url)) {
+      throw new Error("the server's answer was not understood")
+    }
+    pairing = res.json
+  } catch (err) {
+    const why = err?.host ? `could not reach ${err.host}` : err instanceof Error ? err.message : String(err)
+    return fail(`Could not start the Bonez setup: ${why}.`)
+  }
+
+  const { url, code, secret } = pairing
+  const expiresAt = Number(pairing.expires_at) > 0 ? Number(pairing.expires_at) * 1000 : Date.now() + 30 * 60_000
+  // Opened once per machine: the session-start hook does not open another page after this.
+  const optin = readOptin()
+  writeOptin({ ...optin, connectOpenedAt: optin.connectOpenedAt ?? Date.now() })
+  markConnect(o.nonce, { url, expiresAt })
+  const opened = o.open && openInBrowser(url)
+  await say(opened ? `Opened the Bonez setup page in your browser: ${url}` : `Open this page in your browser to finish setting up Bonez: ${url}`)
+  await say("Waiting for you in the browser…")
+
+  const intervalMs = CONNECT_POLL_MS ?? Math.max(1, Number(pairing.poll_interval) || 2) * 1000
+  let last = "waiting"
+  let errors = 0
+  let answer
+  for (;;) {
+    if (Date.now() > expiresAt + intervalMs) return fail("The setup link expired. Run this again to get a new one.")
+    await sleep(intervalMs)
+    let res
+    try {
+      res = await fetchJson(`${base}/connect/pairing-result`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code, secret }),
+        signal: AbortSignal.timeout(CONNECT_HTTP_TIMEOUT_MS),
+      })
+    } catch {
+      res = undefined
+    }
+    if (res?.status === 404) return fail("The setup link is no longer valid. Run this again to get a new one.")
+    if (!res?.ok) {
+      if (++errors >= CONNECT_MAX_POLL_ERRORS) return fail("Lost contact with Bonez while waiting. Run this again.")
+      continue
+    }
+    errors = 0
+    const status = res.json.status
+    if (status === "expired") return fail("The setup link expired. Run this again to get a new one.")
+    if (status === "answered") {
+      answer = res.json.sessions ?? {}
+      break
+    }
+    if (status === "claimed" && last !== "claimed") await say("You're signed in. Finish the steps in your browser…")
+    if (typeof status === "string") last = status
+  }
+
+  if (!answer.on) {
+    markConnect(o.nonce, { result: "off" })
+    await say("Session saving stays off. You can turn it on later with /bonez:capture on.")
+    return
+  }
+  if (typeof answer.key !== "string" || !answer.key.startsWith("bnz_")) {
+    return fail("Session saving was turned on, but this computer did not get its key. Run this again.")
+  }
+  const cfg = { enabled: true, scope: "global", repos: [], apiKey: answer.key, installedAt: new Date().toISOString(), via: "connect" }
+  saveConfig(cfg)
+  // The page already said it is on, so the next session start does not say it again. An offer
+  // still in flight sees its pending link gone and stops.
+  const { declinedAt: _no, pending: _offer, ...state } = readOptin()
+  writeOptin({ ...state, enabledAt: Date.now(), announcedAt: Date.now() })
+  markConnect(o.nonce, { result: "on" })
+  await say("Session saving is on.")
+
+  if (answer.backfill) {
+    if (disabledByEnv()) {
+      await say("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
+    } else {
+      const { targets } = allBackfillTargets(BACKFILL_AGENTS, loadState(), since)
+      if (!targets.length) await say("No recent sessions to add.")
+      else {
+        const n = targets.length
+        const head = `Adding ${n} recent session${n === 1 ? "" : "s"}…`
+        const live = !o.quiet && process.stdout.isTTY
+        if (live) process.stdout.write(`${head} 0/${n}`)
+        let added = 0
+        for (const t of targets) {
+          try {
+            if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) added++
+          } catch (err) {
+            await log(`connect: backfill ${t.sessionId} failed — ${err instanceof Error ? err.message : String(err)}`)
+          }
+          if (live) process.stdout.write(`\r${head} ${added}/${n}`)
+        }
+        if (live) process.stdout.write("\n")
+        else await say(`${head} ${added}/${n}`)
+        if (added < n) await say(`${n - added} were skipped or failed (see ${logFilePath()}). Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+      }
+    }
+  }
+  await say("All set. You can close the setup page.")
+}
+
+// Hook path, on a machine with no capture settings: open the setup page once (a detached
+// `connect`), and say so in one line. Returns false when it did not run, so the offer can.
+async function openConnectOnce(agent) {
+  if (process.env.BONEZ_CAPTURE_OFFER === "0") return false
+  const state = readOptin()
+  if (state.connectOpenedAt || state.declinedAt || state.enabledAt) return false
+  if (!captureGatewayAllowed(gatewayBaseUrl())) return false
+  const nonce = newNonce()
+  writeOptin({ ...state, connectOpenedAt: Date.now(), connect: { nonce } })
+  if (!startConnectWorker({ opener: CONNECT_OPENER_FOR[agent] ?? "installer", nonce })) {
+    const { connectOpenedAt: _at, connect: _c, ...rest } = readOptin()
+    writeOptin(rest)
+    return false
+  }
+  let url
+  const deadline = Date.now() + OFFER_WAIT_MS
+  while (Date.now() < deadline) {
+    await sleep(100)
+    const c = readOptin().connect
+    if (c?.nonce !== nonce) break
+    if (c.url) {
+      url = c.url
+      break
+    }
+    if (c.error) return true // nothing to say; a later start offers capture instead
+  }
+  const lead = "Bonez opened a setup page in your browser to finish connecting."
+  emitNotice(agent, url ? `${lead} If it did not open: ${url}` : `${lead} If it did not open, run ${captureCmd(agent, "on")}`)
+  return true
+}
+
 // -------------------------------------------------------------------------------- human-facing commands
 
 function parseInstallArgs(rest) {
@@ -2170,6 +2469,14 @@ async function cmdBackfill(rest) {
     return
   }
   const agents = agentArg ? [agentArg] : BACKFILL_AGENTS
+  const sinceArg = args.find((a) => a.startsWith("--since-days="))
+  const sinceDays = sinceArg ? Number.parseInt(sinceArg.slice("--since-days=".length), 10) : 0
+  if (sinceArg && !(Number.isFinite(sinceDays) && sinceDays > 0)) {
+    console.error("--since-days must be a whole number of days, 1 or more")
+    process.exitCode = 1
+    return
+  }
+  const since = sinceDays ? Date.now() - sinceDays * DAY_MS : 0
 
   if (disabledByEnv()) {
     console.error("BONEZ_SESSION_SYNC=0 is set — unset it before running a backfill.")
@@ -2184,12 +2491,8 @@ async function cmdBackfill(rest) {
   }
 
   // One list across every harness, newest first, so a run sends the most recent work wherever it ran.
-  const state = loadState()
   const names = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" }
-  const perAgent = agents.map((agent) => ({ agent, targets: findBackfillTargets(agent, state) }))
-  const targets = perAgent
-    .flatMap(({ agent, targets: ts }) => ts.map((t) => ({ ...t, agent })))
-    .sort((a, b) => b.mtime - a.mtime)
+  const { perAgent, targets } = allBackfillTargets(agents, loadState(), since)
   if (!targets.length) {
     console.log("Nothing to backfill: every session on this machine is already uploaded at its current content.")
     return
@@ -2359,6 +2662,17 @@ async function main() {
     case "on":
       await cmdOn()
       break
+    case "connect":
+      try {
+        await cmdConnect(rest)
+      } catch (err) {
+        if (rest.includes("--quiet")) await log(`connect: ${err instanceof Error ? err.message : String(err)}`)
+        else console.error(`Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`)
+        process.exitCode = 1
+      }
+      // An idle keep-alive socket would hold the process open for seconds after the last line.
+      process.exit(process.exitCode ?? 0)
+      break
     case "_upload":
       try {
         await cmdUpload(rest[0], rest[1], rest[2])
@@ -2400,6 +2714,8 @@ async function main() {
       console.log("bonez-session-sync — capture Claude Code, Codex and Cursor sessions into bonez")
       console.log("")
       console.log("usage:")
+      console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach]")
+      console.log("                                                                  set up Bonez in the browser")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
       console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")
@@ -2409,7 +2725,7 @@ async function main() {
       console.log("  bonez-session-sync.mjs status")
       console.log("  bonez-session-sync.mjs disable")
       console.log("  bonez-session-sync.mjs enable")
-      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N] [--agent=claude|codex|cursor]")
+      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N] [--agent=claude|codex|cursor] [--since-days=N]")
       console.log("                                                                  upload past sessions")
       process.exitCode = cmd ? 1 : 0
   }
@@ -2458,6 +2774,8 @@ export {
   cursorProjectSlug,
   claudeProjectSlug,
   cmdBackfill,
+  detectTools,
+  safeBrowserUrl,
   gatewayBaseUrl,
   recordUpload,
   withStateLock,

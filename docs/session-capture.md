@@ -15,9 +15,31 @@ You need the Bonez plugin installed and signed in first: <https://gateway.bonez.
 
 ## 1. Turn it on
 
-### The easy way: say yes to the offer
+### The easiest way: the setup page
 
-The first time you start a session after installing or updating the plugin, Bonez shows one line:
+The first time you start a session on a machine where capture was never set up, Bonez opens a setup
+page in your browser and shows one line:
+
+> Bonez opened a setup page in your browser to finish connecting. If it did not open: <link>
+
+On the page, sign in, check which of your tools are connected, and choose whether to save your sessions
+and whether to add the sessions from the last 14 days. Your computer picks up the answer by itself: with
+"Turn on", capture is on for every repo and the recent sessions are sent in the background. The page
+opens only once per machine. If you close it, the later starts offer the link described below instead.
+
+You can also run the setup page from a terminal, and watch it finish:
+
+```
+node <plugin folder>/bin/bonez-session-sync.mjs connect
+```
+
+It prints the page's link, waits while you answer, then says "Session saving is on." and, if you chose
+it, "Adding 37 recent sessions… 37/37". Add `--no-open` to only print the link. The link works for 30
+minutes. The install script runs this at its end.
+
+### Or say yes to the offer
+
+On later session starts, while capture is still off, Bonez shows one line:
 
 > Bonez can save your coding sessions to your team's Bonez, so it learns from them … Turn it on with one
 > click: https://auth.bonez.io/activate?user_code=… — Not now: ignore this. Never: /bonez:capture off
@@ -105,7 +127,8 @@ Sessions from before capture was on are not sent unless you ask. Look first, the
 - `/bonez:capture off` (Cursor: `/bonez-capture off`, terminal: `bonez-session-sync.mjs decline`):
   off, and Bonez stops asking.
 - `BONEZ_SESSION_SYNC=0` in your environment: off for that shell, settings kept.
-- `BONEZ_CAPTURE_OFFER=0`: never show the offer (for CI and shared machines).
+- `BONEZ_CAPTURE_OFFER=0`: never open the setup page or show the offer (for CI and shared machines).
+- `BONEZ_CONNECT_NO_OPEN=1`: `connect` prints the setup link instead of opening the browser.
 
 ## 4. If something is wrong
 

@@ -2390,8 +2390,11 @@ describe("a sign-in issued by one gateway is never sent to another", () => {
 })
 
 describe("capture offer: one click turns capture on (1SI-4098)", () => {
+  // The offer is what later starts show, once the setup page was opened (see the connect tests).
   const offerEnv = (as, extra = {}) => {
     const home = freshDir("offer")
+    mkdirSync(join(home, ".bonez", "session-sync"), { recursive: true })
+    writeFileSync(join(home, ".bonez", "session-sync", "optin.json"), JSON.stringify({ connectOpenedAt: 1 }))
     return {
       home,
       env: {
@@ -2407,7 +2410,8 @@ describe("capture offer: one click turns capture on (1SI-4098)", () => {
     runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "offer-1", cwd: "/tmp/offer", source: "startup" }) })
 
   test("never set up: one line with the approval link, then capture is on once approved, said once", async () => {
-    const as = await startStubOAuth({ pendingPolls: 2 })
+    // Approval after 40 polls of 50ms: late enough that the second start below is still "pending".
+    const as = await startStubOAuth({ pendingPolls: 40 })
     try {
       const { home, env } = offerEnv(as)
       const first = await start("claude", env)
@@ -2458,9 +2462,9 @@ describe("capture offer: one click turns capture on (1SI-4098)", () => {
     try {
       const { home, env } = offerEnv(as)
       mkdirSync(store(home), { recursive: true })
-      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ shown: 3, lastShownAt: Date.now() - 2 * 86_400_000 }))
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ connectOpenedAt: 1, shown: 3, lastShownAt: Date.now() - 2 * 86_400_000 }))
       assert.equal((await start("claude", env)).stdout, "")
-      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ shown: 3, lastShownAt: Date.now() - 8 * 86_400_000 }))
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ connectOpenedAt: 1, shown: 3, lastShownAt: Date.now() - 8 * 86_400_000 }))
       assert.match(JSON.parse((await start("claude", env)).stdout).systemMessage, /Turn it on with one click/)
     } finally {
       await as.close()
@@ -2541,5 +2545,187 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
     assert.match(only.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Codex: 1/)
     const bad = await runCli(["backfill", "--agent=vim"], { env })
     assert.equal(bad.status, 1)
+    const recent = await runCli(["backfill", "--dry-run", "--since-days=2"], { env })
+    assert.match(recent.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Cursor: 1/)
+    assert.equal((await runCli(["backfill", "--since-days=0"], { env })).status, 1)
+  })
+})
+
+describe("connect: the setup page in the browser and this machine share a pairing (1SI-4098)", () => {
+  let gw
+  before(async () => {
+    gw = await startStubGateway()
+  })
+  after(async () => {
+    await gw.close()
+  })
+  // A fresh pairing script and call record per test.
+  const reset = (pairing) => {
+    for (const k of Object.keys(gw.calls)) gw.calls[k].length = 0
+    gw.answers.pairing = { create: 201, steps: ["waiting"], sessions: null, code: "K7QM-4XPA", secret: "s3cret-poll-token", ...pairing }
+  }
+  const connectEnv = (extra = {}) => {
+    const home = freshDir("connect")
+    return {
+      home,
+      env: {
+        HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "", CODEX_HOME: join(home, ".codex"),
+        BONEZ_GATEWAY_URL: gw.url, BONEZ_CONNECT_NO_OPEN: "1", BONEZ_CONNECT_POLL_MS: "50",
+        BONEZ_CONNECT_TOOLS: "claude-code,codex,vim", BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0", ...extra,
+      },
+    }
+  }
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const readStore = (home, f) => (existsSync(join(store(home), f)) ? JSON.parse(readFileSync(join(store(home), f), "utf8")) : undefined)
+  const put = (path, fixture, ageMs) => {
+    mkdirSync(dirname(path), { recursive: true })
+    cpSync(join(FIXTURES, fixture), path)
+    const t = new Date(Date.now() - ageMs)
+    utimesSync(path, t, t)
+  }
+  const history = (home) => {
+    put(join(home, ".claude", "projects", "-work-api", "claude-recent.jsonl"), "claude-transcript.jsonl", 2 * 86_400_000)
+    put(join(home, ".codex", "sessions", "2026", "11", "20", "rollout-2026-11-20T10-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl"), "codex-rollout.jsonl", 3 * 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-old", "cur-old.jsonl"), "cursor-transcript.jsonl", 20 * 86_400_000)
+  }
+  const pairUrl = () => `${gw.url}/connect?pair=K7QM-4XPA`
+
+  test("answer on + backfill: the key is saved and the last 14 days are uploaded", async () => {
+    reset({ steps: ["waiting", "claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_1" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect", "--opener", "claude-code"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    const created = gw.calls.pairings[0].body
+    assert.equal(created.opener, "claude-code")
+    assert.deepEqual(created.tools, [{ id: "claude-code", installed: true }, { id: "codex", installed: true }])
+    assert.equal(created.recent_sessions, 2)
+    assert.equal(typeof created.host, "string")
+    assert.equal(created.plugin_version, JSON.parse(readFileSync(join(REPO_ROOT, ".claude-plugin", "plugin.json"), "utf8")).version)
+    assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
+    assert.equal(gw.calls.pairingResult.length, 3)
+    assert.deepEqual(res.stdout.trim().split("\n"), [
+      `Open this page in your browser to finish setting up Bonez: ${pairUrl()}`,
+      "Waiting for you in the browser…",
+      "You're signed in. Finish the steps in your browser…",
+      "Session saving is on.",
+      "Adding 2 recent sessions… 2/2",
+      "All set. You can close the setup page.",
+    ])
+    const cfg = readStore(home, "config.json")
+    assert.equal(cfg.enabled, true)
+    assert.equal(cfg.scope, "global")
+    assert.deepEqual(cfg.repos, [])
+    assert.equal(cfg.apiKey, "bnz_connect_key_1")
+    assert.equal(cfg.via, "connect")
+    assert.ok(cfg.installedAt)
+    assert.equal((statSync(join(store(home), "config.json")).mode & 0o777).toString(8), "600")
+    assert.equal(gw.calls.presign.length, 2)
+    assert.ok(gw.calls.presign.every((c) => c.headers.authorization === "Bearer bnz_connect_key_1"))
+    assert.deepEqual(gw.calls.presign.map((c) => c.body.agent).sort(), ["claude-code", "codex"])
+    const optin = readStore(home, "optin.json")
+    assert.ok(optin.connectOpenedAt && optin.enabledAt && optin.announcedAt)
+  })
+
+  test("answer off: nothing saved, nothing sent", async () => {
+    reset({ steps: ["claimed", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect", "--no-open"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.opener, "installer")
+    assert.match(res.stdout, /Session saving stays off\./)
+    assert.equal(readStore(home, "config.json"), undefined)
+    assert.equal(gw.calls.presign.length, 0)
+  })
+
+  test("on without backfill saves the key and sends nothing", async () => {
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_connect_key_2" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_2")
+    assert.equal(gw.calls.presign.length, 0)
+    assert.doesNotMatch(res.stdout, /Adding/)
+  })
+
+  test("an expired link, an unknown pairing, a server without the route, or a foreign gateway: one line, non-zero", async () => {
+    reset({ steps: ["waiting", "expired"] })
+    let { home, env } = connectEnv()
+    let res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup link expired. Run this again to get a new one.")
+    assert.equal(readStore(home, "config.json"), undefined)
+
+    // The stub hands out one secret and checks another: the poll is a 404.
+    reset({ issuedSecret: "not-the-one-it-checks" })
+    ;({ env } = connectEnv())
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup link is no longer valid. Run this again to get a new one.")
+
+    reset({ create: 404 })
+    ;({ env } = connectEnv())
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "Could not start the Bonez setup: this Bonez server does not offer the setup page yet.")
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_GATEWAY_URL: "https://bonez.example.com" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.match(res.stderr, /refusing `connect`/)
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("--detach returns at once; the child finishes in the background and writes only to sync.log", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: true, backfill: false, key: "bnz_connect_key_3" } })
+    const { home, env } = connectEnv()
+    const res = await runCli(["connect", "--detach", "--opener", "codex"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 2000, `connect --detach took ${res.ms}ms`)
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_3")
+    assert.equal(gw.calls.pairings[0].body.opener, "codex")
+    await waitFor(() => readFileSync(join(store(home), "sync.log"), "utf8").includes("connect: All set."), { timeoutMs: 4000 })
+    const log = readFileSync(join(store(home), "sync.log"), "utf8")
+    assert.ok(log.includes(`connect: Open this page in your browser to finish setting up Bonez: ${pairUrl()}`), log)
+    assert.ok(log.includes("connect: Session saving is on."), log)
+    assert.ok(!log.includes("bnz_connect_key_3"), "the key is never logged")
+  })
+
+  test("session start with nothing set up opens the page once and says so; later starts do not", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv({ BONEZ_CAPTURE_OFFER: "", BONEZ_OAUTH_CLIENT_ID: "" })
+    const start = (agent) =>
+      runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-1", cwd: "/tmp/c" }) })
+    const first = await start("claude")
+    assert.ok(first.ms < 4500, `hook took ${first.ms}ms`)
+    assert.equal(
+      JSON.parse(first.stdout).systemMessage,
+      `Bonez opened a setup page in your browser to finish connecting. If it did not open: ${pairUrl()}`,
+    )
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairings[0].body.opener, "claude-code")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+    await waitFor(() => gw.calls.pairingResult.length >= 2, { timeoutMs: 4000 })
+    assert.equal((await start("claude")).stdout, "")
+    assert.equal((await start("cursor")).stdout, "")
+    assert.equal(gw.calls.pairings.length, 1)
+  })
+
+  test("the hook says nothing when the server has no setup page, or with BONEZ_CAPTURE_OFFER=0", async () => {
+    reset({ create: 404 })
+    const { home, env } = connectEnv({ BONEZ_CAPTURE_OFFER: "", BONEZ_OAUTH_CLIENT_ID: "" })
+    const input = JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-2", cwd: "/tmp/c" })
+    const res = await runCli(["hook", "codex", "session-start"], { env, input })
+    assert.equal(res.stdout, "")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+    const off = connectEnv({ BONEZ_CAPTURE_OFFER: "0" })
+    assert.equal((await runCli(["hook", "claude", "session-start"], { env: off.env, input })).stdout, "")
+    assert.equal(readStore(off.home, "optin.json"), undefined)
+    assert.equal(gw.calls.pairings.length, 1)
   })
 })

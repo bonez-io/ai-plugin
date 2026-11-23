@@ -419,12 +419,26 @@ Your Claude Code, Codex and Cursor conversations already hold everything the har
 learns from — what you tried, what broke, what you decided. This plugin can capture them into the same
 `bonez` System Model the desktop app's manual "Import history" feature feeds, so the org
 learns from them too. It is **off until you say yes**: on a machine where it was never set up, a
-session start offers it once, with a link. One click in the browser turns it on for every repo on
+session start opens a setup page in the browser once. One click there turns it on for every repo on
 the machine. The step-by-step guide, with a test of both backfill and live capture, is
 [docs/session-capture.md](docs/session-capture.md).
 
-**The offer (Claude Code, Codex, Cursor).** When no capture settings exist on the machine, a session
-start shows one line: "Bonez can save your coding sessions to your team's Bonez … Turn it on with one
+**The setup page (`connect`).** `bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach]`
+asks the Bonez server for a one-time setup link, opens it in the browser (`open`, `xdg-open` or
+`start`; `--no-open` or `BONEZ_CONNECT_NO_OPEN=1` only prints it), and waits up to 30 minutes for the
+answer. The page lists the tools found on this machine (Claude Code, Codex, Cursor, OpenCode, the Claude
+app) and how many sessions from the last 14 days could be added. When the person turns session saving
+on there, the server hands this machine a sessions-only key once; `connect` saves it like
+`install <key> --global` and, if they asked for it, uploads the last 14 days' sessions
+(`backfill --since-days=14` does the same by hand). "Not now" saves nothing. `--detach` runs all of
+this in a background process that writes only to `sync.log`. The first session start on a machine with
+no capture settings runs `connect --detach` once and shows "Bonez opened a setup page in your browser to
+finish connecting. If it did not open: <link>"; it never runs again on that machine, after `decline`,
+with `BONEZ_CAPTURE_OFFER=0`, or for a server capture does not serve. If the server has no setup page
+(an older gateway), nothing is shown and the offer below takes over.
+
+**The offer (Claude Code, Codex, Cursor).** When no capture settings exist on the machine and the
+setup page was already opened once, a session start shows one line: "Bonez can save your coding sessions to your team's Bonez … Turn it on with one
 click: <link> — Not now: ignore this. Never: /bonez:capture off". A background process has already
 started the same device sign-in `login` uses; approving the link is all it takes, and the next
 session start says "Bonez session capture is on" once. It asks at most once a day for the first three
