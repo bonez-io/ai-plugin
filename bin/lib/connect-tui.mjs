@@ -14,19 +14,9 @@
 
 const ESC = "\x1b["
 
-// The Bonez mark (`Mark` in bonez-core libs/ui/src/components/logo.tsx, viewBox 0 0 20 25) and the wordmark
-// (`Logo`, 0 0 154 34), drawn in quadrant blocks by scripts/terminal-mark.mjs from the SVG paths: 7 rows for
-// the mark, 4 for the wordmark (at 3 rows its letters do not read). Regenerate with that script when the logo
-// changes, and copy the --sh form into install.sh.
-export const MARK = [
-  "▐██▄▄  ▄▄██▌",
-  "   ▜█▌▐█▛",
-  "▗▄██▛▘▝▜██▄▖",
-  "▐█        █▌",
-  "▝▀██▙▖▗▟██▀▘",
-  "   ▟█▌▐█▙",
-  "▐██▀▀  ▀▀██▌",
-]
+// The Bonez wordmark, the mark and "bonez" (`Logo` in bonez-core libs/ui/src/components/logo.tsx, viewBox
+// 0 0 154 34), drawn in quadrant blocks by scripts/terminal-mark.mjs from its SVG paths, 4 rows tall (at 3 its
+// letters do not read). Regenerate with that script when the logo changes, and copy the --sh form into install.sh.
 export const WORDMARK = [
   "▝▀▙▄▟▛▘ ▐▌",
   "▗█▀ ▀█▖ ▐█▀▀▜▄ ▟▛▀▜▄▗█▞▀▜▙▗▟▀▀█▖▀▀▀█▌",
@@ -55,14 +45,9 @@ export function terminalCaps({ stream = process.stdout, env = process.env, platf
   }
 }
 
-// Which header: the mark beside the word (the default) or the drawn wordmark (BONEZ_TUI=wordmark).
-export function headerStyle(env = process.env) {
-  return env.BONEZ_TUI === "wordmark" ? "wordmark" : "mark"
-}
-
 const GLYPHS = {
-  unicode: { done: "✓", failed: "✗", skipped: "–", todo: "·", spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], full: "━", empty: "─", box: ["╭", "╮", "╰", "╯", "─", "│"], ellipsis: "…", sep: "›", out: "↗" },
-  ascii: { done: "+", failed: "x", skipped: "-", todo: ".", spinner: ["|", "/", "-", "\\"], full: "=", empty: "-", box: ["+", "+", "+", "+", "-", "|"], ellipsis: "...", sep: ">", out: "" },
+  unicode: { done: "✓", failed: "✗", skipped: "–", todo: "·", spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], full: "━", empty: "─", box: ["╭", "╮", "╰", "╯", "─", "│"], ellipsis: "…", sep: "›", out: "↗", to: "→" },
+  ascii: { done: "+", failed: "x", skipped: "-", todo: ".", spinner: ["|", "/", "-", "\\"], full: "=", empty: "-", box: ["+", "+", "+", "+", "-", "|"], ellipsis: "...", sep: ">", out: "", to: "->" },
 }
 
 // Visible length: escape codes (SGR, OSC 8) take no room.
@@ -207,20 +192,15 @@ export function createView({ out = process.stdout, err = process.stderr, caps = 
     line,
     blank: () => line(""),
 
-    // install.sh draws this itself; the demo draws it here, the same way.
-    header(style = "mark") {
+    // install.sh draws this itself; the demo draws it here, the same way: the wordmark in ink, the dim line under it.
+    header() {
       line()
       if (!caps.unicode) {
         line(`${M}${st.bold("bonez")}  ${st.dim(SUBTITLE)}`)
-      } else if (style === "wordmark") {
+      } else {
         for (const row of WORDMARK) line(`${M}${row}`)
         line()
         line(`${M}${st.dim(SUBTITLE)}`)
-      } else {
-        MARK.forEach((row, i) => {
-          const beside = i === 2 ? st.bold("bonez") : i === 3 ? st.dim(SUBTITLE) : ""
-          line(beside ? `${M}${row.padEnd(12)}   ${beside}` : `${M}${row}`)
-        })
       }
       line()
     },
@@ -238,13 +218,11 @@ export function createView({ out = process.stdout, err = process.stderr, caps = 
       }
       for (const d of [].concat(details)) line(`${M}  ${st.dim(d)}`)
     },
-    // A row whose next step is a link: a short label, linked where the terminal can. Elsewhere `fallback`:
-    // short lines that fit the width (a long URL wrapped by the terminal is neither readable nor clickable).
-    toolLink(state, name, word, label, url, fallback = [url]) {
-      const linked = link(`${label} ${g.out}`.trim(), url)
-      if (linked) return view.tool(state, name, word, linked)
-      view.tool(state, name, word, `${label}:`)
-      for (const f of fallback) line(`${" ".repeat(M.length + 2 + NAME_W + 2 + STATE_W + 1)}${st.dim(f)}`)
+    // The Claude app is optional: one dim line, a link to the prefilled connector where the terminal has links,
+    // else the place to add it, short enough for 80 columns.
+    claudeApp(url) {
+      const linked = link(`Optional: add Bonez to the Claude app ${g.out}`.trim(), url)
+      line(`${M}${mark.todo} ${st.dim(linked ?? `Optional: Claude app ${g.to} claude.ai/customize/connectors`)}`)
     },
     // As install.sh draws it: a still yellow dot (a POSIX shell has no spinner), replaced by the result.
     toolWorking(name) {
@@ -347,7 +325,7 @@ export const CLAUDE_CONNECTOR_DEMO_URL =
 // Plays the whole installer, install.sh's rows included, with fake timing. No network, no file, no tool is
 // touched. `until` stops at one stage and leaves it on screen (for screenshots): adding, tools, waiting,
 // signin, backfill, done.
-export async function playDemo({ header = "mark", until, speed = 1, joining = false, out = process.stdout, caps } = {}) {
+export async function playDemo({ until, speed = 1, joining = false, out = process.stdout, caps } = {}) {
   const view = createView({ out, ...(caps && { caps }) })
   const g = view.caps.unicode ? GLYPHS.unicode : GLYPHS.ascii
   const t = (ms) => pause(ms / speed)
@@ -357,7 +335,7 @@ export async function playDemo({ header = "mark", until, speed = 1, joining = fa
     view.freeze()
     return true
   }
-  view.header(header)
+  view.header()
   // install.sh's rows, word for word.
   const tools = [
     ["Claude Code", "added", `Next: /mcp ${g.sep} bonez ${g.sep} Authenticate`],
@@ -371,10 +349,7 @@ export async function playDemo({ header = "mark", until, speed = 1, joining = fa
     view.tool("done", name, word, next)
   }
   view.tool("skipped", "OpenCode", view.st.dim("not found"))
-  view.toolLink("todo", "Claude app", "optional", "Add Bonez as a connector", CLAUDE_CONNECTOR_DEMO_URL, [
-    "https://claude.ai/customize/connectors",
-    "Add custom connector: https://gateway.bonez.io/mcp",
-  ])
+  view.claudeApp(CLAUDE_CONNECTOR_DEMO_URL)
   if (await stopAt("tools")) return
 
   const expiresAt = Date.now() + 30 * 60_000

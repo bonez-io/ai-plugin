@@ -2053,6 +2053,12 @@ function cmdDecline() {
 // the workspace): `connect` creates it, the person signs in and answers on the page, and `connect`
 // picks the answer up here: a sessions key to save, and whether to add the recent sessions too.
 const CONNECT_RECENT_DAYS = 14
+// At most this many of those sessions, the newest across every tool: what the page says and what is added.
+// BONEZ_CONNECT_BACKFILL_MAX overrides it, only so a test need not write 200 transcripts.
+const _parsedConnectMax = Number.parseInt(process.env.BONEZ_CONNECT_BACKFILL_MAX ?? "", 10)
+const CONNECT_BACKFILL_MAX = Number.isFinite(_parsedConnectMax) && _parsedConnectMax > 0 ? _parsedConnectMax : 200
+const connectTargets = () =>
+  allBackfillTargets(BACKFILL_AGENTS, loadState(), Date.now() - CONNECT_RECENT_DAYS * DAY_MS).targets.slice(0, CONNECT_BACKFILL_MAX)
 const CONNECT_TOOL_IDS = ["claude-code", "codex", "cursor", "opencode", "claude-app"]
 const CONNECT_OPENERS = new Set(["claude-code", "codex", "cursor", "opencode", "installer"])
 const CONNECT_OPENER_FOR = { claude: "claude-code", codex: "codex", cursor: "cursor" }
@@ -2157,9 +2163,7 @@ function parseConnectArgs(rest) {
     else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
     else if (a === "--nonce") o.nonce = rest[++i]
     // The demo: the whole installer with fake timing, no network, no file touched.
-    // --demo wordmark shows the drawn wordmark in place of the mark and the word.
-    else if (a === "--demo") o.demo = ["mark", "wordmark"].includes(rest[i + 1]) ? rest[++i] : "mark"
-    else if (a.startsWith("--demo=")) o.demo = a.slice("--demo=".length) === "wordmark" ? "wordmark" : "mark"
+    else if (a === "--demo") o.demo = true
     else if (a === "--joining") o.demoJoining = true
     else if (a.startsWith("--until=")) o.until = a.slice("--until=".length)
     else if (a.startsWith("--speed=")) o.speed = Math.max(0.1, Number(a.slice("--speed=".length)) || 1)
@@ -2277,8 +2281,7 @@ function saveConnectedKey(key, gateway, { announce = false, backfill = false } =
 
 // The last 14 days of every harness, one session at a time.
 async function connectBackfill(cfg, onProgress = () => {}) {
-  const since = Date.now() - CONNECT_RECENT_DAYS * DAY_MS
-  const { targets } = allBackfillTargets(BACKFILL_AGENTS, loadState(), since)
+  const targets = connectTargets()
   const total = targets.length
   let added = 0
   let done = 0
@@ -2458,7 +2461,7 @@ async function cmdConnect(rest) {
   const o = parseConnectArgs(rest)
   if (o.demo) {
     const { playDemo } = await import("./lib/connect-tui.mjs")
-    await playDemo({ header: o.demo, until: o.until, speed: o.speed, joining: o.demoJoining })
+    await playDemo({ until: o.until, speed: o.speed, joining: o.demoJoining })
     return
   }
   if (o.detach) {
@@ -2485,12 +2488,11 @@ async function cmdConnect(rest) {
     return
   }
 
-  const since = Date.now() - CONNECT_RECENT_DAYS * DAY_MS
-  const recent = allBackfillTargets(BACKFILL_AGENTS, loadState(), since).targets.length
+  const recent = connectTargets().length
   const report = {
     opener: o.opener,
     tools: detectTools(),
-    recent_sessions: Math.min(recent, 10_000),
+    recent_sessions: recent,
     host: hostname().slice(0, 64),
     ...(pluginVersion() && { plugin_version: pluginVersion() }),
   }
@@ -3073,7 +3075,7 @@ async function main() {
       console.log("usage:")
       console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach] [--pair CODE.SECRET]")
       console.log("                                                                  set up Bonez in the browser")
-      console.log("  bonez-session-sync.mjs connect --demo [mark|wordmark] [--joining] [--until=adding|tools|waiting|signin|backfill|done]")
+      console.log("  bonez-session-sync.mjs connect --demo [--joining] [--until=adding|tools|waiting|signin|backfill|done]")
       console.log("                                                                  preview the installer's screen")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")

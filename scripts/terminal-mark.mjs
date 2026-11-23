@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// Draws the Bonez mark and wordmark as terminal art, for bin/lib/connect-tui.mjs and the installer
+// Draws the Bonez wordmark (the mark and "bonez") as terminal art, for bin/lib/connect-tui.mjs and the installer
 // (bonez-core services/gateway/src/bonez_gateway/mcp_install_assets/install.sh). Run by hand when the
 // logo changes; nothing runs it at install time.
 //
 //   node scripts/terminal-mark.mjs <bonez-core>/libs/ui/src/components/logo.tsx
 //
-// It takes the SVG paths of `Mark` (viewBox 0 0 20 25) and `Logo` (0 0 154 34) from logo.tsx, fills them on a
+// It takes the SVG paths of `Logo` (viewBox 0 0 154 34) from logo.tsx, fills them on a
 // canvas in headless Chrome (no dependency to install), and maps each terminal cell to a quadrant block
 // (▘▝▀▖▌▞▛▗▚▐▜▄▙▟█): a cell is 2 x 2 subpixels, a subpixel is on when the shape covers more than 40% of it, and
 // the drawing is stretched twice across so it keeps its proportions in cells twice as tall as wide.
-// Prints the two constants as JSON; the install.sh form (octal escapes, so the script stays ASCII) with --sh.
+// Prints the rows as JSON; the install.sh form (octal escapes, so the script stays ASCII) with --sh.
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs"
 import { execFileSync } from "node:child_process"
 import { tmpdir } from "node:os"
@@ -21,7 +21,7 @@ if (!logoTsx) {
   process.exit(1)
 }
 const d = [...readFileSync(logoTsx, "utf8").matchAll(/\sd="([^"]+)"/g)].map((m) => m[1])
-const paths = { mark: d.slice(0, 4), logo: d.slice(4, 13) }
+const paths = { logo: d.slice(4, 13) } // the first four are `Mark`'s
 
 const page = `<!doctype html><meta charset="utf-8"><pre id="out"></pre><script>
 const P = ${JSON.stringify(paths)}
@@ -39,7 +39,7 @@ function art(paths, vw, vh, rows, thresh) {
   for (let r = 0; r < rows; r++) { let l = ""; for (let k = 0; k < cols; k++) l += Q[on(2*k,2*r) | on(2*k+1,2*r)<<1 | on(2*k,2*r+1)<<2 | on(2*k+1,2*r+1)<<3]; out.push(l.replace(/\\s+$/, "")) }
   return out
 }
-document.getElementById("out").textContent = JSON.stringify({ mark: art(P.mark, 19.702, 25, 7, 0.4), wordmark: art(P.logo, 154, 34, 4, 0.4) })
+document.getElementById("out").textContent = JSON.stringify({ wordmark: art(P.logo, 154, 34, 4, 0.4) })
 </script>`
 const dir = mkdtempSync(join(tmpdir(), "bonez-mark-"))
 writeFileSync(join(dir, "mark.html"), page)

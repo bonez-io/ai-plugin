@@ -2816,6 +2816,26 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.equal(gw.calls.pairings.length, 1)
   })
 
+  test("at most the 200 newest sessions of the last 14 days: what the page is told and what is added", async () => {
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_connect_cap_1" } })
+    let { home, env } = connectEnv()
+    for (let i = 0; i < 205; i++) put(join(home, ".claude", "projects", "-work-api", `cap-${i}.jsonl`), "claude-transcript.jsonl", 86_400_000 + i * 60_000)
+    let res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.recent_sessions, 200)
+
+    // The same cap on what is added (made small here, so the test need not upload 200): the newest first.
+    reset({ steps: ["answered"], sessions: { on: true, backfill: true, key: "bnz_connect_cap_2" } })
+    ;({ home, env } = connectEnv({ BONEZ_CONNECT_BACKFILL_MAX: "1" }))
+    history(home)
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.recent_sessions, 1)
+    assert.equal(gw.calls.presign.length, 1)
+    assert.equal(gw.calls.presign[0].body.agent, "claude-code", "the newest of the two")
+    assert.match(res.stdout, /✓ Added 1 recent session  from the last 14 days/)
+  })
+
   test("tool sign-ins the gateway reports are shown as they arrive", async () => {
     reset({
       steps: ["claimed", "answered"],
@@ -2960,9 +2980,9 @@ describe("connect: the setup page in the browser and this machine share a pairin
 
   test("--demo plays the installer with no network and no file", async () => {
     reset()
-    for (const header of ["mark", "wordmark"]) {
+    for (const joining of [[], ["--joining"]]) {
       const { home, env } = connectEnv()
-      const res = await runCli(["connect", "--demo", header, "--speed=50"], { env })
+      const res = await runCli(["connect", "--demo", ...joining, "--speed=50"], { env })
       assert.equal(res.status, 0, res.stderr)
       assert.match(res.stdout, /Keep this terminal open/)
       assert.match(res.stdout, /All set\./)
@@ -3023,23 +3043,16 @@ describe("the installer's screen: the Bonez mark, columns, the panel, links and 
   }
   const lines = (text) => text.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").split("\n")
 
-  test("the header is the drawn mark in ink with the word beside it, or the drawn wordmark; ASCII gets the word", async () => {
-    const { createView, terminalCaps, MARK, WORDMARK } = await import("../bin/lib/connect-tui.mjs")
-    assert.equal(MARK.length, 7)
-    assert.ok(MARK.every((row) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(row) && [...row].length <= 12))
+  test("the header is the drawn wordmark in ink with the dim line under it; ASCII gets the word", async () => {
+    const { createView, terminalCaps, WORDMARK } = await import("../bin/lib/connect-tui.mjs")
     assert.equal(WORDMARK.length, 4)
+    assert.ok(WORDMARK.every((row) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(row) && [...row].length <= 40))
     const t = term()
-    const view = createView({ out: t.stream, caps: terminalCaps(t) })
-    view.header("mark")
-    const shown = lines(t.text())
-    assert.equal(shown[3], `  ${MARK[2]}   bonez`)
-    assert.equal(shown[4], `  ${MARK[3]}   Connecting your coding tools`)
-    assert.ok(t.text().includes(`  ${MARK[0]}\n`), "the mark is never coloured")
-    const w = term()
-    createView({ out: w.stream, caps: terminalCaps(w) }).header("wordmark")
-    assert.deepEqual(lines(w.text()).slice(1, 5), WORDMARK.map((r) => `  ${r}`))
+    createView({ out: t.stream, caps: terminalCaps(t) }).header()
+    assert.deepEqual(lines(t.text()).slice(0, 7), ["", ...WORDMARK.map((r) => `  ${r}`), "", "  Connecting your coding tools"])
+    assert.ok(t.text().includes(`  ${WORDMARK[0]}\n`), "the wordmark is never coloured")
     const a = term({ platform: "win32" })
-    createView({ out: a.stream, caps: terminalCaps(a) }).header("mark")
+    createView({ out: a.stream, caps: terminalCaps(a) }).header()
     assert.deepEqual(lines(a.text()).filter(Boolean), ["  bonez  Connecting your coding tools"])
   })
 
@@ -3056,17 +3069,16 @@ describe("the installer's screen: the Bonez mark, columns, the panel, links and 
     assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Claude Code/)
   })
 
-  test("a long link is a short label where the terminal has links, and short lines that fit elsewhere", async () => {
+  test("the Claude app is one dim line: a link where the terminal has links, a short place to go elsewhere", async () => {
     const { createView, terminalCaps, CLAUDE_CONNECTOR_DEMO_URL: url } = await import("../bin/lib/connect-tui.mjs")
-    const fallback = ["https://claude.ai/customize/connectors", "Add custom connector: https://gateway.bonez.io/mcp"]
     const it = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
-    createView({ out: it.stream, caps: terminalCaps(it) }).toolLink("todo", "Claude app", "optional", "Add Bonez as a connector", url, fallback)
-    assert.ok(it.text().includes(`\x1b]8;;${url}\x1b\\Add Bonez as a connector ↗\x1b]8;;\x1b\\`))
+    createView({ out: it.stream, caps: terminalCaps(it) }).claudeApp(url)
+    assert.ok(it.text().includes(`\x1b]8;;${url}\x1b\\Optional: add Bonez to the Claude app ↗\x1b]8;;\x1b\\`))
+    assert.equal(lines(it.text()).filter(Boolean).length, 1)
     const ap = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
-    createView({ out: ap.stream, caps: terminalCaps(ap) }).toolLink("todo", "Claude app", "optional", "Add Bonez as a connector", url, fallback)
+    createView({ out: ap.stream, caps: terminalCaps(ap) }).claudeApp(url)
     assert.doesNotMatch(ap.text(), /\x1b\]8/)
-    assert.ok(lines(ap.text()).every((l) => l.length <= 80))
-    assert.deepEqual(lines(ap.text()).slice(1, 3).map((l) => l.trim()), fallback)
+    assert.deepEqual(lines(ap.text()).filter(Boolean), ["  · Optional: Claude app → claude.ai/customize/connectors"])
   })
 
   test("the panel stays inside 80 columns, says where to continue, and keeps the waiting time under its edge", async () => {
@@ -3082,7 +3094,12 @@ describe("the installer's screen: the Bonez mark, columns, the panel, links and 
       assert.ok(shown.some((l) => l.includes(first)))
       assert.ok(shown.some((l) => l.includes("Keep this terminal open.")))
       assert.equal(shown.some((l) => l.includes("pair=K7QM-4XPA")), !joining)
-      const edge = shown.find((l) => l.includes("╰")).length
+      // One blank row of padding inside the top and bottom edges, no more.
+      const top = shown.findIndex((l) => l.includes("╭"))
+      const bottom = shown.findIndex((l) => l.includes("╰"))
+      const blank = (l) => /^ *│ *│$/.test(l)
+      assert.ok(blank(shown[top + 1]) && !blank(shown[top + 2]) && blank(shown[bottom - 1]) && !blank(shown[bottom - 2]))
+      const edge = shown[bottom].length
       assert.equal(shown.find((l) => l.includes("min left")).length, edge, "the time ends under the panel's edge")
     }
   })
