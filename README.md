@@ -77,6 +77,13 @@ Every plugin config sends its version in an `x-bonez-plugin-version` header (CI 
 version). The gateway uses it to tell the agent, once per session, when the plugin is behind, which is the
 update signal for a tool that cannot update itself.
 
+### What is new in 0.12.0
+
+- **One step to connect (1SI-4098).** The installer, or the plugin's first session, opens the Bonez setup page. You sign in each coding tool and turn on session saving there; this computer then collects its key by itself, even if the terminal was closed (the next session start picks it up within 7 days). `connect` creates the pairing; with `BONEZ_PAIR` or `--pair` it joins the one Settings → Bonez Plugin made.
+- **One installer screen.** `install-ui` draws the whole install on one screen, from the first tool to "All set", with a plain view for pipes and CI. Codex's sign-in link stays on screen until Codex signs in.
+- **Session saving asks once, then stays out of the way.** The first session offers it with one click; `/bonez:capture` (Claude Code), `/bonez-capture` (Cursor) and `bonez-session-sync.mjs on|decline|status|backfill` everywhere. Backfill covers Claude Code, Codex and Cursor.
+- **Fixes.** Cursor sessions in folders whose path has dots, spaces or underscores are found at session start. A Cursor sub-agent's transcript is never uploaded as its own session. Claude Code no longer calls `memory_recall` on every prompt (the hook's `once` was ignored by Claude Code); the session-start context asks the agent to recall when the work needs it.
+
 ### What is new in 0.11.2
 
 - **Session capture uploads only what was said.** A Claude Code transcript is uploaded as the person's and the agent's own messages. Copies of requests, compaction summaries and text the app injected are left out, so a summary the agent wrote is no longer saved as something the person stated, and a first prompt no longer arrives twice. A message that is real content but was not typed by the person (from another session, a task notification, a schedule, the host app) is marked as such.
