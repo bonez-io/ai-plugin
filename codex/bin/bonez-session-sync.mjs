@@ -2576,7 +2576,10 @@ async function cmdConnect(rest, given) {
 // install.sh's screen (1SI-4098): on a terminal, install.sh starts this first and tells it what it does, one
 // line per change on stdin (tab-separated: `working NAME`, `tool STATE NAME WORD NEXT`, `detail TEXT`,
 // `claude-app URL`, `fail TEXT`, `end CONNECT`), so the tool steps and the browser steps are one screen from the
-// start. With `end 1` it goes on to `connect` (BONEZ_PAIR and BONEZ_GATEWAY_URL come from install.sh).
+// start. With `end 1` it goes on to `connect` (BONEZ_PAIR and BONEZ_GATEWAY_URL come from install.sh). A `detail`
+// belongs to the last `tool` row sent; a `tool` row sent again under the same name replaces it and its details.
+// A detail with an address in it (Codex's `Sign-in link: <url>`) stays on the screen and in the summary until
+// that tool is signed in.
 async function cmdInstallUi() {
   const view = await connectView()
   view.header()
@@ -2655,7 +2658,7 @@ async function watchConnect(view, p, { started }) {
     for (const id of pr.tools ?? []) {
       if (shown.tools.has(id)) continue
       shown.tools.add(id)
-      view.done(`${CONNECT_TOOL_LABELS[id] ?? id} signed in`)
+      view.toolSignedIn(CONNECT_TOOL_LABELS[id] ?? id)
     }
     if (pr.answer && !shown.answer) {
       shown.answer = true
@@ -3085,6 +3088,8 @@ async function main() {
     case "on":
       await cmdOn()
       break
+    // install.sh (bonez-core, mcp_install_assets) finds out what this plugin can do by grepping this file for
+    // `case "connect":` and `case "install-ui":`. Keep those two lines exactly as they are (tests pin them).
     case "connect":
       try {
         await cmdConnect(rest)

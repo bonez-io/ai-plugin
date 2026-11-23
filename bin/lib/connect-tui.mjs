@@ -59,6 +59,9 @@ const GLYPHS = {
   ascii: { done: "+", failed: "x", skipped: "-", todo: ".", spinner: ["|", "/", "-", "\\"], full: "=", empty: "-", box: ["+", "+", "+", "+", "-", "|"], ellipsis: "...", sep: ">", out: "", to: "->" },
 }
 
+// An address in a line of text (a detail such as `Sign-in link: https://…`), up to a space or an escape code.
+const URL_RE = /https?:\/\/[^\s\x1b]+/
+
 // Visible length: escape codes (SGR, OSC 8) take no room.
 const strip = (s) => s.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
 const visible = (s) => [...strip(s)].length
@@ -128,6 +131,11 @@ function kit(caps) {
     mark,
     link,
     panelW,
+    // An address cut to `n` characters in the middle, so its host and its end both stay.
+    shortUrl(url, n) {
+      const keep = Math.max(0, n - g.ellipsis.length)
+      return `${url.slice(0, Math.ceil(keep / 2))}${g.ellipsis}${url.slice(url.length - Math.floor(keep / 2))}`
+    },
     header: (compact) =>
       compact || !caps.unicode
         ? [`${M}${st.bold("bonez")}  ${st.dim(SUBTITLE)}`]
@@ -139,8 +147,10 @@ function kit(caps) {
       const head = `${M}${mark[state] ?? mark.todo} ${name.padEnd(NAME_W)}  ${word.padEnd(STATE_W)}`
       const out = []
       const nextText = next ? st.dim(next) : ""
+      // The full screen leaves the last column empty (see `fit`).
+      const room = caps.width - (caps.live ? 1 : 0)
       if (!next) out.push(head.trimEnd())
-      else if (visible(head) + 1 + visible(nextText) <= caps.width) out.push(`${head} ${nextText}`)
+      else if (visible(head) + 1 + visible(nextText) <= room) out.push(`${head} ${nextText}`)
       else out.push(head.trimEnd(), `${" ".repeat(M.length + 2 + NAME_W + 2)}${nextText}`)
       for (const d of details) out.push(`${M}  ${st.dim(d)}`)
       return out
@@ -283,6 +293,7 @@ function createPlain({ out, err, caps }) {
       line(`${M}${k.mark.todo} ${text}`)
     },
     done: (text, detail) => line(k.event({ kind: "done", text, detail })),
+    toolSignedIn: (name) => line(k.event({ kind: "done", text: `${name} signed in` })),
     skipped: (text, detail) => line(k.event({ kind: "skipped", text, detail })),
     note: (text) => line(k.event({ kind: "note", text })),
     // A failure ends the run: the bare words on stderr.
@@ -324,6 +335,7 @@ function createScreen({ out, caps }) {
   let timer
   let frame = 0
   let leaving // what the summary says when it ends before the answer: { note, link }
+  let lastRow // the tool row a `detail` belongs to
 
   const write = (s) => {
     try {
@@ -334,44 +346,80 @@ function createScreen({ out, caps }) {
   }
   out.on?.("error", () => {})
 
-  // The whole view as lines, as tight as `level` asks: 0 everything, 1 the tools in one line, 2 a one-line
-  // header, 3 the panel without its blank rows, 4 only the newest events.
+  // One line as the screen draws it (`s`, ready to write) and the rows it takes. The last column stays empty: a
+  // line that fills it leaves the cursor waiting to wrap, and the erase after it would take its last character.
+  // A line too long for the width is cut, except a link (install.sh's Codex sign-in link is ~300 characters).
+  // Where the terminal shows links, its middle gives way and it still opens the whole address; elsewhere it is
+  // drawn whole, over as many rows as it needs, so it can still be copied, and those rows count.
+  function fit(l) {
+    const room = caps.cols - 1
+    const w = visible(l)
+    if (w <= room) return { s: `${l}${ESC}K`, rows: 1 }
+    const url = l.includes("\x1b]8;;") ? undefined : URL_RE.exec(l)?.[0]
+    const keep = url ? url.length - (w - room) : 0
+    if (url && caps.links && keep >= 20) return { s: `${l.replace(url, () => k.link(k.shortUrl(url, keep), url))}${ESC}K`, rows: 1 }
+    if (url) return { s: w % caps.cols ? `${l}${ESC}K` : l, rows: Math.ceil(w / caps.cols) }
+    return { s: `${cut(l, room)}${ESC}K`, rows: 1 }
+  }
+  const rowsOf = (lines) => lines.reduce((n, l) => n + l.rows, 0)
+
+  // A tool's sign-in link (a detail with an address) stays on the screen, and in the summary, until the tool
+  // says it is signed in.
+  const links = (t) => t.details.filter((d) => URL_RE.test(d))
+  const waitingOnLink = (t) => t.state !== "failed" && links(t).length > 0
+
+  // The whole view, as tight as `level` asks: 0 everything, 1 the tools in one line, 2 a one-line header, 3 the
+  // panel without its blank rows, 4 only the newest events.
   function compose(level, height) {
-    const top = ["", ...k.header(level >= 2), ""]
+    const top = ["", ...k.header(level >= 2), ""].map(fit)
     const tools = []
     if (level >= 1 && m.panel) {
-      const by = (s) => m.tools.filter((t) => t.state === s).map((t) => t.name)
-      const added = by("done")
+      const added = m.tools.filter((t) => t.state === "done" && !waitingOnLink(t)).map((t) => t.name)
       if (added.length) tools.push(`${M}${k.mark.done} ${added.join(", ")} ${k.st.dim("added")}`)
-      for (const t of m.tools.filter((t) => t.state === "failed")) tools.push(...k.tool({ ...t, details: t.details.slice(0, 1) }))
+      for (const t of m.tools) {
+        if (t.state === "failed") tools.push(...k.tool({ ...t, details: t.details.slice(0, 1) }))
+        else if (waitingOnLink(t)) tools.push(...k.tool({ ...t, details: links(t) }))
+      }
     } else {
       for (const t of m.tools) tools.push(...k.tool(t))
       if (m.working) tools.push(k.working(m.working))
       if (m.claude) tools.push(k.claudeApp(m.claude))
     }
-    const panel = m.panel ? ["", ...k.finish(m.panel, level >= 3)] : []
-    let events = m.events.map((e) => k.event(e))
+    const panel = (m.panel ? ["", ...k.finish(m.panel, level >= 3)] : []).map(fit)
+    let events = m.events.map((e) => fit(k.event(e)))
     const bottom = []
     if (m.live) bottom.push(k.live(m.live, frame))
     if (m.final) bottom.push("", k.allSet(m.final))
-    const gap = m.events.length || m.live || m.final ? [""] : []
+    const gap = m.events.length || m.live || m.final ? [fit("")] : []
+    const middle = tools.map(fit)
+    const end = bottom.map(fit)
     if (level >= 4) {
-      const room = height - top.length - tools.length - panel.length - gap.length - bottom.length
-      if (events.length > room) events = room > 1 ? [`${M}  ${k.st.dim(`${k.g.ellipsis} ${events.length - room + 1} more`)}`, ...events.slice(events.length - room + 1)] : []
+      const room = height - rowsOf(top) - rowsOf(middle) - rowsOf(panel) - rowsOf(gap) - rowsOf(end)
+      if (rowsOf(events) > room) {
+        const kept = []
+        for (let i = events.length - 1; i >= 0 && rowsOf(kept) + events[i].rows <= room - 1; i--) kept.unshift(events[i])
+        events = room > 1 ? [fit(`${M}  ${k.st.dim(`${k.g.ellipsis} ${events.length - kept.length} more`)}`), ...kept] : []
+      }
     }
-    return { top, middle: [...tools, ...panel, ...gap, ...events], bottom }
+    return { top, middle: [...middle, ...panel, ...gap, ...events], bottom: end }
   }
 
-  // Fits the terminal's height: the header and the live line stay, the middle gives way.
+  // Fits the terminal's height, in rows: the header and the live line stay, the middle gives way.
   function frameLines() {
     const height = Math.max(8, caps.height)
     for (let level = 0; level <= 4; level++) {
       const { top, middle, bottom } = compose(level, height)
       const all = [...top, ...middle, ...bottom]
-      if (all.length <= height || level === 4) {
-        if (all.length <= height) return all
-        const room = Math.max(0, height - top.length - bottom.length)
-        return [...top, ...middle.slice(0, room), ...bottom].slice(0, height)
+      if (rowsOf(all) <= height) return all
+      if (level === 4) {
+        const taken = []
+        for (const l of middle) {
+          if (rowsOf(top) + rowsOf(taken) + l.rows + rowsOf(bottom) > height) break
+          taken.push(l)
+        }
+        const out = []
+        for (const l of [...top, ...taken, ...bottom]) if (rowsOf(out) + l.rows <= height) out.push(l)
+        return out
       }
     }
     return []
@@ -379,8 +427,7 @@ function createScreen({ out, caps }) {
 
   function render() {
     if (!entered || ended) return
-    const lines = frameLines().map((l) => `${cut(l, caps.cols)}${ESC}K`)
-    write(`${ESC}H${lines.join("\r\n")}${ESC}J`)
+    write(`${ESC}H${frameLines().map((l) => l.s).join("\r\n")}${ESC}J`)
   }
 
   function resize() {
@@ -439,8 +486,9 @@ function createScreen({ out, caps }) {
   // What stays in the scrollback once the screen is given back.
   function summary({ interrupted }) {
     const lines = ["", `${M}${k.st.bold("bonez")}  ${k.st.dim(SUBTITLE)}`, ""]
-    // The rows and their next steps; only a failure keeps its details (its own words, the fix).
-    for (const t of m.tools) lines.push(...k.tool(t.state === "failed" ? t : { ...t, details: [] }))
+    // The rows and their next steps, in full. A failure keeps its details (its own words, the fix), and a tool not
+    // yet signed in keeps its sign-in link.
+    for (const t of m.tools) lines.push(...k.tool(t.state === "failed" ? t : { ...t, details: links(t) }))
     if (m.claude) lines.push(k.claudeApp(m.claude))
     if (m.events.length) lines.push("", ...m.events.map((e) => k.event(e)))
     if (m.final) lines.push("", k.allSet(m.final))
@@ -459,12 +507,24 @@ function createScreen({ out, caps }) {
     // The header is always on the screen; this takes the screen.
     header: () => change(() => {}),
     toolWorking: (name) => change(() => (m.working = name)),
+    // A row sent again under the same name replaces that row and its details (Codex: signed in after all).
     tool: (state, name, word, next, details = []) =>
       change(() => {
         m.working = undefined
-        m.tools.push({ state, name, word, next, details: [].concat(details) })
+        const row = { state, name, word, next, details: [].concat(details) }
+        const at = m.tools.findIndex((t) => t.name === name)
+        if (at >= 0) m.tools[at] = row
+        else m.tools.push(row)
+        lastRow = row
       }),
-    detail: (text) => change(() => m.tools.at(-1)?.details.push(text)),
+    detail: (text) => change(() => lastRow?.details.push(text)),
+    // The gateway says a tool signed in: its sign-in link has done its job.
+    toolSignedIn: (name) =>
+      change(() => {
+        const row = m.tools.find((t) => t.name === name)
+        if (row) row.details = row.details.filter((d) => !URL_RE.test(d))
+        m.events.push({ kind: "done", text: `${name} signed in` })
+      }),
     claudeApp: (url) => change(() => (m.claude = url)),
     finish: (opts) => change(() => (m.panel = opts)),
     waiting: (text, expiresAt) =>

@@ -3207,12 +3207,44 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.ok(s.summary.includes("  ✓ Codex         added      Signed in"), s.summary.join("\n"))
   })
 
-  test("--help lists install-ui and exits 0, so install.sh can check for it", async () => {
+  test("install-ui keeps Codex's sign-in link through connect, and in the summary until the gateway says Codex signed in", async () => {
+    const url = `https://auth.bonez.io/authorize?client_id=qFX0&state=${"s".repeat(240)}&end`
+    const rows = [
+      ["tool", "done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate"],
+      ["tool", "done", "Codex", "added", "Signing in, in your browser…"],
+      ["detail", `Sign-in link: ${url}`],
+      ["tool", "done", "Cursor", "added", "Next: reload, then MCPs › bonez › Authenticate"],
+    ]
+    for (const signedIn of [false, true]) {
+      reset({
+        steps: ["waiting", "claimed", "waiting", "answered"],
+        ...(signedIn && { tools: [{ id: "codex", signed_in: true }] }),
+        sessions: { on: true, backfill: false, key: "bnz_connect_key_link" },
+      })
+      const { env } = screenEnv({ LINES: "24" })
+      const res = await runCli(["install-ui"], { env, input: events(...rows, ["end", "1"]) })
+      assert.equal(res.status, 0, res.stderr)
+      const s = screenOf(res.stdout)
+      // On the screen while the browser step runs (the panel is up, the other tools folded), the link stays.
+      const withPanel = s.frames.map((f) => unstyled(f)).filter((f) => f.includes("Finish in your browser"))
+      assert.ok(withPanel.length > 0)
+      assert.ok(withPanel[0].includes(`    Sign-in link: ${url}`), withPanel[0])
+      for (const f of s.frames) assert.ok(drawnRows(f, 80) <= 24, unstyled(f))
+      assert.equal(s.summary.includes(`    Sign-in link: ${url}`), !signedIn, s.summary.join("\n"))
+      assert.equal(s.summary.includes("  ✓ Codex signed in"), signedIn)
+      if (signedIn) assert.ok(!s.frame.some((l) => l.includes("Sign-in link")), "gone from the screen once signed in")
+    }
+  })
+
+  test("--help lists install-ui and exits 0; the dispatcher keeps the lines install.sh greps for", async () => {
     const res = await runCli(["--help"])
     assert.equal(res.status, 0)
     assert.match(res.stdout, /bonez-session-sync\.mjs install-ui /)
     assert.match(res.stdout, /bonez-session-sync\.mjs connect /)
     assert.equal((await runCli(["no-such-command"])).status, 1)
+    // install.sh's `can`: grep -Eq "case [\"']$1[\"']:" bin/bonez-session-sync.mjs
+    const source = readFileSync(SCRIPT, "utf8")
+    for (const sub of ["connect", "install-ui"]) assert.match(source, new RegExp(`case ["']${sub}["']:`))
   })
 
   test("--demo plays the installer with no network and no file", async () => {
@@ -3278,6 +3310,10 @@ const ALT_ON = "\x1b[?1049h"
 const ALT_OFF = "\x1b[?25h\x1b[?1049l"
 function unstyled(s) {
   return s.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "")
+}
+// Rows a frame takes on a terminal `cols` wide: a line longer than the width wraps.
+function drawnRows(frame, cols) {
+  return unstyled(frame).split("\n").reduce((n, l) => n + Math.max(1, Math.ceil([...l].length / cols)), 0)
 }
 function screenOf(text) {
   const at = text.lastIndexOf(ALT_OFF)
@@ -3437,6 +3473,86 @@ describe("the installer's screen: the Bonez mark, columns, the panel, links and 
     // The scrollback keeps everything: every tool and every event.
     for (let i = 0; i < 6; i++) assert.ok(summary.includes(`  ✓ Tool ${i} signed in`))
     assert.ok(summary.includes("  ✓ OpenCode      added"))
+  })
+
+  // install.sh's Codex sign-in link: about 300 characters.
+  const LONG_URL = `https://auth.bonez.io/authorize?response_type=code&client_id=qFX0abcdefghijklmnopqrstuvwxyz012345&redirect_uri=${encodeURIComponent("http://127.0.0.1:8787/callback")}&scope=${encodeURIComponent("openid offline_access bonez:read bonez:memory bonez:write")}&state=${"s".repeat(64)}&code_challenge=${"c".repeat(43)}&code_challenge_method=S256&end`
+  const withCodexLink = (view) => {
+    view.header()
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.tool("done", "Codex", "added", "Signing in, in your browser…")
+    view.detail(`Sign-in link: ${LONG_URL}`)
+    view.tool("done", "Cursor", "added", "Next: reload, then MCPs › bonez › Authenticate")
+    view.finish({ joining: false, url: "https://app.bonez.io/connect?pair=K7QM-4XPA", opened: true })
+    view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+  }
+
+  test("a long sign-in link: one row with its middle cut where the terminal shows links, still opening the whole address", async () => {
+    assert.ok(LONG_URL.length > 280)
+    const t = term({ rows: 40, env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    const view = await open(t)
+    withCodexLink(view)
+    view.end()
+    const { frames, frame, summary } = screenOf(t.text())
+    for (const f of frames) {
+      assert.ok(unstyled(f).split("\n").every((l) => [...l].length <= 79), "nothing reaches the last column")
+      assert.ok(drawnRows(f, 80) <= 40)
+    }
+    const shown = frame.find((l) => l.includes("Sign-in link:"))
+    assert.match(shown, /^ {4}Sign-in link: https:\/\/auth\.bonez\.io\/auth[^…]*…[^…]*code_challenge_method=S256&end$/)
+    assert.equal([...shown].length, 79)
+    assert.ok(t.text().includes(`\x1b]8;;${LONG_URL}\x1b\\`), "the link opens the whole address")
+    assert.ok(summary.includes(`    Sign-in link: ${LONG_URL}`), "the scrollback keeps the whole address")
+  })
+
+  test("a long sign-in link where the terminal has no links: drawn whole over several rows, and the rows count", async () => {
+    for (const rows of [40, 24, 14]) {
+      const t = term({ rows, env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
+      const view = await open(t)
+      withCodexLink(view)
+      for (let i = 0; i < 5; i++) view.done(`Step ${i}`)
+      view.end()
+      const { frames, summary } = screenOf(t.text())
+      for (const f of frames) assert.ok(drawnRows(f, 80) <= rows, `${drawnRows(f, 80)} rows on a ${rows}-row terminal:\n${unstyled(f)}`)
+      if (rows >= 24) assert.ok(screenOf(t.text()).frame.includes(`    Sign-in link: ${LONG_URL}`), `rows ${rows}`)
+      assert.match(unstyled(frames.at(-1)), /Waiting for you in the browser…/, "the live line stays")
+      assert.ok(summary.includes(`    Sign-in link: ${LONG_URL}`))
+    }
+  })
+
+  test("the Codex sign-in link stays when the tools fold, until Codex signs in; then it goes, from the summary too", async () => {
+    const t = term({ rows: 24, env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    const view = await open(t)
+    withCodexLink(view)
+    let { frame } = screenOf(t.text())
+    assert.ok(frame.includes("  ✓ Claude Code, Cursor added"), frame.join("\n"))
+    assert.ok(frame.includes("  ✓ Codex         added      Signing in, in your browser…"), frame.join("\n"))
+    assert.ok(frame.some((l) => l.startsWith("    Sign-in link: https://")))
+    view.toolSignedIn("Codex")
+    view.end()
+    let summary
+    ;({ frame, summary } = screenOf(t.text()))
+    assert.ok(frame.includes("  ✓ Claude Code, Codex, Cursor added"), frame.join("\n"))
+    assert.ok(!frame.some((l) => l.includes("Sign-in link")))
+    assert.ok(frame.includes("  ✓ Codex signed in"))
+    assert.ok(!summary.some((l) => l.includes("Sign-in link")), "signed in: the link is not left behind")
+    assert.ok(summary.includes("  ✓ Codex signed in"))
+
+    // A row sent again replaces the row and its details: install.sh can say Codex signed in itself.
+    const again = term({ rows: 40 })
+    const resent = await open(again)
+    resent.tool("done", "Codex", "added", "Signing in, in your browser…")
+    resent.detail(`Sign-in link: ${LONG_URL}`)
+    resent.tool("done", "Cursor", "added")
+    resent.tool("done", "Codex", "added", "Signed in")
+    resent.detail("a note for Codex")
+    resent.end()
+    const s = screenOf(again.text())
+    assert.deepEqual(s.frame.filter((l) => /Codex|Cursor|note|Sign-in/.test(l)), [
+      "  ✓ Codex         added      Signed in",
+      "    a note for Codex",
+      "  ✓ Cursor        added",
+    ])
   })
 
   test("a failure is a red ✗ on the screen and in the summary; Ctrl-C leaves what is left to do", async () => {
