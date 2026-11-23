@@ -699,8 +699,10 @@ function isWindowsPath(p) {
 
 // A sub-agent's transcript is part of its lead session, never a session of its own. Claude Code
 // files it under <session>/subagents/ and marks every one of its lines `"isSidechain":true`, so
-// either says so. Only the head is read: the marker sits near the start of every record. (A
-// key inside a message's text is escaped, `\"isSidechain\":`, so it cannot match.)
+// either says so. Cursor files it under agent-transcripts/<conversation>/subagents/<id>.jsonl, with
+// no marker in the lines, so the folder is what says so there. Only the head is read: the marker
+// sits near the start of every record. (A key inside a message's text is escaped,
+// `\"isSidechain\":`, so it cannot match.)
 function isSidechainTranscript(path) {
   if (path.split(/[\\/]/).slice(0, -1).includes("subagents")) return true
   let fd
@@ -1294,7 +1296,9 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — transcript not found (${transcriptPath ?? "unresolved"})`)
     return
   }
-  if (agent === "claude" && isSidechainTranscript(transcriptPath)) {
+  // The live hooks too: a Cursor hook can hand over a sub-agent's transcript_path, and an id with no path
+  // can resolve to one under subagents/.
+  if ((agent === "claude" || agent === "cursor") && isSidechainTranscript(transcriptPath)) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — a sub-agent transcript, part of its lead session`)
     return
   }

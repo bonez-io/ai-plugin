@@ -1044,6 +1044,43 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     assert.equal(mod.cursorProjectSlug("/"), null)
   })
 
+  test("a sub-agent's transcript (<conversation>/subagents/<id>.jsonl) is never its own session: not at a start, not from a hook", async () => {
+    const home = freshDir("cursor-subagent")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["lead-convo"])
+    const sub = join(home, ".cursor", "projects", slug, "agent-transcripts", "lead-convo", "subagents", "sub-agent-1.jsonl")
+    mkdirSync(dirname(sub), { recursive: true })
+    cpSync(join(FIXTURES, "cursor-transcript.jsonl"), sub)
+    const dataDir = freshDir("cursor-subagent-data")
+    await install(dataDir, ["--global"])
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const run = async (name, payload) => {
+      const payloadFile = join(dataDir, `${name}.json`)
+      writeFileSync(payloadFile, JSON.stringify({ workspace_roots: [root], ...payload }))
+      const res = await runCli(["_upload", "cursor", name, payloadFile], { env })
+      assert.equal(res.status, 0, res.stderr)
+    }
+    const state = () => JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+
+    // The start-side catch-up: the lead conversation only.
+    let before = gateway.calls.presign.length
+    await run("session-start", { hook_event_name: "sessionStart", conversation_id: "brand-new" })
+    assert.equal(gateway.calls.presign.length, before + 1)
+    assert.ok(state()["lead-convo"])
+    assert.ok(!state()["sub-agent-1"])
+
+    // A hook that names the sub-agent, by its transcript or by its id alone: nothing is sent.
+    before = gateway.calls.presign.length
+    await run("turn-end", { hook_event_name: "stop", status: "completed", conversation_id: "sub-agent-1", transcript_path: sub })
+    await run("session-end", { hook_event_name: "sessionEnd", conversation_id: "sub-agent-1" })
+    assert.equal(gateway.calls.presign.length, before)
+    assert.ok(!state()["sub-agent-1"])
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), /session=sub-agent-1 agent=cursor skipped — a sub-agent transcript/)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
   test("the catch-up finds a workspace whose path has dots, spaces and underscores", async () => {
     const home = freshDir("cursor-dotted")
     const root = "/tmp/Bonez Fixtures/api.v2_x"
@@ -2570,6 +2607,8 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
     put(join(home, ".codex", "sessions", "2026", "11", "20", `rollout-2026-11-20T10-00-00-${uuid}.jsonl`), "codex-rollout.jsonl", 2 * 86_400_000)
     put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-1", "cur-1.jsonl"), "cursor-transcript.jsonl", 86_400_000)
     put(join(home, ".cursor", "projects", "work-api", "other", "not-a-chat.jsonl"), "cursor-transcript.jsonl", 3_600_000)
+    // A Cursor sub-agent's transcript belongs to its conversation: never a session of its own.
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-1", "subagents", "cur-sub-1.jsonl"), "cursor-transcript.jsonl", 2 * 3_600_000)
     const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url, CODEX_HOME: join(home, ".codex") }
     const dry = await runCli(["backfill", "--dry-run"], { env })
     assert.equal(dry.status, 0, dry.stderr)
@@ -2577,6 +2616,7 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
     const order = [...dry.stdout.matchAll(/^ {2}\d{4}-\d\d-\d\d \d\d:\d\d {2}(\S+(?: \S+)?) +(\S+)$/gm)].map((m) => [m[1].trim(), m[2]])
     assert.deepEqual(order, [["Cursor", "cur-1"], ["Codex", uuid], ["Claude Code", "claude-old"]])
     assert.doesNotMatch(dry.stdout, /not-a-chat/)
+    assert.doesNotMatch(dry.stdout, /cur-sub-1/)
     const only = await runCli(["backfill", "--dry-run", "--agent=codex"], { env })
     assert.match(only.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Codex: 1/)
     const bad = await runCli(["backfill", "--agent=vim"], { env })
