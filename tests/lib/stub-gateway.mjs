@@ -6,13 +6,13 @@
 import { createServer } from "node:http"
 
 export function startStubGateway() {
-  const calls = { presign: [], put: [], complete: [], start: [], events: [], pairings: [], pairingResult: [] }
+  const calls = { presign: [], put: [], complete: [], start: [], events: [], pairings: [], pairingJoin: [], pairingResult: [] }
   // The live-session routes answer with these; a test sets them to replay an old gateway (403).
   // `pairing` drives the connect flow's two public routes: each poll of /connect/pairing-result takes
   // the next of `steps` (the last one repeats); `sessions` is the answer, its key returned once.
   const answers = {
     start: 200, events: 200, authServer: null,
-    pairing: { create: 201, steps: ["waiting"], sessions: null, code: "K7QM-4XPA", secret: "s3cret-poll-token" },
+    pairing: { create: 201, join: 200, steps: ["waiting"], sessions: null, code: "K7QM-4XPA", secret: "s3cret-poll-token" },
   }
   let uploadSeq = 0
   let keyCollected = false
@@ -79,6 +79,21 @@ export function startStubGateway() {
         res.end(JSON.stringify(p.create === 201
           ? { code: p.code, secret: p.issuedSecret ?? p.secret, url: p.url ?? `http://127.0.0.1:${port}/connect?pair=${p.code}`, expires_at: Date.now() / 1000 + 1800, poll_interval: 2 }
           : { code: "not_found" }))
+        return
+      }
+
+      // The Settings page's pairing: the installer joins it with `CODE.SECRET` (BONEZ_PAIR).
+      if (req.method === "POST" && req.url === "/connect/pairings/join") {
+        const p = answers.pairing
+        const asked = JSON.parse(body.toString("utf8") || "{}")
+        calls.pairingJoin.push({ headers: { ...req.headers }, body: asked })
+        keyCollected = false
+        const ok = asked.pair === `${p.code}.${p.secret}`
+        const status = ok ? (p.join ?? 200) : 404
+        res.writeHead(status, { "content-type": "application/json" })
+        res.end(JSON.stringify(status === 200
+          ? { code: p.code, url: `http://127.0.0.1:${port}/settings/connect-tools?pair=${p.code}`, expires_at: Date.now() / 1000 + 1800, poll_interval: 2 }
+          : { code: status === 410 ? "pairing_expired" : "pairing_not_found" }))
         return
       }
 

@@ -2121,18 +2121,30 @@ function openInBrowser(url) {
   }
 }
 
+// `CODE.SECRET`: the pairing Settings -> Bonez Plugin made and put in its install command (BONEZ_PAIR).
+function parsePair(raw) {
+  const m = /^([A-Za-z0-9]{4}-?[A-Za-z0-9]{4})\.([A-Za-z0-9_-]{16,128})$/.exec(String(raw ?? "").trim())
+  if (!m) return undefined
+  const bare = m[1].replace("-", "").toUpperCase()
+  return { code: `${bare.slice(0, 4)}-${bare.slice(4)}`, secret: m[2] }
+}
+
 function parseConnectArgs(rest) {
-  const o = { opener: "installer", open: process.env.BONEZ_CONNECT_NO_OPEN !== "1", detach: false, quiet: false, nonce: undefined }
+  const o = { opener: "installer", open: process.env.BONEZ_CONNECT_NO_OPEN !== "1", detach: false, quiet: false, nonce: undefined, pair: process.env.BONEZ_PAIR || undefined }
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a === "--opener") o.opener = rest[++i]
     else if (a.startsWith("--opener=")) o.opener = a.slice("--opener=".length)
+    else if (a === "--pair") o.pair = rest[++i]
+    else if (a.startsWith("--pair=")) o.pair = a.slice("--pair=".length)
     else if (a === "--no-open") o.open = false
     else if (a === "--detach") o.detach = true
     else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
     else if (a === "--nonce") o.nonce = rest[++i]
   }
   if (!CONNECT_OPENERS.has(o.opener)) o.opener = "installer"
+  // A hook's background `connect` makes its own pairing: a BONEZ_PAIR left in the environment is not for it.
+  if ((o.detach || o.quiet) && !rest.some((a) => a === "--pair" || a.startsWith("--pair="))) o.pair = undefined
   return o
 }
 
@@ -2174,26 +2186,37 @@ async function cmdConnect(rest) {
 
   const since = Date.now() - CONNECT_RECENT_DAYS * DAY_MS
   const recent = allBackfillTargets(BACKFILL_AGENTS, loadState(), since).targets.length
+  const report = {
+    opener: o.opener,
+    tools: detectTools(),
+    recent_sessions: Math.min(recent, 10_000),
+    host: hostname().slice(0, 64),
+    ...(pluginVersion() && { plugin_version: pluginVersion() }),
+  }
+  // From Settings -> Bonez Plugin's command: the page made the pairing and is open, so join it and open nothing.
+  const joining = o.pair !== undefined
+  const pair = joining ? parsePair(o.pair) : undefined
+  if (joining && !pair) return fail("The setup command is incomplete. Copy it again from the Bonez page.")
   let pairing
   try {
-    const res = await fetchJson(`${base}/connect/pairings`, {
+    const res = await fetchJson(`${base}${joining ? "/connect/pairings/join" : "/connect/pairings"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        opener: o.opener,
-        tools: detectTools(),
-        recent_sessions: Math.min(recent, 10_000),
-        host: hostname().slice(0, 64),
-        ...(pluginVersion() && { plugin_version: pluginVersion() }),
-      }),
+      body: JSON.stringify(joining ? { pair: `${pair.code}.${pair.secret}`, ...report } : report),
       signal: AbortSignal.timeout(CONNECT_HTTP_TIMEOUT_MS),
     })
+    if (joining && res.status === 410) return fail("The setup command expired. Copy a new one from the Bonez page.")
+    if (joining && res.status === 404) return fail("The setup command is no longer valid. Copy a new one from the Bonez page.")
     if (res.status === 404) throw new Error("this Bonez server does not offer the setup page yet")
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    if (typeof res.json.code !== "string" || typeof res.json.secret !== "string" || !safeBrowserUrl(res.json.url)) {
-      throw new Error("the server's answer was not understood")
+    if (joining) {
+      pairing = { ...res.json, code: pair.code, secret: pair.secret }
+    } else {
+      if (typeof res.json.code !== "string" || typeof res.json.secret !== "string" || !safeBrowserUrl(res.json.url)) {
+        throw new Error("the server's answer was not understood")
+      }
+      pairing = res.json
     }
-    pairing = res.json
   } catch (err) {
     const why = err?.host ? `could not reach ${err.host}` : err instanceof Error ? err.message : String(err)
     return fail(`Could not start the Bonez setup: ${why}.`)
@@ -2204,10 +2227,15 @@ async function cmdConnect(rest) {
   // Opened once per machine: the session-start hook does not open another page after this.
   const optin = readOptin()
   writeOptin({ ...optin, connectOpenedAt: optin.connectOpenedAt ?? Date.now() })
-  markConnect(o.nonce, { url, expiresAt })
-  const opened = o.open && openInBrowser(url)
-  await say(opened ? `Opened the Bonez setup page in your browser: ${url}` : `Open this page in your browser to finish setting up Bonez: ${url}`)
-  await say("Waiting for you in the browser…")
+  if (joining) {
+    markConnect(o.nonce, { expiresAt })
+    await say("Continue on the Bonez page in your browser.")
+  } else {
+    markConnect(o.nonce, { url, expiresAt })
+    const opened = o.open && openInBrowser(url)
+    await say(opened ? `Opened the Bonez setup page in your browser: ${url}` : `Open this page in your browser to finish setting up Bonez: ${url}`)
+    await say("Waiting for you in the browser…")
+  }
 
   const intervalMs = CONNECT_POLL_MS ?? Math.max(1, Number(pairing.poll_interval) || 2) * 1000
   let last = "waiting"
@@ -2239,7 +2267,7 @@ async function cmdConnect(rest) {
       answer = res.json.sessions ?? {}
       break
     }
-    if (status === "claimed" && last !== "claimed") await say("You're signed in. Finish the steps in your browser…")
+    if (status === "claimed" && last !== "claimed" && !joining) await say("You're signed in. Finish the steps in your browser…")
     if (typeof status === "string") last = status
   }
 
@@ -2720,7 +2748,7 @@ async function main() {
       console.log("bonez-session-sync — capture Claude Code, Codex and Cursor sessions into bonez")
       console.log("")
       console.log("usage:")
-      console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach]")
+      console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach] [--pair CODE.SECRET]")
       console.log("                                                                  set up Bonez in the browser")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")

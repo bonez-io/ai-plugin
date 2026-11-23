@@ -2701,6 +2701,69 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.ok(!log.includes("bnz_connect_key_3"), "the key is never logged")
   })
 
+  test("BONEZ_PAIR (the Settings page's command): joins that pairing, opens nothing, then saves the key", async () => {
+    reset({ steps: ["claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_4" } })
+    const { home, env } = connectEnv({ BONEZ_CONNECT_NO_OPEN: "", BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" })
+    history(home)
+    const res = await runCli(["connect", "--opener", "installer"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings.length, 0, "no pairing of its own")
+    const joined = gw.calls.pairingJoin[0].body
+    assert.equal(joined.pair, "K7QM-4XPA.s3cret-poll-token")
+    assert.equal(joined.opener, "installer")
+    assert.deepEqual(joined.tools, [{ id: "claude-code", installed: true }, { id: "codex", installed: true }])
+    assert.equal(joined.recent_sessions, 2)
+    assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
+    assert.deepEqual(res.stdout.trim().split("\n"), [
+      "Continue on the Bonez page in your browser.",
+      "Session saving is on.",
+      "Adding 2 recent sessions… 2/2",
+      "All set. You can close the setup page.",
+    ])
+    assert.doesNotMatch(res.stdout, /http/, "no link to open: the page is open already")
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_4")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+  })
+
+  test("--pair works like BONEZ_PAIR; a wrong, expired or malformed pair is one line, non-zero", async () => {
+    reset({ steps: ["answered"], sessions: { on: false, backfill: false, key: null } })
+    let { env } = connectEnv()
+    let res = await runCli(["connect", "--pair", "k7qm4xpa.s3cret-poll-token"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairingJoin[0].body.pair, "K7QM-4XPA.s3cret-poll-token")
+    assert.match(res.stdout, /Session saving stays off/)
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.not-the-secret-at-all" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command is no longer valid. Copy a new one from the Bonez page.")
+
+    reset({ join: 410 })
+    ;({ env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command expired. Copy a new one from the Bonez page.")
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_PAIR: "nonsense" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command is incomplete. Copy it again from the Bonez page.")
+    assert.equal(gw.calls.pairingJoin.length, 0)
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("a hook's background connect ignores a BONEZ_PAIR left in the environment", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" })
+    const res = await runCli(["connect", "--detach", "--opener", "codex"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    await waitFor(() => existsSync(join(store(home), "sync.log")) && readFileSync(join(store(home), "sync.log"), "utf8").includes("stays off"), { timeoutMs: 8000 })
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairingJoin.length, 0)
+  })
+
   test("session start with nothing set up opens the page once and says so; later starts do not", async () => {
     reset({ steps: ["waiting", "answered"], sessions: { on: false, backfill: false, key: null } })
     const { home, env } = connectEnv({ BONEZ_CAPTURE_OFFER: "", BONEZ_OAUTH_CLIENT_ID: "" })
