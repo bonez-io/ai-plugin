@@ -2457,7 +2457,8 @@ async function cmdConnectBackfillWorker() {
   await log(`connect: added ${added}/${total} recent sessions in the background`)
 }
 
-async function cmdConnect(rest) {
+// `given`: the screen install-ui already drew the tool rows on; it carries on here.
+async function cmdConnect(rest, given) {
   const o = parseConnectArgs(rest)
   if (o.demo) {
     const { playDemo } = await import("./lib/connect-tui.mjs")
@@ -2471,21 +2472,32 @@ async function cmdConnect(rest) {
     }
     return
   }
-  const view = o.quiet ? undefined : await connectView()
+  const base = gatewayBaseUrl()
+  if (!captureGatewayAllowed(base) && given) {
+    given.fail("This Bonez server does not offer session saving.")
+    process.exitCode = 1
+    return
+  }
+  if (!captureGatewayAllowed(base)) {
+    markConnect(o.nonce, { error: "not a Bonez-operated gateway" })
+    if (o.quiet) {
+      await log("connect: not a Bonez-operated gateway")
+      process.exitCode = 1
+    } else refuseForeignGateway("connect")
+    return
+  }
+  let view = given
+  if (!o.quiet && !view) {
+    view = await connectView()
+    // Plain output starts at the panel, as it always has; the full screen always has its header.
+    if (view.caps.live) view.header()
+  }
   const say = o.quiet ? (line) => log(`connect: ${line}`) : async () => {}
   const fail = async (line) => {
     markConnect(o.nonce, { error: line })
     if (o.quiet) await log(`connect: ${line}`)
     else view.fail(line)
     process.exitCode = 1
-  }
-
-  const base = gatewayBaseUrl()
-  if (!captureGatewayAllowed(base)) {
-    if (o.quiet) return fail("not a Bonez-operated gateway")
-    markConnect(o.nonce, { error: "not a Bonez-operated gateway" })
-    refuseForeignGateway("connect")
-    return
   }
 
   const recent = connectTargets().length
@@ -2548,7 +2560,56 @@ async function cmdConnect(rest) {
   if (o.quiet) return waitForAnswer(pending, { nonce: o.nonce })
 
   view.finish({ joining, url, opened })
+  if (joining) view.setLeaving("Setup goes on in the background and finishes when you answer in the browser.")
+  else view.setLeaving("Setup goes on in the background and finishes when you answer in the browser:", url)
   return watchConnect(view, pending, { started: spawnWorker(["_connect-wait", code]) })
+}
+
+// install.sh's screen (1SI-4098): on a terminal, install.sh starts this first and tells it what it does, one
+// line per change on stdin (tab-separated: `working NAME`, `tool STATE NAME WORD NEXT`, `detail TEXT`,
+// `claude-app URL`, `fail TEXT`, `end CONNECT`), so the tool steps and the browser steps are one screen from the
+// start. With `end 1` it goes on to `connect` (BONEZ_PAIR and BONEZ_GATEWAY_URL come from install.sh).
+async function cmdInstallUi() {
+  const view = await connectView()
+  view.header()
+  // Lines from install.sh, until `end` (or until it closes the pipe without one).
+  async function* lines() {
+    let buf = ""
+    process.stdin.setEncoding("utf8")
+    for await (const chunk of process.stdin) {
+      buf += chunk
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        yield buf.slice(0, i)
+        buf = buf.slice(i + 1)
+      }
+    }
+    if (buf) yield buf
+  }
+  let end
+  for await (const raw of lines()) {
+    const [kind, ...f] = raw.split("\t")
+    if (kind === "working") view.toolWorking(f[0])
+    else if (kind === "tool") view.tool(f[0], f[1], f[2], f[3] || undefined)
+    else if (kind === "detail") view.detail(f[0])
+    else if (kind === "claude-app") view.claudeApp(f[0])
+    else if (kind === "fail") {
+      view.fail(f[0])
+      process.exitCode = 1
+    } else if (kind === "end") {
+      end = { connect: f[0] === "1" }
+      break
+    }
+  }
+  if (!end) {
+    view.fail("The installer stopped before it finished. Run it again.")
+    process.exitCode = 1
+    return
+  }
+  if (process.exitCode) return
+  if (end.connect) return cmdConnect(["--opener", "installer"], view)
+  if (process.env.BONEZ_PAIR) view.note("Go back to the Bonez page in your browser to finish.")
+  view.allSet("Bonez is in your coding tools.")
+  if (view.caps.live) await sleep(800)
 }
 
 async function connectView() {
@@ -2562,14 +2623,17 @@ async function watchConnect(view, p, { started }) {
   const { code } = p
   const t0 = Date.now()
   let takenOver = started ? undefined : waitForAnswer(p)
-  const leave = (line) => {
-    view.stopLive()
-    if (line) view.note(line)
-    process.exit(0)
+  // Ctrl-C, the window closing: the screen is given back with what is left to do (the full-screen view does it
+  // itself); setup goes on in the background either way.
+  if (!view.caps.live) {
+    view.setLeaving("Stopped watching. Setup goes on in the background and finishes when you answer in the browser.")
+    process.on("SIGINT", () => {
+      view.end({ interrupted: true })
+      process.exit(0)
+    })
+    process.on("SIGHUP", () => process.exit(0))
+    process.on("SIGTERM", () => process.exit(0))
   }
-  process.on("SIGINT", () => leave("Stopped watching. Setup goes on in the background and finishes when you answer in the browser."))
-  process.on("SIGHUP", () => process.exit(0))
-  process.on("SIGTERM", () => leave())
 
   const shown = { claimed: false, tools: new Set(), answer: false, saved: false, backfill: false }
   view.waiting(`Waiting for you in the browser${view.caps.unicode ? "…" : "..."}`, p.expiresAt)
@@ -2622,6 +2686,8 @@ async function watchConnect(view, p, { started }) {
         process.exitCode = 1
       } else if (pr.ok) view.allSet()
       else view.stopLive()
+      // A moment on the finished screen before it is given back with its summary.
+      if (view.caps.live) await sleep(800)
       return
     }
     // The helper died before it finished (or never said it started): this process polls instead. The
@@ -3016,10 +3082,27 @@ async function main() {
         await cmdConnect(rest)
       } catch (err) {
         if (rest.includes("--quiet")) await log(`connect: ${err instanceof Error ? err.message : String(err)}`)
-        else console.error(`Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`)
+        else {
+          const why = `Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`
+          const { activeView } = await import("./lib/connect-tui.mjs")
+          if (activeView()) activeView().fail(why)
+          else console.error(why)
+        }
         process.exitCode = 1
       }
       // An idle keep-alive socket would hold the process open for seconds after the last line.
+      process.exit(process.exitCode ?? 0)
+      break
+    case "install-ui":
+      try {
+        await cmdInstallUi()
+      } catch (err) {
+        const { activeView } = await import("./lib/connect-tui.mjs")
+        const why = `Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`
+        if (activeView()) activeView().fail(why)
+        else console.error(why)
+        process.exitCode = 1
+      }
       process.exit(process.exitCode ?? 0)
       break
     case "_connect-wait":
@@ -3077,6 +3160,8 @@ async function main() {
       console.log("                                                                  set up Bonez in the browser")
       console.log("  bonez-session-sync.mjs connect --demo [--joining] [--until=adding|tools|waiting|signin|backfill|done]")
       console.log("                                                                  preview the installer's screen")
+      console.log("  bonez-session-sync.mjs install-ui                               the installer's screen: install.sh's events on stdin,")
+      console.log("                                                                  then `connect` on the same screen")
       console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
       console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
       console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")
@@ -3088,7 +3173,7 @@ async function main() {
       console.log("  bonez-session-sync.mjs enable")
       console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N] [--agent=claude|codex|cursor] [--since-days=N]")
       console.log("                                                                  upload past sessions")
-      process.exitCode = cmd ? 1 : 0
+      process.exitCode = !cmd || ["--help", "-h", "help"].includes(cmd) ? 0 : 1
   }
 }
 

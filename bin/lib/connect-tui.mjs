@@ -1,16 +1,20 @@
-// The installer's terminal view (1SI-4098): what `connect` prints while it waits for the person in the
-// browser, and the demo that plays the whole installer, install.sh's part included, with fake timing
-// (`connect --demo [mark|wordmark]`).
+// The installer's terminal view (1SI-4098): the screen install.sh hands over to (`install-ui`), what `connect`
+// shows while it waits for the person in the browser, and the demo that plays it all with fake timing
+// (`connect --demo`).
 //
 // Bonez's look, as in libs/ui/DESIGN.md §2 of bonez-core: ink and paper, sentence case, colour only for
 // state. Titles are bold, everything secondary is dim, and only the marks are coloured: ✓ green (done),
-// ✗ red (failed), the spinner yellow (working), · and – grey (to do, skipped). Words and the Bonez mark are
+// ✗ red (failed), the spinner yellow (working), · and – grey (to do, skipped). Words and the wordmark are
 // never coloured. Everything sits on one left margin and stays inside the terminal's width.
 //
-// It degrades on its own: with no terminal (a pipe, a log, CI) or TERM=dumb there is no spinner, no
-// redraw and no escape code, only plain lines; NO_COLOR drops the colour and keeps the spinner. A
-// Windows console that is not Windows Terminal gets ASCII marks and the word "bonez" for the mark.
-// Links are OSC 8 hyperlinks only in terminals known to show them; elsewhere the URL is printed whole.
+// Two ways to draw it:
+// - On a terminal: a full screen, like a classic TUI. It takes the alternate screen, hides the cursor and
+//   redraws the whole view in place on every change and on a resize, trimmed to the terminal's height (the
+//   header and the live line stay; the middle gives way). On the way out, however it ends (done, Ctrl-C, an
+//   error, the window closing), it gives the screen back and leaves a short summary in the scrollback.
+// - Anything else (a pipe, a log, CI, TERM=dumb): plain lines, no escape codes. NO_COLOR drops the colour.
+// A Windows console that is not Windows Terminal gets ASCII marks and the word "bonez" for the wordmark.
+// Links are OSC 8 hyperlinks only in terminals known to show them.
 
 const ESC = "\x1b["
 
@@ -27,8 +31,10 @@ export const SUBTITLE = "Connecting your coding tools"
 
 const LINK_TERMINALS = new Set(["iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby", "rio"])
 
+// BONEZ_FORCE_TTY=1 draws the full screen into a pipe: for the tests and the screenshots only.
 export function terminalCaps({ stream = process.stdout, env = process.env, platform = process.platform } = {}) {
-  const tty = Boolean(stream?.isTTY) && env.TERM !== "dumb" && !env.CI
+  const forced = env.BONEZ_FORCE_TTY === "1"
+  const tty = forced || (Boolean(stream?.isTTY) && env.TERM !== "dumb" && !env.CI)
   const unicode = platform !== "win32" || Boolean(env.WT_SESSION || env.TERM_PROGRAM)
   const links =
     tty &&
@@ -36,12 +42,15 @@ export function terminalCaps({ stream = process.stdout, env = process.env, platf
       Boolean(env.WT_SESSION || env.KONSOLE_VERSION) ||
       /kitty/.test(env.TERM ?? "") ||
       Number(env.VTE_VERSION) >= 5000)
+  const cols = Number(stream?.columns) || Number(env.COLUMNS) || 80
   return {
     live: tty,
     color: tty && env.NO_COLOR === undefined,
     unicode,
     links,
-    width: Math.max(60, Math.min(Number(stream?.columns) || Number(env.COLUMNS) || 80, 120)),
+    cols,
+    width: Math.max(60, Math.min(cols, 120)),
+    height: Number(stream?.rows) || Number(env.LINES) || 24,
   }
 }
 
@@ -53,6 +62,27 @@ const GLYPHS = {
 // Visible length: escape codes (SGR, OSC 8) take no room.
 const strip = (s) => s.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
 const visible = (s) => [...strip(s)].length
+
+// Cut a styled line to `width` visible characters, keeping its escapes whole.
+function cut(s, width) {
+  if (visible(s) <= width) return s
+  let out = ""
+  let n = 0
+  for (let i = 0; i < s.length; ) {
+    const esc = /^(\x1b\]8;;[^\x1b]*\x1b\\|\x1b\[[0-9;?]*[A-Za-z])/.exec(s.slice(i))
+    if (esc) {
+      out += esc[0]
+      i += esc[0].length
+      continue
+    }
+    const ch = String.fromCodePoint(s.codePointAt(i))
+    if (n >= width - 1) break
+    out += ch
+    n++
+    i += ch.length
+  }
+  return `${out}…${ESC}0m`
+}
 
 // Word wrap of plain text to `width`.
 function wrap(text, width) {
@@ -72,7 +102,8 @@ const NAME_W = 12
 const STATE_W = 10
 const M = "  " // the one left margin
 
-export function createView({ out = process.stdout, err = process.stderr, caps = terminalCaps({ stream: out }) } = {}) {
+// What both views draw with: styles, marks and the pieces of the screen, as lines.
+function kit(caps) {
   const g = caps.unicode ? GLYPHS.unicode : GLYPHS.ascii
   const sgr = (code, s) => (caps.color ? `${ESC}${code}m${s}${ESC}0m` : s)
   const st = {
@@ -85,155 +116,46 @@ export function createView({ out = process.stdout, err = process.stderr, caps = 
   }
   const mark = { done: st.green(g.done), failed: st.red(g.failed), skipped: st.grey(g.skipped), todo: st.grey(g.todo) }
   const link = (label, url) => (caps.links ? `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\` : undefined)
-  out.on?.("error", () => {}) // a closed pipe or terminal: stop drawing, never crash
-  let live // { text: () => string } while a live line is on screen
-  let timer
-  let frame = 0
-  let drawn = false
-
-  const write = (s) => {
-    try {
-      out.write(s)
-    } catch {
-      /* a closed terminal: nothing to draw on */
-    }
-  }
-  const clearLive = () => {
-    if (drawn) write(`\r${ESC}2K`)
-    drawn = false
-  }
-  const drawLive = () => {
-    if (!live || !caps.live) return
-    write(`\r${ESC}2K${live.text()}`)
-    drawn = true
-  }
-  // A permanent line: under a live line, it takes the live line's place and the live line comes back under it.
-  const line = (s = "") => {
-    clearLive()
-    write(`${s}\n`)
-    drawLive()
-  }
-  const spinner = () => st.yellow(g.spinner[frame % g.spinner.length])
-
-  const startLive = (textFn) => {
-    live = { text: textFn }
-    if (!caps.live) return
-    if (!timer) {
-      write(`${ESC}?25l`) // hide the cursor while the spinner turns
-      timer = setInterval(() => {
-        frame++
-        drawLive()
-      }, 80)
-      timer.unref?.()
-    }
-    drawLive()
-  }
-  const stopLive = () => {
-    clearLive()
-    live = undefined
-    if (timer) {
-      clearInterval(timer)
-      timer = undefined
-      write(`${ESC}?25h`)
-    }
-  }
-
+  const panelW = () => Math.min(caps.width - M.length * 2, 76)
   const clock = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000))
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
   }
-  const bar = (done, total, width) => {
-    const n = total ? Math.round((done / total) * width) : 0
-    return `${g.full.repeat(n)}${st.dim(g.empty.repeat(width - n))}`
-  }
-  // The panel's width; a status line's detail ends where the panel does.
-  const panelW = () => Math.min(caps.width - M.length * 2, 76)
-  // A status line with its dim detail at the right, under the panel's right edge.
-  const status = (lead, text, right) => {
-    const left = `${M}${lead} ${text}`
-    if (!right) return left
-    const gap = Math.max(2, M.length + panelW() - visible(left) - visible(right))
-    return `${left}${" ".repeat(gap)}${st.dim(right)}`
-  }
 
-  // A rounded panel: a bold title in its top edge, rows of plain text wrapped to fit. A row is
-  // [prefix, text, style]; a wrapped row hangs under its text, not its prefix.
-  function panel(title, rows) {
-    const inner = panelW() - 2
-    const textW = inner - 4
-    const [tl, tr, bl, br, h, v] = g.box
-    // Plain output (a log, a pipe) gets the words without the frame.
-    if (!caps.live) {
-      const plain = [title]
-      for (const [prefix = "", text = ""] of rows) {
-        const pw = visible(prefix)
-        wrap(text, textW - pw).forEach((p, i) => plain.push(p ? `${i === 0 ? prefix : " ".repeat(pw)}${p}` : ""))
-      }
-      return plain
-    }
-    const lines = [`${tl}${h} ${st.bold(title)} ${h.repeat(Math.max(1, inner - title.length - 3))}${tr}`, `${v}${" ".repeat(inner)}${v}`]
-    for (const [prefix = "", text = "", style = (s) => s] of rows) {
-      const pw = visible(prefix)
-      wrap(text, textW - pw).forEach((p, i) => {
-        const lead = i === 0 ? prefix : " ".repeat(pw)
-        // A URL is a link where the terminal has them (the escapes take no room).
-        const body = /^https?:\/\//.test(p) ? (link(style(p), p) ?? style(p)) : style(p)
-        lines.push(`${v}  ${lead}${body}${" ".repeat(Math.max(0, textW - pw - p.length))}  ${v}`)
-      })
-    }
-    lines.push(`${v}${" ".repeat(inner)}${v}`, `${bl}${h.repeat(inner)}${br}`)
-    return lines
-  }
-
-  const view = {
-    caps,
+  const k = {
+    g,
     st,
     mark,
-    line,
-    blank: () => line(""),
-
-    // install.sh draws this itself; the demo draws it here, the same way: the wordmark in ink, the dim line under it.
-    header() {
-      line()
-      if (!caps.unicode) {
-        line(`${M}${st.bold("bonez")}  ${st.dim(SUBTITLE)}`)
-      } else {
-        for (const row of WORDMARK) line(`${M}${row}`)
-        line()
-        line(`${M}${st.dim(SUBTITLE)}`)
-      }
-      line()
-    },
+    link,
+    panelW,
+    header: (compact) =>
+      compact || !caps.unicode
+        ? [`${M}${st.bold("bonez")}  ${st.dim(SUBTITLE)}`]
+        : [...WORDMARK.map((row) => `${M}${row}`), "", `${M}${st.dim(SUBTITLE)}`],
 
     // One tool: mark, name, state, and what to do next, dim, in columns. A next step too long for the width
     // goes under the state; details (a failure's own words) go under the name.
-    tool(state, name, word, next, details = []) {
-      const head = `${M}${mark[state]} ${name.padEnd(NAME_W)}  ${word.padEnd(STATE_W)}`
+    tool({ state, name, word, next, details = [] }) {
+      const head = `${M}${mark[state] ?? mark.todo} ${name.padEnd(NAME_W)}  ${word.padEnd(STATE_W)}`
+      const out = []
       const nextText = next ? st.dim(next) : ""
-      if (!next) line(head.trimEnd())
-      else if (visible(head) + 1 + visible(nextText) <= caps.width) line(`${head} ${nextText}`)
-      else {
-        line(head.trimEnd())
-        line(`${" ".repeat(M.length + 2 + NAME_W + 2)}${nextText}`)
-      }
-      for (const d of [].concat(details)) line(`${M}  ${st.dim(d)}`)
+      if (!next) out.push(head.trimEnd())
+      else if (visible(head) + 1 + visible(nextText) <= caps.width) out.push(`${head} ${nextText}`)
+      else out.push(head.trimEnd(), `${" ".repeat(M.length + 2 + NAME_W + 2)}${nextText}`)
+      for (const d of details) out.push(`${M}  ${st.dim(d)}`)
+      return out
     },
+    working: (name) => `${M}${st.yellow(g.todo)} ${name.padEnd(NAME_W)}  ${st.dim(`adding${g.ellipsis}`)}`,
     // The Claude app is optional: one dim line, a link to the prefilled connector where the terminal has links,
     // else the place to add it, short enough for 80 columns.
     claudeApp(url) {
       const linked = link(`Optional: add Bonez to the Claude app ${g.out}`.trim(), url)
-      line(`${M}${mark.todo} ${st.dim(linked ?? `Optional: Claude app ${g.to} claude.ai/customize/connectors`)}`)
-    },
-    // As install.sh draws it: a still yellow dot (a POSIX shell has no spinner), replaced by the result.
-    toolWorking(name) {
-      if (!caps.live) return
-      clearLive()
-      write(`${M}${st.yellow(g.todo)} ${name.padEnd(NAME_W)}  ${st.dim(`adding${g.ellipsis}`)}`)
-      drawn = true
+      return `${M}${mark.todo} ${st.dim(linked ?? `Optional: Claude app ${g.to} claude.ai/customize/connectors`)}`
     },
 
-    // "Finish in your browser": the steps, and why the terminal should stay open, in one panel.
-    finish({ joining, url, opened }) {
+    // "Finish in your browser": the steps, and why the terminal should stay open. A rounded panel on a terminal,
+    // its words alone elsewhere. `tight` drops the blank rows (a short terminal).
+    finish({ joining, url, opened }, tight = false) {
       const first = joining
         ? "Continue in the Bonez page you started from"
         : opened
@@ -241,76 +163,357 @@ export function createView({ out = process.stdout, err = process.stderr, caps = 
           : "Open the Bonez page below and sign in"
       const steps = [first, "Sign in to Bonez in each tool when it asks", "Choose whether Bonez saves your sessions"]
       const rows = steps.map((s, i) => [`${st.bold(String(i + 1))}  `, s])
-      // The page's link under step 1, inside the panel when it fits; a link where the terminal has them.
       const textW = panelW() - 6 - 3
       const showUrl = !joining && url
       const urlInside = showUrl && url.length <= textW
       if (urlInside) rows.splice(1, 0, ["   ", url, opened ? st.dim : (s) => s])
-      rows.push([], ["", "Keep this terminal open.", st.bold], ["", "It finishes setup when you answer in the browser."])
+      if (!tight) rows.push([])
+      rows.push(["", "Keep this terminal open.", st.bold], ["", "It finishes setup when you answer in the browser."])
       rows.push(["", "Closing it is safe: it finishes the next time you use a coding tool.", st.dim])
-      line()
-      for (const r of panel("Finish in your browser", rows)) line(`${M}${r}`)
-      if (showUrl && !urlInside) line(`${M}${url}`)
-      line()
+      const out = k.panel("Finish in your browser", rows, tight)
+      if (showUrl && !urlInside) out.push(`${M}${url}`)
+      return out
     },
 
-    // The loader while the browser is away: spinner, words, and the time waited and left, dim.
-    waiting(text, expiresAt) {
-      if (!caps.live) return line(`${M}${mark.todo} ${text}`)
-      const t0 = Date.now()
-      startLive(() => {
-        const left = expiresAt ? ` · ${Math.max(0, Math.ceil((expiresAt - Date.now()) / 60_000))} min left` : ""
-        return status(spinner(), text, `${clock(Date.now() - t0)}${left}`)
-      })
-    },
-    done(text, detail) {
-      line(`${M}${mark.done} ${text}${detail ? `  ${st.dim(detail)}` : ""}`)
-    },
-    skipped(text, detail) {
-      line(`${M}${mark.skipped} ${text}${detail ? `  ${st.dim(detail)}` : ""}`)
-    },
-    note(text) {
-      line(`${M}  ${st.dim(text)}`)
-    },
-    // A failure ends the run: on a terminal it is a ✗ line; otherwise the bare words on stderr.
-    fail(text) {
-      stopLive()
-      if (caps.live) write(`${M}${mark.failed} ${text}\n`)
-      else {
-        try {
-          err.write(`${text}\n`)
-        } catch {
-          /* nowhere to say it */
+    // A rounded panel: a bold title in its top edge, rows of plain text wrapped to fit, one blank row inside the
+    // top and the bottom edges. A row is [prefix, text, style]; a wrapped row hangs under its text.
+    panel(title, rows, tight = false) {
+      const inner = panelW() - 2
+      const textW = inner - 4
+      const [tl, tr, bl, br, h, v] = g.box
+      if (!caps.live) {
+        const plain = [`${M}${title}`]
+        for (const [prefix = "", text = ""] of rows) {
+          const pw = visible(prefix)
+          wrap(text, textW - pw).forEach((p, i) => plain.push(p ? `${M}${i === 0 ? prefix : " ".repeat(pw)}${p}` : ""))
         }
+        return plain
+      }
+      const pad = tight ? [] : [`${M}${v}${" ".repeat(inner)}${v}`]
+      const lines = [`${M}${tl}${h} ${st.bold(title)} ${h.repeat(Math.max(1, inner - title.length - 3))}${tr}`, ...pad]
+      for (const [prefix = "", text = "", style = (s) => s] of rows) {
+        const pw = visible(prefix)
+        wrap(text, textW - pw).forEach((p, i) => {
+          const lead = i === 0 ? prefix : " ".repeat(pw)
+          // A URL is a link where the terminal has them (the escapes take no room).
+          const body = /^https?:\/\//.test(p) ? (link(style(p), p) ?? style(p)) : style(p)
+          lines.push(`${M}${v}  ${lead}${body}${" ".repeat(Math.max(0, textW - pw - p.length))}  ${v}`)
+        })
+      }
+      lines.push(...pad, `${M}${bl}${h.repeat(inner)}${br}`)
+      return lines
+    },
+
+    event({ kind, text, detail }) {
+      if (kind === "note") return `${M}  ${st.dim(text)}`
+      return `${M}${mark[kind]} ${text}${detail ? `  ${st.dim(detail)}` : ""}`
+    },
+
+    // The live line: a spinner, the words, and the time waited and left under the panel's right edge; or the
+    // sessions being added as a thin bar with the count.
+    live(l, frame) {
+      const spin = st.yellow(g.spinner[frame % g.spinner.length])
+      if (l.type === "progress") {
+        const count = `${l.done} of ${l.total}`
+        const label = "Adding recent sessions"
+        const barW = Math.max(10, panelW() - 2 - label.length - 2 - 2 - count.length)
+        const n = l.total ? Math.round((l.done / l.total) * barW) : 0
+        return `${M}${spin} ${label}  ${g.full.repeat(n)}${st.dim(g.empty.repeat(barW - n))}  ${st.dim(count)}`
+      }
+      const left = `${M}${spin} ${l.text}`
+      const right = `${clock(Date.now() - l.t0)}${l.expiresAt ? ` · ${Math.max(0, Math.ceil((l.expiresAt - Date.now()) / 60_000))} min left` : ""}`
+      const gap = Math.max(2, M.length + panelW() - visible(left) - visible(right))
+      return `${left}${" ".repeat(gap)}${st.dim(right)}`
+    },
+    allSet: (text) => `${M}${st.bold("All set.")} ${st.dim(text)}`,
+  }
+  return k
+}
+
+const DEFAULT_ALL_SET = "You can close this terminal and the setup page."
+let active // the view on screen, so a crash anywhere can give the screen back
+
+export function activeView() {
+  return active
+}
+
+export function createView({ out = process.stdout, err = process.stderr, caps = terminalCaps({ stream: out }) } = {}) {
+  return caps.live ? createScreen({ out, caps }) : createPlain({ out, err, caps })
+}
+
+// ------------------------------------------------------------------------------------------- plain
+
+function createPlain({ out, err, caps }) {
+  const k = kit(caps)
+  const write = (s) => {
+    try {
+      out.write(s)
+    } catch {
+      /* nowhere to write */
+    }
+  }
+  out.on?.("error", () => {})
+  const line = (s = "") => write(`${s}\n`)
+  let leaving
+  const view = {
+    caps,
+    st: k.st,
+    mark: k.mark,
+    header() {
+      line()
+      for (const l of k.header()) line(l)
+      line()
+    },
+    toolWorking() {},
+    tool(state, name, word, next, details = []) {
+      for (const l of k.tool({ state, name, word, next, details: [].concat(details) })) line(l)
+    },
+    detail(text) {
+      line(`${M}  ${text}`)
+    },
+    claudeApp(url) {
+      line(k.claudeApp(url))
+    },
+    finish(opts) {
+      line()
+      for (const l of k.finish(opts)) line(l)
+      line()
+    },
+    waiting(text) {
+      line(`${M}${k.mark.todo} ${text}`)
+    },
+    done: (text, detail) => line(k.event({ kind: "done", text, detail })),
+    skipped: (text, detail) => line(k.event({ kind: "skipped", text, detail })),
+    note: (text) => line(k.event({ kind: "note", text })),
+    // A failure ends the run: the bare words on stderr.
+    fail(text) {
+      try {
+        err.write(`${text}\n`)
+      } catch {
+        /* nowhere to say it */
       }
     },
-    // Adding the recent sessions: a thin bar and the count. Plain output gets the result line only.
-    progress(done, total) {
-      startLive(() => {
-        const count = `${done} of ${total}`
-        const label = "Adding recent sessions"
-        // The bar runs to the panel's right edge, the count last.
-        const barW = Math.max(10, panelW() - 2 - label.length - 2 - 2 - count.length)
-        return `${M}${spinner()} ${label}  ${bar(done, total, barW)}  ${st.dim(count)}`
-      })
-    },
-    stopLive,
-    // Stop the spinner where it is and keep the line (the demo's screenshots).
-    freeze() {
-      if (timer) clearInterval(timer)
-      timer = undefined
-      if (drawn) write("\n")
-      drawn = false
-      live = undefined
-      if (caps.live) write(`${ESC}?25h`)
-    },
-    allSet(text = "You can close this terminal and the setup page.") {
-      stopLive()
+    progress() {},
+    stopLive() {},
+    allSet(text = DEFAULT_ALL_SET) {
       line()
-      line(`${M}${st.bold("All set.")} ${st.dim(text)}`)
+      line(k.allSet(text))
       line()
     },
-    close: stopLive,
+    setLeaving(note) {
+      leaving = note
+    },
+    end({ interrupted } = {}) {
+      if (interrupted && leaving) line(`${M}${leaving}`)
+      leaving = undefined
+    },
+    close() {
+      view.end()
+    },
+  }
+  return view
+}
+
+// ------------------------------------------------------------------------------------------- full screen
+
+function createScreen({ out, caps }) {
+  const k = kit(caps)
+  const m = { tools: [], working: undefined, claude: undefined, panel: undefined, events: [], live: undefined, final: undefined }
+  let entered = false
+  let ended = false
+  let timer
+  let frame = 0
+  let leaving // what the summary says when it ends before the answer: { note, link }
+
+  const write = (s) => {
+    try {
+      out.write(s)
+    } catch {
+      /* the terminal is gone */
+    }
+  }
+  out.on?.("error", () => {})
+
+  // The whole view as lines, as tight as `level` asks: 0 everything, 1 the tools in one line, 2 a one-line
+  // header, 3 the panel without its blank rows, 4 only the newest events.
+  function compose(level, height) {
+    const top = ["", ...k.header(level >= 2), ""]
+    const tools = []
+    if (level >= 1 && m.panel) {
+      const by = (s) => m.tools.filter((t) => t.state === s).map((t) => t.name)
+      const added = by("done")
+      if (added.length) tools.push(`${M}${k.mark.done} ${added.join(", ")} ${k.st.dim("added")}`)
+      for (const t of m.tools.filter((t) => t.state === "failed")) tools.push(...k.tool({ ...t, details: t.details.slice(0, 1) }))
+    } else {
+      for (const t of m.tools) tools.push(...k.tool(t))
+      if (m.working) tools.push(k.working(m.working))
+      if (m.claude) tools.push(k.claudeApp(m.claude))
+    }
+    const panel = m.panel ? ["", ...k.finish(m.panel, level >= 3)] : []
+    let events = m.events.map((e) => k.event(e))
+    const bottom = []
+    if (m.live) bottom.push(k.live(m.live, frame))
+    if (m.final) bottom.push("", k.allSet(m.final))
+    const gap = m.events.length || m.live || m.final ? [""] : []
+    if (level >= 4) {
+      const room = height - top.length - tools.length - panel.length - gap.length - bottom.length
+      if (events.length > room) events = room > 1 ? [`${M}  ${k.st.dim(`${k.g.ellipsis} ${events.length - room + 1} more`)}`, ...events.slice(events.length - room + 1)] : []
+    }
+    return { top, middle: [...tools, ...panel, ...gap, ...events], bottom }
+  }
+
+  // Fits the terminal's height: the header and the live line stay, the middle gives way.
+  function frameLines() {
+    const height = Math.max(8, caps.height)
+    for (let level = 0; level <= 4; level++) {
+      const { top, middle, bottom } = compose(level, height)
+      const all = [...top, ...middle, ...bottom]
+      if (all.length <= height || level === 4) {
+        if (all.length <= height) return all
+        const room = Math.max(0, height - top.length - bottom.length)
+        return [...top, ...middle.slice(0, room), ...bottom].slice(0, height)
+      }
+    }
+    return []
+  }
+
+  function render() {
+    if (!entered || ended) return
+    const lines = frameLines().map((l) => `${cut(l, caps.cols)}${ESC}K`)
+    write(`${ESC}H${lines.join("\r\n")}${ESC}J`)
+  }
+
+  function resize() {
+    const fresh = terminalCaps({ stream: out })
+    if (out.columns) Object.assign(caps, { cols: fresh.cols, width: fresh.width })
+    if (out.rows) caps.height = fresh.height
+    render()
+  }
+
+  const onSignal = (signal, code) => () => {
+    view.end({ interrupted: true })
+    process.exit(signal === "SIGINT" && leaving ? 0 : code)
+  }
+  const crash = (e) => {
+    view.fail(`Something went wrong: ${e instanceof Error ? e.message : String(e)}`)
+    view.end()
+    process.exit(1)
+  }
+  // Process-wide, so the screen is given back however the process ends; only while the screen is taken (from
+  // the first draw to end()), and all of them are removed again by end().
+  const handlers = {
+    exit: () => view.end(),
+    SIGINT: onSignal("SIGINT", 130),
+    SIGTERM: onSignal("SIGTERM", 143),
+    SIGHUP: onSignal("SIGHUP", 129),
+    SIGWINCH: () => resize(),
+    uncaughtException: crash,
+    unhandledRejection: crash,
+  }
+  function enter() {
+    if (entered || ended) return
+    entered = true
+    active = view
+    write(`${ESC}?1049h${ESC}?25l${ESC}H${ESC}2J`)
+    for (const [ev, fn] of Object.entries(handlers)) process.on(ev, fn)
+    out.on?.("resize", resize)
+  }
+  const change = (fn) => {
+    enter()
+    fn()
+    render()
+  }
+  const startTimer = () => {
+    if (timer) return
+    timer = setInterval(() => {
+      frame++
+      render()
+    }, 80)
+    timer.unref?.()
+  }
+  const stopTimer = () => {
+    if (timer) clearInterval(timer)
+    timer = undefined
+  }
+
+  // What stays in the scrollback once the screen is given back.
+  function summary({ interrupted }) {
+    const lines = ["", `${M}${k.st.bold("bonez")}  ${k.st.dim(SUBTITLE)}`, ""]
+    // The rows and their next steps; only a failure keeps its details (its own words, the fix).
+    for (const t of m.tools) lines.push(...k.tool(t.state === "failed" ? t : { ...t, details: [] }))
+    if (m.claude) lines.push(k.claudeApp(m.claude))
+    if (m.events.length) lines.push("", ...m.events.map((e) => k.event(e)))
+    if (m.final) lines.push("", k.allSet(m.final))
+    else if (leaving && (interrupted || !m.events.some((e) => e.kind === "failed"))) {
+      lines.push("", `${M}${k.mark.todo} ${leaving.note}`)
+      if (leaving.link) lines.push(`${M}  ${leaving.link}`)
+    }
+    lines.push("")
+    return lines
+  }
+
+  const view = {
+    caps,
+    st: k.st,
+    mark: k.mark,
+    // The header is always on the screen; this takes the screen.
+    header: () => change(() => {}),
+    toolWorking: (name) => change(() => (m.working = name)),
+    tool: (state, name, word, next, details = []) =>
+      change(() => {
+        m.working = undefined
+        m.tools.push({ state, name, word, next, details: [].concat(details) })
+      }),
+    detail: (text) => change(() => m.tools.at(-1)?.details.push(text)),
+    claudeApp: (url) => change(() => (m.claude = url)),
+    finish: (opts) => change(() => (m.panel = opts)),
+    waiting: (text, expiresAt) =>
+      change(() => {
+        m.live = { type: "waiting", text, expiresAt, t0: Date.now() }
+        startTimer()
+      }),
+    done: (text, detail) => change(() => m.events.push({ kind: "done", text, detail })),
+    skipped: (text, detail) => change(() => m.events.push({ kind: "skipped", text, detail })),
+    note: (text) => change(() => m.events.push({ kind: "note", text })),
+    fail: (text) =>
+      change(() => {
+        m.live = undefined
+        stopTimer()
+        m.events.push({ kind: "failed", text })
+      }),
+    progress: (done, total) =>
+      change(() => {
+        m.live = { type: "progress", done, total }
+        startTimer()
+      }),
+    stopLive: () =>
+      change(() => {
+        m.live = undefined
+        stopTimer()
+      }),
+    allSet: (text = DEFAULT_ALL_SET) =>
+      change(() => {
+        m.live = undefined
+        stopTimer()
+        m.final = text
+      }),
+    // What the summary says if it ends before the answer arrives.
+    setLeaving: (note, link) => (leaving = { note, link }),
+    // Gives the screen back (cursor, the normal screen) and leaves the summary. Safe to call more than once.
+    end({ interrupted = false } = {}) {
+      if (ended) return
+      ended = true
+      stopTimer()
+      if (active === view) active = undefined
+      if (!entered) return
+      for (const [ev, fn] of Object.entries(handlers)) process.off(ev, fn)
+      out.off?.("resize", resize)
+      write(`${ESC}?25h${ESC}?1049l`)
+      write(summary({ interrupted }).join("\n") + "\n")
+    },
+    close() {
+      view.end()
+    },
   }
   return view
 }
@@ -323,18 +526,20 @@ export const CLAUDE_CONNECTOR_DEMO_URL =
   "https://claude.ai/customize/connectors?modal=add-custom-connector&connectorName=Bonez&connectorUrl=https%3A%2F%2Fgateway.bonez.io%2Fmcp"
 
 // Plays the whole installer, install.sh's rows included, with fake timing. No network, no file, no tool is
-// touched. `until` stops at one stage and leaves it on screen (for screenshots): adding, tools, waiting,
-// signin, backfill, done.
+// touched. `until` stops at one stage (for screenshots): adding, tools, waiting, signin, backfill, done; the
+// screen is then given back as if the person pressed Ctrl-C.
 export async function playDemo({ until, speed = 1, joining = false, out = process.stdout, caps } = {}) {
   const view = createView({ out, ...(caps && { caps }) })
   const g = view.caps.unicode ? GLYPHS.unicode : GLYPHS.ascii
   const t = (ms) => pause(ms / speed)
+  const pairUrl = "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA"
   const stopAt = async (stage) => {
     if (until !== stage) return false
     await t(1200)
-    view.freeze()
+    view.end({ interrupted: true })
     return true
   }
+  view.setLeaving("Setup goes on in the background and finishes when you answer in the browser:", pairUrl)
   view.header()
   // install.sh's rows, word for word.
   const tools = [
@@ -353,7 +558,7 @@ export async function playDemo({ until, speed = 1, joining = false, out = proces
   if (await stopAt("tools")) return
 
   const expiresAt = Date.now() + 30 * 60_000
-  view.finish({ joining, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: !joining })
+  view.finish({ joining, url: pairUrl, opened: !joining })
   view.waiting(`Waiting for you in the browser${g.ellipsis}`, expiresAt)
   if (until === "waiting") await t(2400) // a few seconds on the clock
   if (await stopAt("waiting")) return
@@ -369,15 +574,12 @@ export async function playDemo({ until, speed = 1, joining = false, out = proces
   const total = 37
   for (let i = 0; i <= total; i++) {
     view.progress(i, total)
-    if (until === "backfill" && i === 23) {
-      await stopAt("backfill")
-      return
-    }
+    if (until === "backfill" && i === 23 && (await stopAt("backfill"))) return
     await t(70)
   }
   view.stopLive()
   view.done(`Added ${total} recent sessions`, "from the last 14 days")
   view.allSet()
-  if (until === "done") await t(400)
-  view.close()
+  await t(until === "done" ? 1200 : 600)
+  view.end()
 }

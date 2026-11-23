@@ -151,9 +151,12 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
     assert.equal(mod.shouldSkip(staleChanged, "s1", 4, "hash-b"), null)
 
     // gatewayBaseUrl: default, explicit override, MCP-URL-derived fallback.
+    // An empty data folder: the gateway this machine's own `connect` paired with must not leak in.
     const savedGw = process.env.BONEZ_GATEWAY_URL
     const savedMcp = process.env.BONEZ_MCP_URL
+    const savedData = process.env.BONEZ_SESSION_SYNC_DATA
     try {
+      process.env.BONEZ_SESSION_SYNC_DATA = freshDir("gateway-default")
       delete process.env.BONEZ_GATEWAY_URL
       delete process.env.BONEZ_MCP_URL
       assert.equal(mod.gatewayBaseUrl(), "https://gateway.bonez.io")
@@ -167,6 +170,8 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
       else process.env.BONEZ_GATEWAY_URL = savedGw
       if (savedMcp === undefined) delete process.env.BONEZ_MCP_URL
       else process.env.BONEZ_MCP_URL = savedMcp
+      if (savedData === undefined) delete process.env.BONEZ_SESSION_SYNC_DATA
+      else process.env.BONEZ_SESSION_SYNC_DATA = savedData
     }
 
     // buildBundle: exact manifest field set, matching packages/desktop/src/main/import/index.ts
@@ -2978,6 +2983,167 @@ describe("connect: the setup page in the browser and this machine share a pairin
     }
   })
 
+  // install.sh's side of `install-ui`: one tab-separated event per line on stdin.
+  const events = (...rows) => rows.map((r) => r.join("\t")).join("\n") + "\n"
+  const installRows = [
+    ["working", "Claude Code"],
+    ["tool", "done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate"],
+    ["working", "Codex"],
+    ["tool", "done", "Codex", "added", "Signed in"],
+    ["tool", "skipped", "OpenCode", "not found", ""],
+    ["claude-app", "https://claude.ai/customize/connectors?modal=add-custom-connector"],
+  ]
+  // A terminal as install.sh starts it, without one: BONEZ_FORCE_TTY draws the full screen into the pipe.
+  const screenEnv = (extra = {}) => connectEnv({ BONEZ_FORCE_TTY: "1", TERM: "xterm-256color", TERM_PROGRAM: "", COLUMNS: "80", LINES: "40", ...extra })
+
+  test("install-ui `end 0`: the tool rows and All set, on the full screen and in plain lines; no setup is started", async () => {
+    reset()
+    let { home, env } = screenEnv()
+    let res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    const s = screenOf(res.stdout)
+    assert.ok(s.entered && s.restored, "the screen is taken and given back")
+    assert.ok(s.frame.includes("  ✓ Codex         added      Signed in"), s.frame.join("\n"))
+    assert.ok(s.frame.includes("  All set. Bonez is in your coding tools."))
+    assert.deepEqual(s.summary.filter(Boolean), [
+      "  bonez  Connecting your coding tools",
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  All set. Bonez is in your coding tools.",
+    ])
+    assert.equal(gw.calls.pairings.length + gw.calls.pairingJoin.length, 0, "no pairing")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+
+    // From the Settings page (BONEZ_PAIR) the page finishes it: the screen says to go back to it.
+    ;({ env } = screenEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.ok(screenOf(res.stdout).summary.includes("    Go back to the Bonez page in your browser to finish."))
+    assert.equal(gw.calls.pairingJoin.length, 0)
+
+    // A pipe, CI or TERM=dumb: plain lines, no escape code, the same words.
+    ;({ env } = connectEnv({ TERM: "dumb" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.doesNotMatch(res.stdout, /\x1b/)
+    const plain = res.stdout.split("\n").filter(Boolean)
+    assert.deepEqual(plain.slice(-5), [
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  All set. Bonez is in your coding tools.",
+    ])
+    assert.ok(!res.stdout.includes("adding"), "no working row in plain lines")
+  })
+
+  test("install-ui `end 1` goes on to connect on the same screen, and finishes with the summary", async () => {
+    reset({ steps: ["waiting", "claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_ui" } })
+    const { home, env } = screenEnv()
+    history(home)
+    const res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairings[0].body.opener, "installer")
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_ui")
+    const s = screenOf(res.stdout)
+    assert.ok(s.entered && s.restored)
+    assert.equal(res.stdout.split("\x1b[?1049h").length, 2, "one screen, from the first tool to the end")
+    // The last frame: the tool rows, the panel, the events and All set, all on one screen.
+    for (const l of ["  ✓ Codex         added      Signed in", "  ✓ Session saving is on", "  All set. You can close this terminal and the setup page."]) {
+      assert.ok(s.frame.includes(l), s.frame.join("\n"))
+    }
+    assert.ok(s.frame.some((l) => l.includes("Finish in your browser")))
+    assert.deepEqual(s.summary.filter(Boolean), [
+      "  bonez  Connecting your coding tools",
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  ✓ Signed in to Bonez in the browser",
+      "  ✓ Session saving is on",
+      "  ✓ Added 2 recent sessions  from the last 14 days",
+      "  All set. You can close this terminal and the setup page.",
+    ])
+  })
+
+  test("install-ui `fail`: the failure is on the screen, no setup starts, non-zero; a pipe closed early is a failure too", async () => {
+    reset()
+    let { env } = screenEnv()
+    let res = await runCli(["install-ui"], {
+      env,
+      input: events(installRows[0], ["tool", "failed", "Cursor", "failed", ""], ["detail", "cursor: permission denied"], ["fail", "Bonez could not be added to Cursor."], ["end", "1"]),
+    })
+    assert.equal(res.status, 1)
+    assert.equal(gw.calls.pairings.length, 0, "no connect after a failure")
+    let s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ Cursor        failed"))
+    assert.ok(s.summary.includes("    cursor: permission denied"), "a failed tool keeps its details")
+    assert.ok(s.summary.includes("  ✗ Bonez could not be added to Cursor."))
+    assert.ok(!s.summary.some((l) => l.includes("All set")))
+
+    // install.sh died: the pipe closes with no `end`.
+    ;({ env } = screenEnv())
+    res = await runCli(["install-ui"], { env, input: events(installRows[0], installRows[1]) })
+    assert.equal(res.status, 1)
+    s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ The installer stopped before it finished. Run it again."))
+
+    // Plain: the failure is the bare words on stderr.
+    ;({ env } = connectEnv({ TERM: "dumb" }))
+    res = await runCli(["install-ui"], { env, input: events(["fail", "Bonez could not be added to Cursor."], ["end", "0"]) })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "Bonez could not be added to Cursor.")
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("install-ui `end 1` against a foreign gateway or a failed pairing: one ✗ line, the screen given back, non-zero", async () => {
+    reset({ create: 404 })
+    let { env } = screenEnv()
+    let res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 1)
+    let s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ Could not start the Bonez setup: this Bonez server does not offer the setup page yet."), s.summary.join("\n"))
+
+    reset()
+    ;({ env } = screenEnv({ BONEZ_GATEWAY_URL: "https://bonez.example.com" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 1)
+    s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ This Bonez server does not offer session saving."))
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("install-ui on Ctrl-C: the screen is given back with what was done, exit 130", async () => {
+    reset()
+    const { env } = screenEnv()
+    const child = spawn(process.execPath, [SCRIPT, "install-ui"], { cwd: REPO_ROOT, env: { ...process.env, ...env } })
+    let stdout = ""
+    child.stdout.on("data", (d) => (stdout += d))
+    const closed = new Promise((r) => child.on("close", (status) => r(status)))
+    child.stdin.write(events(...installRows.slice(0, 4)))
+    await waitFor(() => stdout.includes("Signed in"), { timeoutMs: 5000 })
+    child.kill("SIGINT")
+    assert.equal(await closed, 130)
+    const s = screenOf(stdout)
+    assert.ok(s.restored, "the cursor and the normal screen are back")
+    assert.ok(s.summary.includes("  ✓ Codex         added      Signed in"), s.summary.join("\n"))
+  })
+
+  test("--help lists install-ui and exits 0, so install.sh can check for it", async () => {
+    const res = await runCli(["--help"])
+    assert.equal(res.status, 0)
+    assert.match(res.stdout, /bonez-session-sync\.mjs install-ui /)
+    assert.match(res.stdout, /bonez-session-sync\.mjs connect /)
+    assert.equal((await runCli(["no-such-command"])).status, 1)
+  })
+
   test("--demo plays the installer with no network and no file", async () => {
     reset()
     for (const joining of [[], ["--joining"]]) {
@@ -3004,14 +3170,14 @@ describe("the installer's terminal view degrades cleanly (1SI-4098)", () => {
     const view = createView({ out: t.stream, caps: terminalCaps({ stream: t.stream, env: { TERM: "xterm-256color" }, platform: "darwin" }) })
     view.waiting("Waiting for you in the browser…", Date.now() + 60_000)
     view.done("Session saving is on")
-    view.close()
+    view.end()
     assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Session saving is on/, "the mark is green, the words are not")
     assert.match(t.text(), /\x1b\[33m⠋/)
     const n = tty()
     const plainColour = createView({ out: n.stream, caps: terminalCaps({ stream: n.stream, env: { TERM: "xterm", NO_COLOR: "" }, platform: "darwin" }) })
     plainColour.waiting("Waiting", 0)
     plainColour.done("Done")
-    plainColour.close()
+    plainColour.end()
     assert.doesNotMatch(n.text(), /\x1b\[\d+m/)
     assert.match(n.text(), /⠋ Waiting/)
   })
@@ -3035,65 +3201,143 @@ describe("the installer's terminal view degrades cleanly (1SI-4098)", () => {
   })
 })
 
+// The full screen as a test sees it: the frames drawn on the alternate screen, the last one, and the summary
+// left in the scrollback once the screen is given back.
+const ALT_ON = "\x1b[?1049h"
+const ALT_OFF = "\x1b[?25h\x1b[?1049l"
+function unstyled(s) {
+  return s.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "")
+}
+function screenOf(text) {
+  const at = text.lastIndexOf(ALT_OFF)
+  const during = at < 0 ? text : text.slice(0, at)
+  // Taking the screen clears it (`ESC[H ESC[2J`); every frame after that starts at the top left.
+  const frames = during.split("\x1b[H").slice(2)
+  return {
+    entered: text.startsWith(ALT_ON),
+    restored: at >= 0 && text.indexOf(ALT_OFF) === at,
+    frames,
+    frame: unstyled(frames.at(-1) ?? "").split("\n"),
+    summary: at < 0 ? [] : unstyled(text.slice(at + ALT_OFF.length)).split("\n"),
+  }
+}
+
 describe("the installer's screen: the Bonez mark, columns, the panel, links and the width (1SI-4098)", () => {
-  const term = ({ columns = 80, env = { TERM: "xterm-256color" }, platform = "darwin" } = {}) => {
+  // The screen installs process handlers while it is up (signals, exit, a crash); every test gives the screen back,
+  // and with it every handler, so the test runner keeps only its own.
+  const watched = ["exit", "SIGINT", "SIGTERM", "SIGHUP", "SIGWINCH", "uncaughtException", "unhandledRejection"]
+  const listeners = () => Object.fromEntries(watched.map((e) => [e, process.listenerCount(e)]))
+  let before0
+  before(() => {
+    before0 = listeners()
+  })
+  after(() => {
+    assert.deepEqual(listeners(), before0, "a screen left process handlers installed")
+  })
+
+  const term = ({ columns = 80, rows = 40, env = { TERM: "xterm-256color" }, platform = "darwin" } = {}) => {
     let out = ""
-    const stream = { isTTY: true, columns, write: (s) => { out += s } }
+    const stream = { isTTY: true, columns, rows, write: (s) => { out += s } }
     return { stream, env, platform, text: () => out }
   }
-  const lines = (text) => text.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "").split("\n")
+  const open = async (t) => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    return createView({ out: t.stream, caps: terminalCaps(t) })
+  }
+
+  test("it takes the alternate screen and gives it back with a summary; its handlers live only while it is up", async () => {
+    const { activeView } = await import("../bin/lib/connect-tui.mjs")
+    const t = term()
+    const view = await open(t)
+    assert.equal(t.text(), "", "nothing is drawn, and nothing installed, before the first change")
+    assert.deepEqual(listeners(), before0)
+    view.header()
+    assert.equal(activeView(), view)
+    assert.ok(watched.every((e) => process.listenerCount(e) === before0[e] + 1), "one handler per event while up")
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.end()
+    view.end() // a second end (the exit handler after an explicit one) does nothing
+    assert.equal(activeView(), undefined)
+    assert.deepEqual(listeners(), before0)
+    const s = screenOf(t.text())
+    assert.ok(s.entered && s.restored, "alternate screen on, then off, exactly once")
+    assert.ok(t.text().includes("\x1b[?25l"), "the cursor is hidden while it draws")
+    assert.deepEqual(s.summary.filter(Boolean), ["  bonez  Connecting your coding tools", "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate"])
+    // A view that never drew takes nothing and gives nothing back.
+    const quiet = term()
+    ;(await open(quiet)).end()
+    assert.equal(quiet.text(), "")
+    assert.deepEqual(listeners(), before0)
+  })
 
   test("the header is the drawn wordmark in ink with the dim line under it; ASCII gets the word", async () => {
-    const { createView, terminalCaps, WORDMARK } = await import("../bin/lib/connect-tui.mjs")
+    const { WORDMARK } = await import("../bin/lib/connect-tui.mjs")
     assert.equal(WORDMARK.length, 4)
     assert.ok(WORDMARK.every((row) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(row) && [...row].length <= 40))
     const t = term()
-    createView({ out: t.stream, caps: terminalCaps(t) }).header()
-    assert.deepEqual(lines(t.text()).slice(0, 7), ["", ...WORDMARK.map((r) => `  ${r}`), "", "  Connecting your coding tools"])
-    assert.ok(t.text().includes(`  ${WORDMARK[0]}\n`), "the wordmark is never coloured")
+    const view = await open(t)
+    view.header()
+    view.end()
+    assert.deepEqual(screenOf(t.text()).frame.slice(0, 7), ["", ...WORDMARK.map((r) => `  ${r}`), "", "  Connecting your coding tools"])
+    assert.ok(t.text().includes(`  ${WORDMARK[0]}\x1b[K`), "the wordmark is never coloured")
     const a = term({ platform: "win32" })
-    createView({ out: a.stream, caps: terminalCaps(a) }).header()
-    assert.deepEqual(lines(a.text()).filter(Boolean), ["  bonez  Connecting your coding tools"])
+    const ascii = await open(a)
+    ascii.header()
+    ascii.end()
+    assert.deepEqual(screenOf(a.text()).frame.filter(Boolean), ["  bonez  Connecting your coding tools"])
   })
 
   test("tool rows are columns that fit the width; a next step that does not fit goes under the state", async () => {
-    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
     const t = term()
-    const view = createView({ out: t.stream, caps: terminalCaps(t) })
+    const view = await open(t)
+    view.toolWorking("Claude Code")
+    assert.ok(screenOf(t.text()).frame.includes("  · Claude Code   adding…"), "the tool being added has a yellow dot")
     view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
     view.tool("done", "Cursor", "added", "Next: a step far too long to share its line with the tool's name and state, so it wraps")
-    const shown = lines(t.text())
-    assert.equal(shown[0], "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate")
-    assert.equal(shown[1], "  ✓ Cursor        added")
-    assert.match(shown[2], /^ {18}Next: a step far too long/)
+    view.end()
+    const { frame, summary } = screenOf(t.text())
+    for (const shown of [frame, summary]) {
+      const at = shown.indexOf("  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate")
+      assert.ok(at > 0, shown.join("\n"))
+      assert.equal(shown[at + 1], "  ✓ Cursor        added")
+      assert.match(shown[at + 2], /^ {18}Next: a step far too long/)
+    }
+    assert.ok(!frame.some((l) => l.includes("adding…")), "the working row gives way to the result")
     assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Claude Code/)
   })
 
   test("the Claude app is one dim line: a link where the terminal has links, a short place to go elsewhere", async () => {
-    const { createView, terminalCaps, CLAUDE_CONNECTOR_DEMO_URL: url } = await import("../bin/lib/connect-tui.mjs")
+    const { CLAUDE_CONNECTOR_DEMO_URL: url } = await import("../bin/lib/connect-tui.mjs")
     const it = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
-    createView({ out: it.stream, caps: terminalCaps(it) }).claudeApp(url)
+    const linked = await open(it)
+    linked.claudeApp(url)
+    linked.end()
     assert.ok(it.text().includes(`\x1b]8;;${url}\x1b\\Optional: add Bonez to the Claude app ↗\x1b]8;;\x1b\\`))
-    assert.equal(lines(it.text()).filter(Boolean).length, 1)
+    assert.equal(screenOf(it.text()).frame.filter((l) => l.includes("Claude app")).length, 1)
     const ap = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
-    createView({ out: ap.stream, caps: terminalCaps(ap) }).claudeApp(url)
+    const unlinked = await open(ap)
+    unlinked.claudeApp(url)
+    unlinked.end()
     assert.doesNotMatch(ap.text(), /\x1b\]8/)
-    assert.deepEqual(lines(ap.text()).filter(Boolean), ["  · Optional: Claude app → claude.ai/customize/connectors"])
+    assert.deepEqual(screenOf(ap.text()).frame.filter((l) => l.includes("Claude app")), ["  · Optional: Claude app → claude.ai/customize/connectors"])
+    assert.ok(screenOf(ap.text()).summary.includes("  · Optional: Claude app → claude.ai/customize/connectors"))
   })
 
   test("the panel stays inside 80 columns, says where to continue, and keeps the waiting time under its edge", async () => {
-    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
     for (const [joining, first] of [[true, "1  Continue in the Bonez page you started from"], [false, "1  Sign in on the Bonez page that just opened"]]) {
       const t = term()
-      const view = createView({ out: t.stream, caps: terminalCaps(t) })
+      const view = await open(t)
+      view.header()
+      view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
       view.finish({ joining, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: true })
       view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
-      view.close()
-      const shown = lines(t.text())
+      view.end()
+      const shown = screenOf(t.text()).frame
       assert.ok(shown.every((l) => [...l].length <= 80), shown.join("\n"))
       assert.ok(shown.some((l) => l.includes(first)))
       assert.ok(shown.some((l) => l.includes("Keep this terminal open.")))
       assert.equal(shown.some((l) => l.includes("pair=K7QM-4XPA")), !joining)
+      assert.ok(shown.includes("  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate"), shown.join("\n"))
       // One blank row of padding inside the top and bottom edges, no more.
       const top = shown.findIndex((l) => l.includes("╭"))
       const bottom = shown.findIndex((l) => l.includes("╰"))
@@ -3102,5 +3346,51 @@ describe("the installer's screen: the Bonez mark, columns, the panel, links and 
       const edge = shown[bottom].length
       assert.equal(shown.find((l) => l.includes("min left")).length, edge, "the time ends under the panel's edge")
     }
+  })
+
+  test("a short terminal keeps the header and the live line; the middle gives way", async () => {
+    const t = term({ rows: 14 })
+    const view = await open(t)
+    view.header()
+    for (const name of ["Claude Code", "Codex", "Cursor", "OpenCode"]) view.tool("done", name, "added")
+    view.finish({ joining: false, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: true })
+    view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+    for (let i = 0; i < 6; i++) view.done(`Tool ${i} signed in`)
+    view.end()
+    const { frames, summary } = screenOf(t.text())
+    for (const f of frames) assert.ok(unstyled(f).split("\n").length <= 14, unstyled(f))
+    const last = unstyled(frames.at(-1)).split("\n")
+    assert.equal(last[1], "  bonez  Connecting your coding tools", "a one-line header")
+    assert.ok(last.includes("  ✓ Claude Code, Codex, Cursor, OpenCode added"), "the tools fold into one line")
+    assert.match(last.at(-1), /Waiting for you in the browser…/)
+    // The scrollback keeps everything: every tool and every event.
+    for (let i = 0; i < 6; i++) assert.ok(summary.includes(`  ✓ Tool ${i} signed in`))
+    assert.ok(summary.includes("  ✓ OpenCode      added"))
+  })
+
+  test("a failure is a red ✗ on the screen and in the summary; Ctrl-C leaves what is left to do", async () => {
+    const t = term()
+    const view = await open(t)
+    view.tool("done", "Codex", "added", "Signed in")
+    view.tool("failed", "Cursor", "failed", undefined, ["cursor: permission denied", "Fix: chmod u+w ~/.cursor"])
+    view.fail("Could not start the Bonez setup: could not reach gateway.bonez.io.")
+    view.end()
+    const { frame, summary } = screenOf(t.text())
+    assert.match(t.text(), /\x1b\[31m✗\x1b\[0m Could not start/)
+    for (const shown of [frame, summary]) {
+      assert.ok(shown.includes("  ✗ Could not start the Bonez setup: could not reach gateway.bonez.io."), shown.join("\n"))
+      assert.ok(shown.includes("    Fix: chmod u+w ~/.cursor"), "a failed tool keeps its own words")
+    }
+
+    const c = term()
+    const waiting = await open(c)
+    waiting.setLeaving("Setup goes on in the background and finishes when you answer in the browser:", "https://app.bonez.io/connect?pair=K7QM-4XPA")
+    waiting.finish({ joining: false, url: "https://app.bonez.io/connect?pair=K7QM-4XPA", opened: true })
+    waiting.waiting("Waiting for you in the browser…", Date.now() + 60_000)
+    waiting.end({ interrupted: true })
+    assert.deepEqual(screenOf(c.text()).summary.filter(Boolean).slice(-2), [
+      "  · Setup goes on in the background and finishes when you answer in the browser:",
+      "    https://app.bonez.io/connect?pair=K7QM-4XPA",
+    ])
   })
 })

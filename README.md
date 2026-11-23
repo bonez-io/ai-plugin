@@ -696,11 +696,13 @@ its paths use `/` on every OS, so a folder built on Windows gets the gateway's h
 skills/           12 skills
 commands/         /bonez:context, /bonez:search, /bonez:connect, /bonez:agents, /bonez:new-plugin
 hooks/            PreToolUse write gate (memory_save / rules_write) + SessionEnd session-capture hook
-bin/              bonez-session-sync.mjs (session capture) + vendor/ (vendored @bonez/agent-import bundle),
+bin/              bonez-session-sync.mjs (session capture, `connect`, and `install-ui`: the installer's one full-screen
+                  view, fed by install.sh on stdin, then `connect` on the same screen; plain lines in a pipe, CI or TERM=dumb)
+                  + lib/connect-tui.mjs (that view) + vendor/ (vendored @bonez/agent-import bundle),
                   bonez-package-hash.mjs (plugin tree hash), bonez-plugin-push.mjs (one-command plugin publish: browser sign-in or API key),
                   lib/plugin-tree.mjs (the walk and tree hash those two share), lib/net.mjs + lib/signin.mjs + lib/mcp.mjs (the push tool's HTTP, sign-in and MCP call)
                   cursor/bin/ and codex/bin/ hold byte copies — a marketplace install ships only cursor/ or codex/, with no repo behind it
-                  (cursor/bin/: session sync + vendor/, the hash and push tools + lib/; codex/bin/: the hash and push tools + lib/)
+                  (both hold all of bin/: re-copy with `for l in codex cursor; do cp -R bin/. $l/bin/; done`)
 server.json       MCP registry entry for the remote server
 tests/            gate tests + session-capture + plugin hash and push tests + Windows-portability tests and
                   windows-client-checks.ps1 (run in CI; the Windows ones on windows-latest too)
