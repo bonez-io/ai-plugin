@@ -2726,9 +2726,11 @@ describe("capture offer: one click turns capture on (1SI-4098)", () => {
     const as = await startStubOAuth({ pendingPolls: 10_000 })
     try {
       const codex = JSON.parse((await start("codex", offerEnv(as).env)).stdout)
-      assert.match(codex.systemMessage, /Turn it on with one click: .*Never: node ".*bonez-session-sync\.mjs" decline$/)
+      // Codex re-asks for hook approval after every plugin update (1SI-4111), so its lines say so.
+      assert.match(codex.systemMessage, /Turn it on with one click: .*Never: node ".*bonez-session-sync\.mjs" decline After each Bonez update, Codex turns its hooks off until you approve them again: run \/hooks \(or Review hooks in the app\) and approve Bonez\.$/)
       const cursor = JSON.parse((await start("cursor", offerEnv(as).env)).stdout)
       assert.match(cursor.additional_context, /^Tell the user this once, .*"Bonez can save your coding sessions.*\/bonez-capture off"$/)
+      assert.doesNotMatch(cursor.additional_context, /\/hooks/)
     } finally {
       await as.close()
     }

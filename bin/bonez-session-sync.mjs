@@ -2061,7 +2061,15 @@ function enabledText(agent, state = {}) {
 // warning in its UI (developers.openai.com/codex/hooks). Cursor's sessionStart has no field the
 // person sees (`user_message` is not enforced there), so its offer reaches the person through the
 // agent, as context it is asked to relay once (cursor.com/docs/agent/hooks).
+//
+// In Codex every line also says how to keep the hooks on. Codex approves a plugin's hooks against a
+// hash of the hook definition AND of every file in the plugin folder (codex-rs/hooks/src/engine/
+// plugin_fingerprint.rs, plugin_trust.rs), so any update, even one that changes only the version,
+// turns all of Bonez's hooks off until the person approves them again. Keeping hooks.json the same
+// across releases cannot avoid that, so the person is told instead.
+const CODEX_REVIEW_HOOKS = "After each Bonez update, Codex turns its hooks off until you approve them again: run /hooks (or Review hooks in the app) and approve Bonez."
 function emitNotice(agent, text) {
+  if (agent === "codex") text = `${text} ${CODEX_REVIEW_HOOKS}`
   if (agent === "cursor") {
     const relay = `Tell the user this once, at the start of your first reply, word for word, then carry on with their request: "${text}"`
     process.stdout.write(JSON.stringify({ additional_context: relay }))

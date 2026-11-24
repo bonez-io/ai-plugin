@@ -53,7 +53,7 @@ Where the line appears:
 | --- | --- |
 | Claude Code (terminal) | Above the prompt when the session starts. |
 | Claude Desktop, Code tab | At the top of a new session. |
-| Codex CLI and app | As a warning when the session starts. Codex runs a plugin's hooks only after you trust them: run `/hooks` in the CLI, or **Review hooks** in the app, and approve the Bonez hooks. |
+| Codex CLI and app | As a warning when the session starts. Codex runs a plugin's hooks only after you trust them: run `/hooks` in the CLI, or **Review hooks** in the app, and approve the Bonez hooks. Do it again after every Bonez update: Codex asks again whenever any file in the plugin changes. |
 | Cursor | The agent repeats it at the start of its first reply. |
 
 If you ignore it, Bonez asks again on another day (three times), then once a week.
@@ -136,7 +136,7 @@ Sessions from before capture was on are not sent unless you ask. Look first, the
 
 | You see | Do this |
 | --- | --- |
-| No offer at all | Run `status`. If it says `disabled`, capture was turned off on purpose; run `on`. In Codex, trust the plugin's hooks (`/hooks`). |
+| No offer at all | Run `status`. If it says `disabled`, capture was turned off on purpose; run `on`. In Codex, trust the plugin's hooks (`/hooks`), again after every update. |
 | The link says it expired | Run `/bonez:capture on` for a new one. Links last 15 minutes. |
 | `last upload attempt: … failed` | The line says which step failed and why. `sync.log`, in the folder `status` names, has the detail. |
 | "Bonez session capture has not uploaded since …" | Same as above: run `status`. |

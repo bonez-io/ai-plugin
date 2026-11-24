@@ -633,7 +633,7 @@ work; before that, or when the server refused, the hints are unchanged. A sessio
 bookkeeping (under `presence/` beside the credential) is removed at its end, and anything older
 than three days is swept at the next start.
 
-**Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Codex skips a plugin's hooks until you trust them: open `/hooks` (CLI) or **Review hooks** (app) once after installing or updating. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires capture to be on (the offer's link, `on`, or `login`).
+**Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Codex skips a plugin's hooks until you trust them: open `/hooks` (CLI) or **Review hooks** (app) and approve Bonez after installing, and again after **every** update. Codex records the approval against the hook definitions and a hash of every file in the plugin folder (`codex-rs/hooks/src/engine/plugin_fingerprint.rs`), so any new version, even one whose hooks did not change, turns capture and the seed off until you approve again; Codex warns about it at startup, and Bonez's session-start lines in Codex repeat it. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires capture to be on (the offer's link, `on`, or `login`).
 
 **Recall in Claude Code, Codex and Cursor:** The Bonez seed is your memories, work in flight, and what is relevant to this repo. Every Bonez read goes over the tool's own signed-in Bonez connection, never over a key stored by the plugin; the session-capture key is upload-only and the server refuses it for reads.
 
