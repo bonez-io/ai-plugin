@@ -8,6 +8,14 @@ Bonez indexes your org's repos, tickets, PRs, docs, conversations, and people in
 
 Install page: <https://gateway.bonez.io/mcp/install>.
 
+**OpenCode 2 session capture:** install the server plugin from a release containing the OpenCode
+adapter with `opencode plugin add 'github:bonez-io/ai-plugin#stable'`. For development, add the
+absolute checkout directory to OpenCode's `plugins` array. `opencode plugin list` shows `bonez-capture`.
+It uses this computer's Bonez session-saving settings and credential, independently of MCP sign-in.
+On a completed or interrupted run, it saves the visible user and assistant conversation under the
+OpenCode session ID. It skips subagents, attachments, tool output and reasoning. When saving is off
+or the directory is outside your capture scope, it does not read the transcript.
+
 In Claude Code (needs 2.1.292 or later):
 
 ```bash
