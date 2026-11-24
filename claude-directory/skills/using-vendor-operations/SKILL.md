@@ -73,7 +73,7 @@ Never answer an unknown write outcome by sending the write again. Check with `ve
 
 ## 6. Writes: ask the user first, in words
 
-Nothing in this plugin stops a vendor write; the app's tool-permission prompt may not cover it. Servers released before the scope fix (Linear 1SI-2292) do not check your key's scope for writes, so a read-only key can still run one there; newer servers refuse it with `write_scope_required`. You cannot tell which you are talking to, so your own question is the guard.
+Nothing in this plugin stops a vendor write; the app's tool-permission prompt may not cover it. Servers released before the scope fix do not check your key's scope for writes, so a read-only key can still run one there; newer servers refuse it with `write_scope_required`. You cannot tell which you are talking to, so your own question is the guard.
 
 Before any `vendor_write`, and before any call whose type you did not see, say in plain words what you are about to do (the operation, the vendor, the target and the exact content) and wait for a clear yes in this conversation. A yes to one write is not a yes to the next. A comment, a reaction and a status change all count.
 

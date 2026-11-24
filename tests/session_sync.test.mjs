@@ -1,7 +1,7 @@
 // Tests for bin/bonez-session-sync.mjs.
 //
 // Real end-to-end (mint a sessions-scoped key against the deployed gateway) is NOT available
-// here — the gateway change (1SI-1019) is merged but not yet deployed, and minting a
+// here — it needs a deployed gateway, and minting a
 // sessions-scoped key needs console admin access this environment doesn't have. So these tests
 // run the REAL uploader (real parsing, real scrubbing, real gzip/NDJSON framing, real HTTP
 // calls) against a local stub gateway (tests/lib/stub-gateway.mjs) that asserts on the exact
@@ -22,6 +22,7 @@ import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
 import { startStubOAuth } from "./lib/stub-oauth.mjs"
+import { SHIPPED_CLIENT_ID } from "../bin/lib/client-id.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
@@ -34,7 +35,7 @@ function freshDir(prefix) {
 
 // The transcripts need a token-shaped secret for the scrubber to mask, and Anthropic's plugin
 // directory refuses a plugin that ships one in any file, a fake one in a test fixture included
-// (1SI-3619). So tests/fixtures/*.jsonl hold a placeholder, the secrets are put together here, and
+// So tests/fixtures/*.jsonl hold a placeholder, the secrets are put together here, and
 // the tests read a copy of the fixtures with the placeholders filled in. Never write one of these
 // out as a single literal: that is the string the directory's scan matches.
 const FAKE_GITHUB_TOKEN = ["ghp", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"].join("_")
@@ -70,7 +71,7 @@ function runCli(args, { env = {}, input = "" } = {}) {
       cwd: REPO_ROOT,
       // The catch-up's quiet period would hold back the transcripts these tests just wrote. The
       // in-process check below runs with the real ten minutes.
-      // The capture offer (1SI-4098) would start a real device flow from any test that starts a
+      // The capture offer would start a real device flow from any test that starts a
       // session with nothing set up; only its own tests turn it back on.
       // A developer's own CODEX_HOME would point the Codex leg at their real rollouts.
       env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, CODEX_HOME: "", BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
@@ -161,11 +162,11 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
       delete process.env.BONEZ_GATEWAY_URL
       delete process.env.BONEZ_MCP_URL
       assert.equal(mod.gatewayBaseUrl(), "https://gateway.bonez.io")
-      process.env.BONEZ_GATEWAY_URL = "https://qa.gateway.bonez.io/"
-      assert.equal(mod.gatewayBaseUrl(), "https://qa.gateway.bonez.io")
+      process.env.BONEZ_GATEWAY_URL = "https://gateway.example.com/"
+      assert.equal(mod.gatewayBaseUrl(), "https://gateway.example.com")
       delete process.env.BONEZ_GATEWAY_URL
-      process.env.BONEZ_MCP_URL = "https://qa.gateway.bonez.io/mcp"
-      assert.equal(mod.gatewayBaseUrl(), "https://qa.gateway.bonez.io")
+      process.env.BONEZ_MCP_URL = "https://gateway.example.com/mcp"
+      assert.equal(mod.gatewayBaseUrl(), "https://gateway.example.com")
     } finally {
       if (savedGw === undefined) delete process.env.BONEZ_GATEWAY_URL
       else process.env.BONEZ_GATEWAY_URL = savedGw
@@ -175,8 +176,8 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
       else process.env.BONEZ_SESSION_SYNC_DATA = savedData
     }
 
-    // buildBundle: exact manifest field set, matching packages/desktop/src/main/import/index.ts
-    // (harness-ui, verified by reading that file directly — see the PR body).
+    // buildBundle: exact manifest field set, matching the desktop app's importer
+    // (the desktop app's importer, verified by reading that file directly).
     const conversation = {
       agent: "claude-code",
       sessionId: "sess-1",
@@ -224,7 +225,7 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
     assert.equal(lines[0].conversationCount, 1)
     assert.equal(lines[0].messageCount, 1)
     // conversation line is `{type, ...conversation}` verbatim — camelCase, unmodified — because
-    // the pipeline's agent_convos.py `_KEY_MAP` maps FROM this exact camelCase shape.
+    // the server's import pipeline maps FROM this exact camelCase shape.
     assert.equal(lines[1].sessionId, "sess-1")
     assert.equal(lines[1].sourcePath, "/tmp/x/sess-1.jsonl")
     assert.ok(gz.length > 0)
@@ -271,7 +272,7 @@ describe("install / status / disable / enable", () => {
 
 // ---------------------------------------------------------------------------- OAuth lane
 
-describe("OAuth credential lane (1SI-1033)", () => {
+describe("OAuth credential lane", () => {
   test("hasCredential / describeCredential — two lanes, and neither leaks the secret", async () => {
     const mod = await import("../bin/bonez-session-sync.mjs")
 
@@ -355,19 +356,23 @@ describe("OAuth credential lane (1SI-1033)", () => {
       // Inside TOKEN_SKEW_MS of expiry, so it must refresh rather than hand back a token that
       // would expire mid-upload.
       const cfg = { enabled: true, scope: "global", repos: [],
-                    oauth: { accessToken: "at-stale", refreshToken: "rt-1", expiresAt: Date.now() + 30_000 } }
+                    oauth: { accessToken: "at-stale", refreshToken: "rt-1", expiresAt: Date.now() + 30_000,
+                             clientId: "serverCliClient" } }
       writeFileSync(join(dataDir, "config.json"), JSON.stringify(cfg))
 
       const bearer = await mod.resolveBearer(cfg, as.url)
       assert.equal(bearer, "at-refreshed-1")
       assert.equal(as.calls.token[0].grant_type, "refresh_token")
       assert.equal(as.calls.token[0].refresh_token, "rt-1")
+      // The refresh token belongs to the client the sign-in used (the one the gateway named).
+      assert.equal(as.calls.token[0].client_id, "serverCliClient")
 
       const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
       assert.equal(written.oauth.accessToken, "at-refreshed-1")
       // Auth0 rotated the refresh token; the rotated one must be what we keep.
       assert.equal(written.oauth.refreshToken, "rt-2")
       // Fields the refresh has no business touching survive it.
+      assert.equal(written.oauth.clientId, "serverCliClient")
       assert.equal(written.enabled, true)
       assert.equal(written.scope, "global")
     } finally {
@@ -391,6 +396,9 @@ describe("OAuth credential lane (1SI-1033)", () => {
       const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
       // Storing null here would lock the user out of every future refresh silently.
       assert.equal(written.oauth.refreshToken, "rt-keep")
+      // A sign-in from before the client was stored was made as this build's client, and refreshes as it.
+      assert.equal(as.calls.token[0].client_id, process.env.BONEZ_OAUTH_CLIENT_ID ?? SHIPPED_CLIENT_ID)
+      assert.equal(written.oauth.clientId, undefined)
     } finally {
       if (savedDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA
       else process.env.CLAUDE_PLUGIN_DATA = savedDataDir
@@ -486,6 +494,65 @@ describe("OAuth credential lane (1SI-1033)", () => {
       // Capture would have died silently within the hour, in a background process nobody
       // watches. Nothing must be written.
       assert.equal(existsSync(join(dataDir, "config.json")), false)
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  // A self-hosted or separate Bonez server whose sign-in uses a different Auth0 tenant names
+  // its own CLI client in /auth/config. The shipped id means nothing to that tenant.
+  test("login signs in as the client the gateway names, and stores it for the refreshes", async () => {
+    const dataDir = freshDir("oauth-gateway-client")
+    const as = await startStubOAuth({ cliClientId: "serverCliClient" })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: undefined,
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      assert.equal(res.status, 0, res.stderr)
+      assert.equal(as.calls.authConfig, 1)
+      assert.equal(as.calls.device[0].client_id, "serverCliClient")
+      assert.ok(as.calls.token.every((t) => t.client_id === "serverCliClient"))
+      const cfg = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      assert.equal(cfg.oauth.clientId, "serverCliClient")
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  for (const [label, opts] of [
+    ["names no client (a gateway from before the field)", {}],
+    ["names a client for another authorization server", { cliClientId: "otherTenantCliClient", authDomain: "auth.other.example" }],
+  ]) {
+    test(`login keeps the shipped client when the gateway ${label}`, async () => {
+      const dataDir = freshDir("oauth-shipped-client")
+      const as = await startStubOAuth(opts)
+      try {
+        const res = await runCli(["login", "--global"], {
+          env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: undefined,
+                 BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+        })
+        assert.equal(res.status, 0, res.stderr)
+        assert.equal(as.calls.device[0].client_id, SHIPPED_CLIENT_ID)
+      } finally {
+        await as.close()
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test("login: BONEZ_OAUTH_CLIENT_ID still wins over the gateway's client", async () => {
+    const dataDir = freshDir("oauth-env-client")
+    const as = await startStubOAuth({ cliClientId: "serverCliClient" })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client",
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      assert.equal(res.status, 0, res.stderr)
+      assert.equal(as.calls.device[0].client_id, "test-client")
     } finally {
       await as.close()
       rmSync(dataDir, { recursive: true, force: true })
@@ -702,8 +769,8 @@ describe("_upload — Codex leg against the stub gateway", () => {
 // ------------------------------------------------------------- codex: compressed, archived, new shapes
 
 // Codex compresses rollouts older than seven days to `.jsonl.zst` and moves archived threads to
-// $CODEX_HOME/archived_sessions/ (1SI-4111). The fixture has the line shapes Codex writes today, fake content.
-describe("Codex: compressed and archived rollouts, and today's line shapes (1SI-4111)", () => {
+// $CODEX_HOME/archived_sessions/. The fixture has the line shapes Codex writes today, fake content.
+describe("Codex: compressed and archived rollouts, and today's line shapes", () => {
   const ZSTD = typeof zlib.zstdCompressSync === "function"
   const UUID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60"
   const ARCHIVED = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61"
@@ -1131,8 +1198,8 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
   test("the workspace slug is Cursor's own directory naming, not a guess", async () => {
     const mod = await import("../bin/bonez-session-sync.mjs")
     assert.equal(
-      mod.cursorProjectSlug("/Users/shay/Projects/easycoach/pl-football-web"),
-      "Users-shay-Projects-easycoach-pl-football-web",
+      mod.cursorProjectSlug("/Users/alex/Projects/acme/web-app"),
+      "Users-alex-Projects-acme-web-app",
       "must match the real directory Cursor wrote (observed in ~/.cursor/projects)",
     )
     assert.equal(mod.cursorProjectSlug("/tmp/repo/"), "tmp-repo")
@@ -1140,14 +1207,14 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     assert.equal(mod.cursorProjectSlug(undefined), null)
     // Dots, spaces, underscores and other punctuation: each run is one "-", as in the directories Cursor wrote.
     assert.equal(
-      mod.cursorProjectSlug("/Users/shay/Library/Application Support/Cursor/Workspaces/1771945206117/workspace.json"),
-      "Users-shay-Library-Application-Support-Cursor-Workspaces-1771945206117-workspace-json",
+      mod.cursorProjectSlug("/Users/alex/Library/Application Support/Cursor/Workspaces/1771945206117/workspace.json"),
+      "Users-alex-Library-Application-Support-Cursor-Workspaces-1771945206117-workspace-json",
     )
     assert.equal(
-      mod.cursorProjectSlug("/Users/shay/.bonez/profiles/local/data/bonez/bonez-sessions/ses_10a8fbec1ffe2Uf8NN6aTdYCIe"),
-      "Users-shay-bonez-profiles-local-data-bonez-bonez-sessions-ses-10a8fbec1ffe2Uf8NN6aTdYCIe",
+      mod.cursorProjectSlug("/Users/alex/.bonez/profiles/local/data/bonez/bonez-sessions/ses_10a8fbec1ffe2Uf8NN6aTdYCIe"),
+      "Users-alex-bonez-profiles-local-data-bonez-bonez-sessions-ses-10a8fbec1ffe2Uf8NN6aTdYCIe",
     )
-    assert.equal(mod.cursorProjectSlug("/Users/shay/Projects/bonez/sample_3"), "Users-shay-Projects-bonez-sample-3")
+    assert.equal(mod.cursorProjectSlug("/Users/alex/Projects/bonez/sample_3"), "Users-alex-Projects-bonez-sample-3")
     assert.equal(mod.cursorProjectSlug("/Users/me/My Projects/app.v2 (copy)/"), "Users-me-My-Projects-app-v2-copy")
     assert.equal(mod.cursorProjectSlug("/"), null)
   })
@@ -1211,7 +1278,7 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
 
 // ------------------------------------------------------------------- Claude catch-up + backfill
 
-describe("Claude SessionStart catch-up (1SI-1102)", () => {
+describe("Claude SessionStart catch-up", () => {
   // SessionEnd was the ONLY capture point on the Claude leg, so a crash, a kill, the hook's own
   // timeout — or the plugin sitting disabled for a week — lost the conversation with nothing to
   // notice it. Codex and Cursor both self-heal on their next start; these pin that Claude now
@@ -1351,15 +1418,15 @@ describe("Claude SessionStart catch-up (1SI-1102)", () => {
     const mod = await import("../bin/bonez-session-sync.mjs")
     // Derived against all 162 project directories on a real machine. "/" and "." alone matched
     // only 93 of them — "_" flattens to "-" as well, and missing that finds nothing silently.
-    assert.equal(mod.claudeProjectSlug("/Users/shay/Projects/bonez"), "-Users-shay-Projects-bonez")
+    assert.equal(mod.claudeProjectSlug("/Users/alex/Projects/acme"), "-Users-alex-Projects-acme")
     assert.equal(
-      mod.claudeProjectSlug("/Users/shay/Projects/re_gent_headless"),
-      "-Users-shay-Projects-re-gent-headless",
+      mod.claudeProjectSlug("/Users/alex/Projects/my_tool_headless"),
+      "-Users-alex-Projects-my-tool-headless",
       "underscores flatten to dashes too — observed in ~/.claude/projects",
     )
     assert.equal(
-      mod.claudeProjectSlug("/Users/shay/Projects/bonez/harness-ui/.claude-worktrees/x"),
-      "-Users-shay-Projects-bonez-harness-ui--claude-worktrees-x",
+      mod.claudeProjectSlug("/Users/alex/Projects/acme/web-ui/.claude-worktrees/x"),
+      "-Users-alex-Projects-acme-web-ui--claude-worktrees-x",
       "a dot-directory yields the doubled dash the real tree shows",
     )
     assert.equal(mod.claudeProjectSlug("/tmp/repo/"), "-tmp-repo")
@@ -1511,7 +1578,7 @@ describe("login / install refuse a gateway Bonez does not operate", () => {
     }
   })
 
-  test("our own gateways and loopback still install: prod (default), qa, and a local gateway", async () => {
+  test("Bonez-operated gateways and loopback still install: the default, the other hosted gateway, and a local gateway", async () => {
     for (const env of [
       {},
       { BONEZ_GATEWAY_URL: "https://qa.gateway.bonez.io" },
@@ -1629,7 +1696,7 @@ describe("_upload — Cursor leg against the stub gateway", () => {
     assert.equal(conversation.agent, "cursor")
 
     // The presign call must declare the same agent — the gateway validates it against its own
-    // allow-list (_AGENTS in control/import_presign.py), so a mismatch here 400s in prod.
+    // allow-list, so a mismatch here is refused with a 400.
     assert.equal(gateway.calls.presign.at(-1).body.agent, "cursor")
 
     // The whole reason parseClaudeFile can't be reused: Cursor puts `role` on the outer record,
@@ -1956,7 +2023,7 @@ test("an empty host data directory uses the configured shared store, while a hos
   }
 })
 
-// ---------------------------------------------------------------------------- live session (1SI-3763)
+// ---------------------------------------------------------------------------- live session
 
 describe("live session: start once, then repository-relative reads and edits", () => {
   // A Git checkout whose origin is acme/api, with two files in it and one file outside it.
@@ -2136,7 +2203,7 @@ describe("live session: start once, then repository-relative reads and edits", (
     assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
   })
 
-  test("codex: announced under its rollout stem, the id its upload is filed under; apply_patch touches the files it names (1SI-4111)", async () => {
+  test("codex: announced under its rollout stem, the id its upload is filed under; apply_patch touches the files it names", async () => {
     const { repo, outside } = makeRepo()
     const dataDir = freshDir("live-codex")
     await install(dataDir, ["--global"])
@@ -2295,7 +2362,7 @@ describe("live session: start once, then repository-relative reads and edits", (
   })
 })
 
-// ---------------------------------------------------------------------------- capture says when it is off (1SI-3775)
+// ---------------------------------------------------------------------------- capture says when it is off
 
 describe("capture says when it is set up but not working", () => {
   const PERSON = /^\{"systemMessage":"Bonez session capture .*Run `node \\".*bonez-session-sync\.mjs\\" status` for details\."\}$/
@@ -2622,7 +2689,7 @@ describe("a sign-in issued by one gateway is never sent to another", () => {
   })
 })
 
-describe("capture offer: one click turns capture on (1SI-4098)", () => {
+describe("capture offer: one click turns capture on", () => {
   // The offer is what later starts show, once the setup page was opened (see the connect tests).
   const offerEnv = (as, extra = {}) => {
     const home = freshDir("offer")
@@ -2726,7 +2793,7 @@ describe("capture offer: one click turns capture on (1SI-4098)", () => {
     const as = await startStubOAuth({ pendingPolls: 10_000 })
     try {
       const codex = JSON.parse((await start("codex", offerEnv(as).env)).stdout)
-      // Codex re-asks for hook approval after every plugin update (1SI-4111), so its lines say so.
+      // Codex re-asks for hook approval after every plugin update, so its lines say so.
       assert.match(codex.systemMessage, /Turn it on with one click: .*Never: node ".*bonez-session-sync\.mjs" decline After each Bonez update, Codex turns its hooks off until you approve them again: run \/hooks \(or Review hooks in the app\) and approve Bonez\.$/)
       const cursor = JSON.parse((await start("cursor", offerEnv(as).env)).stdout)
       assert.match(cursor.additional_context, /^Tell the user this once, .*"Bonez can save your coding sessions.*\/bonez-capture off"$/)
@@ -2752,7 +2819,7 @@ describe("capture offer: one click turns capture on (1SI-4098)", () => {
   })
 })
 
-describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
+describe("backfill covers Claude Code, Codex and Cursor", () => {
   test("dry run lists each harness's sessions newest first, by the id their own hooks upload under", async () => {
     const home = freshDir("backfill-all")
     const dataDir = join(home, ".bonez", "session-sync")
@@ -2789,7 +2856,7 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
   })
 
   // Uploads used to key a Codex session by its rollout stem while backfill used the UUID, so a session sent once
-  // was listed, counted and sent again (1SI-4111).
+  // was listed, counted and sent again.
   test("a Codex session is one sync-state entry, keyed by its UUID; an older plugin's stem key is moved on read", async () => {
     const home = freshDir("backfill-codex-id")
     const dataDir = join(home, ".bonez", "session-sync")
@@ -2833,7 +2900,7 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
   })
 })
 
-describe("connect: the setup page in the browser and this machine share a pairing (1SI-4098)", () => {
+describe("connect: the setup page in the browser and this machine share a pairing", () => {
   let gw
   before(async () => {
     gw = await startStubGateway()
@@ -3151,7 +3218,7 @@ describe("connect: the setup page in the browser and this machine share a pairin
     assert.doesNotMatch(res.stdout, /Cursor signed in/)
   })
 
-  // ---- the terminal closes before the answer (1SI-4098): the setup still finishes
+  // ---- the terminal closes before the answer: the setup still finishes
 
   const startInput = JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-9", cwd: "/tmp/c" })
   const startConnect = (env) => {
@@ -3488,7 +3555,7 @@ describe("connect: the setup page in the browser and this machine share a pairin
   })
 })
 
-describe("the installer's terminal view degrades cleanly (1SI-4098)", () => {
+describe("the installer's terminal view degrades cleanly", () => {
   const tty = (extra = {}) => {
     let out = ""
     return { stream: { isTTY: true, columns: 80, write: (s) => { out += s }, ...extra }, text: () => out }
@@ -3555,7 +3622,7 @@ function screenOf(text) {
   }
 }
 
-describe("the installer's screen: the Bonez mark, columns, the panel, links and the width (1SI-4098)", () => {
+describe("the installer's screen: the Bonez mark, columns, the panel, links and the width", () => {
   // The screen installs process handlers while it is up (signals, exit, a crash); every test gives the screen back,
   // and with it every handler, so the test runner keeps only its own.
   const watched = ["exit", "SIGINT", "SIGTERM", "SIGHUP", "SIGWINCH", "uncaughtException", "unhandledRejection"]

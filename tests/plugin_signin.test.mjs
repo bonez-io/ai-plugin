@@ -369,6 +369,52 @@ describe("--login", () => {
   })
 })
 
+// Which Bonez CLI client the sign-in uses. A self-hosted or separate Bonez server whose sign-in uses a different Auth0
+// tenant names its own CLI client in /auth/config; the id the plugin ships means nothing to that tenant.
+describe("the client it signs in as", () => {
+  const deviceClients = (server) => server.signin.calls.device.map((d) => d.client_id)
+  const tokenClients = (server) => server.signin.calls.token.map((t) => t.client_id)
+
+  test("the client the server names in /auth/config, for the sign-in and every refresh after it", async () => {
+    const { server, home, dir } = await setup({ cliClientId: "serverCliClient", accessTtl: 30 })
+    await finish(server, async () => {
+      assert.equal((await cli([dir], server, home)).status, 4)
+      assert.deepEqual(deviceClients(server), ["serverCliClient"])
+      server.signin.approve()
+      assert.equal((await cli([dir], server, home)).status, 0)
+      assert.equal(saved(home)[server.url].client_id, "serverCliClient")
+      // The token runs out inside a minute, so the next publish refreshes: with the client that signed in.
+      assert.equal((await cli([dir], server, home)).status, 0)
+      assert.equal(grants(server).filter((g) => g === "refresh_token").length, 1)
+      assert.ok(tokenClients(server).every((c) => c === "serverCliClient"), tokenClients(server).join(" "))
+    })
+  })
+
+  test("a server that names no client (an older gateway, or one on the shipped client's tenant) gets the shipped one", async () => {
+    const { server, home, dir } = await setup()
+    await finish(server, async () => {
+      assert.equal((await cli([dir], server, home)).status, 4)
+      assert.deepEqual(deviceClients(server), [CLIENT_ID])
+    })
+  })
+
+  test("a client named for another authorization server than the one the server's metadata names is not used", async () => {
+    const { server, home, dir } = await setup({ cliClientId: "otherTenantCliClient", authDomain: "auth.other.example" })
+    await finish(server, async () => {
+      assert.equal((await cli([dir], server, home)).status, 4)
+      assert.deepEqual(deviceClients(server), [CLIENT_ID])
+    })
+  })
+
+  test("BONEZ_CLIENT_ID still wins over the server's", async () => {
+    const { server, home, dir } = await setup({ cliClientId: "serverCliClient" })
+    await finish(server, async () => {
+      assert.equal((await cli([dir], server, home, { BONEZ_CLIENT_ID: "myOwnClient" })).status, 4)
+      assert.deepEqual(deviceClients(server), ["myOwnClient"])
+    })
+  })
+})
+
 describe("the credential order", () => {
   test("BONEZ_API_KEY first: the console's upload route, with no sign-in lookup, even when a sign-in is saved", async () => {
     const { server, home, dir } = await setup()
@@ -531,7 +577,8 @@ describe("where the sign-in is saved", () => {
       server.signin.approve()
       await cli([dir], server, home)
       const paths = new Set(server.requests.map((q) => q.url.split("?")[0]))
-      assert.deepEqual([...paths].sort(), ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp", "/mcp", "/oauth/device/code", "/oauth/token"])
+      // /auth/config is the server's public sign-in settings, read for its Bonez CLI client.
+      assert.deepEqual([...paths].sort(), ["/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource/mcp", "/auth/config", "/mcp", "/oauth/device/code", "/oauth/token"])
     })
   })
 })

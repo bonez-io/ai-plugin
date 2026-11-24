@@ -1,6 +1,6 @@
 // The plugin tree hash against the SHARED vectors, and the Windows rules around it.
 //
-// tests/fixtures/plugin-tree.json is a copy of bonez-core's libs/wire/contracts/computers/fixtures/plugin-tree.json:
+// tests/fixtures/plugin-tree.json is a copy of the Bonez server's tree-hash contract fixture:
 // the vectors the gateway, the harness loader, the runner and this repo's tools must all reproduce. If these
 // tests pass on a machine, the tools there give the gateway's hash for the same bytes. They run on Windows in
 // CI (the windows-latest job), where the folder is walked with backslash paths and the files may be CRLF.

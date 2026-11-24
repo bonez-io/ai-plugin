@@ -14,10 +14,12 @@ import { spawn } from "node:child_process"
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+import { gatewayClientId, SHIPPED_CLIENT_ID } from "./client-id.mjs"
 import { clean, fail, hide, isSecure, redirected, send } from "./net.mjs"
 
-// The public Bonez CLI application: an identifier, not a secret (RFC 8252 §8.5).
-export const CLIENT_ID = "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm"
+// The public Bonez CLI application of Bonez's hosted service, used when the server names no client of its own
+// (client-id.mjs): an identifier, not a secret (RFC 8252 §8.5).
+export const CLIENT_ID = SHIPPED_CLIENT_ID
 export const SCOPE = "bonez:read bonez:write offline_access"
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 const SKEW_MS = 60_000 // refresh this long before the token runs out
@@ -103,7 +105,8 @@ const why = ({ status, body, text }) =>
   clean(body?.error ? `${body.error}${body.error_description ? `: ${body.error_description}` : ""}` : `HTTP ${status}: ${text.slice(0, 200).trim() || "(empty body)"}`)
 
 // The server names its authorization server (RFC 9728), which names its two endpoints (RFC 8414, else OIDC).
-// Nothing about either is held here, so a qa or a customer server needs no change.
+// Nothing about either is held here, so another Bonez server needs no change.
+// The client id comes from the server too, when it names one (startLogin).
 async function discover(origin, mcpPath) {
   const prm = await getJson(`${origin}/.well-known/oauth-protected-resource${mcpPath}`)
   let issuer
@@ -121,7 +124,7 @@ async function discover(origin, mcpPath) {
   const token = meta?.token_endpoint
   if (typeof device !== "string" || typeof token !== "string") fail(3, `${issuer.origin} does not offer sign-in from a command line (no device authorization endpoint)`)
   for (const endpoint of [device, token]) if (!isSecure(new URL(endpoint))) fail(2, `the sign-in endpoint ${endpoint} is not https; refusing to use it`)
-  return { resource: prm.resource, device, token }
+  return { issuer: issuer.href, resource: prm.resource, device, token }
 }
 
 // Only a web address goes to the operating system's opener (rundll32 would start any scheme's handler), and
@@ -147,8 +150,9 @@ const shown = (pending) => {
 
 // Phase one. Never returns: it ends the run with exit 4 so the address and the code can be relayed.
 export async function startLogin(origin, mcpPath, scope = SCOPE) {
-  const clientId = process.env.BONEZ_CLIENT_ID?.trim() || CLIENT_ID
-  const { resource, device, token } = await discover(origin, mcpPath)
+  const { issuer, resource, device, token } = await discover(origin, mcpPath)
+  // BONEZ_CLIENT_ID, else the Bonez CLI client the server names for its sign-in service, else the shipped one.
+  const clientId = process.env.BONEZ_CLIENT_ID?.trim() || (await gatewayClientId(origin, issuer)) || CLIENT_ID
   // `audience`, not RFC 8707 `resource`: Auth0's device-code endpoint is documented in terms of `audience`.
   const started = await form(device, { client_id: clientId, scope, audience: resource })
   if (started.status >= 500) fail(3, `the sign-in service failed: ${why(started)}`)

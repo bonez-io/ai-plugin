@@ -9,7 +9,10 @@
 # (the same client and callback the plugin's .mcp.json and cursor/mcp.json use).
 
 # The URL below is Bonez's own cloud. For your own Bonez server (for example
-# https://bonez.example.com), replace it with `https://<your server>/mcp`.
+# https://bonez.example.com), replace it with `https://<your server>/mcp`. The client_id is
+# the Bonez CLI app of Bonez's hosted service; a server whose sign-in uses a different Auth0
+# tenant names its own as
+# `auth0.cli_client_id` in https://<your server>/auth/config, and its install page writes it here.
 [mcp_servers.bonez]
 url = "https://gateway.bonez.io/mcp"
 scopes = ["bonez:read", "bonez:memory", "bonez:write"]
@@ -33,10 +36,10 @@ callback_url = "http://localhost:8787/callback"
 # url = "https://gateway.bonez.io/mcp"
 # bearer_token_env_var = "BONEZ_API_KEY"
 
-# --- qa / local gateway ---
+# --- another or a local gateway ---
 # Edit the `url` above directly — Codex does not expand ${VAR} shell syntax
 # inside config.toml the way the Claude Code leg's .mcp.json does.
-#   url = "https://qa.gateway.bonez.io/mcp"
+#   url = "https://bonez.example.com/mcp"
 
 # --- Write approval: ask before memory_save and rules_write (the plugin ships this; add it by hand here) ---
 # The plugin's .mcp.json already sets these two, so a plugin install asks you before every

@@ -1,5 +1,5 @@
 // Local guidance for the agent, never a network call. Every Bonez read goes over the host's own
-// signed-in MCP connection, as the person signed in to it (1SI-4111):
+// signed-in MCP connection, as the person signed in to it:
 // - Claude Code: the SessionStart context asks the agent to call memory_recall once. (An mcp_tool
 //   UserPromptSubmit hook cannot run once per session there: `once` is honoured only in skill
 //   frontmatter, so it ran on every prompt.)

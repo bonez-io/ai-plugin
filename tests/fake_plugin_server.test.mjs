@@ -1,10 +1,10 @@
 // Tests for tests/lib/fake-plugin-server.mjs: the stand-in for the gateway that every push test talks to.
 //
 // The fake is only worth having if it refuses what the real server refuses. These cases are the rows of the
-// real server's own suite (bonez-core: services/gateway/tests/computers/test_plugins.py, the parametrized
+// real server's own suite (its parametrized
 // `test_the_loaders_rules_are_applied_before_anything_is_stored` and its neighbours) plus the file-manager
 // files and the Windows backslash key that this repo's tools have to keep out of an upload. When
-// plugins.py changes a rule, this file and the fake change in the same pull request.
+// the server changes a rule, this file and the fake change in the same pull request.
 //
 // Offline and dependency-free (Node's built-in runner).
 // Run: node --test tests/fake_plugin_server.test.mjs
@@ -198,6 +198,23 @@ describe("over http", () => {
       assert.deepEqual(listed[0].computers.map((c) => c.state), ["syncing", "syncing"])
     } finally {
       await server.close()
+    }
+  })
+
+  // The gateway's public sign-in settings. `cli_client_id` is the Bonez CLI client of the Auth0 tenant the server
+  // signs in with, for the command-line sign-ins.
+  test("/auth/config names the authorization server, and the CLI client only when told to", async () => {
+    const plain = await startFakePluginServer({ oauth: {} })
+    const named = await startFakePluginServer({ oauth: { cliClientId: "serverCliClient" } })
+    try {
+      const a = await call(plain, "GET", "/auth/config")
+      assert.equal(a.status, 200)
+      assert.equal(a.body.auth0.domain, new URL(plain.url).host)
+      assert.equal(a.body.auth0.cli_client_id, undefined)
+      assert.equal((await call(named, "GET", "/auth/config")).body.auth0.cli_client_id, "serverCliClient")
+    } finally {
+      await plain.close()
+      await named.close()
     }
   })
 })
