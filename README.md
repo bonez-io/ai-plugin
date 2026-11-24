@@ -84,10 +84,10 @@ update signal for a tool that cannot update itself.
 
 ### What is new in 0.10.9
 
-- **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
-- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only (1SI-3763).
-- **Capture says when it is off.** `status` gives the same answer everywhere and shows the last upload attempt and success; a failed upload logs its cause; Claude Code shows one line a day when capture is set up but not uploading (1SI-3775).
-- **Catch-up sends current work first.** Sub-agent transcripts are never uploaded as sessions, the catch-up and `backfill` go newest first, and a transcript written in the last 10 minutes waits until its session is quiet (1SI-3784).
+- **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out.
+- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only.
+- **Capture says when it is off.** `status` gives the same answer everywhere and shows the last upload attempt and success; a failed upload logs its cause; Claude Code shows one line a day when capture is set up but not uploading.
+- **Catch-up sends current work first.** Sub-agent transcripts are never uploaded as sessions, the catch-up and `backfill` go newest first, and a transcript written in the last 10 minutes waits until its session is quiet.
 
 ## Windows
 
@@ -249,17 +249,15 @@ application rather than letting Cursor register its own client. It is the one of
 Bonez's hosted service; a server whose sign-in uses a different Auth0 tenant gets
 its own through the install script (see [Which sign-in client](#which-sign-in-client)).
 
-Dynamic registration is enabled on the tenant, but it creates **third-party**
-clients, and that quota is already spent by the two clients Claude Code and
-Codex registered for themselves (the `tpc_*` entries in the Auth0 application
-list). A third registration returns
+Dynamic client registration creates **third-party** clients, and an Auth0
+tenant caps how many it holds. Once the cap is reached a registration returns
 `403 — You reached the limit of entities of this type for this tenant`, and
 Cursor then shows an Authenticate button that does nothing: no browser, no
-error. Pinning a first-party client sidesteps the quota for good.
+error. Pinning a first-party client avoids the cap altogether.
 
 That application needs both of Cursor's fixed callbacks under **Allowed
-Callback URLs**, and **Authorization Code** among its grant types — it had only
-Device Code, which session capture uses:
+Callback URLs**, and **Authorization Code** among its grant types, next to the
+Device Code grant that session capture uses:
 
 ```
 http://localhost:8787/callback                      (desktop app)
@@ -362,7 +360,7 @@ Any MCP client that speaks OAuth discovery: point it at your server's streamable
 | `BONEZ_MCP_URL` | No longer read by `.mcp.json` — set the plugin's `bonez_url` option instead (see Install). [Session capture](#session-capture) still reads it, when `BONEZ_GATEWAY_URL` is unset. |
 | `BONEZ_MCP_GATE_DISABLE` | Set to `1` to disable the write permission prompts of the Claude Code and Cursor hook (headless/CI runs). Codex's prompts come from `approval_mode` in `codex/.mcp.json` and ignore it. |
 | `BONEZ_SESSION_SYNC` | Set to `0` to disable [session capture](#session-capture) without uninstalling. |
-| `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — qa or a local gateway. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io` (the default; the override is for Bonez's own qa and local gateways — see Session capture). |
+| `BONEZ_GATEWAY_URL` | Override the gateway session capture uploads to — another Bonez-operated gateway or a local one. Falls back to `BONEZ_MCP_URL` with `/mcp` stripped, then `https://gateway.bonez.io` (the default; the override is for Bonez-operated and local gateways only — see Session capture). |
 
 ### API key scopes
 
@@ -379,7 +377,7 @@ MCP-scoped key never reaches the import routes. `plugins` is a third such lane, 
 | `sessions` | Only `bonez-session-sync.mjs install` needs this. Reaches the session-import routes and nothing else — not `/mcp`, not the console. |
 | `plugins` | Only `bonez-plugin-push.mjs` needs this, and only for CI or a machine without a browser: signed in, it needs no key. Reaches plugin upload and the plugin list and nothing else — not `/mcp`, not the rest of the console. An org admin mints it, and it stops working the moment its owner is no longer an admin: uploading a plugin deploys code onto your computers. |
 
-**On servers released before Linear 1SI-2292, the vendor tools ignore the key's scope**: those servers check scope for rule and memory writes only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the vendor operations in the systems your organization connected on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
+**On older servers, released before the vendor-scope fix, the vendor tools ignore the key's scope**: those servers check scope for rule and memory writes only, so a `read` key, or an OAuth token granted only `bonez:read`, can still run an operation that writes to a vendor (a Slack message, a GitLab note, a Linear issue). A read-only key is not a read-only guarantee for the vendor operations in the systems your organization connected on such a server; newer servers refuse `vendor_write` without the write scope (`write_scope_required`). See [Vendor operations](#vendor-operations).
 
 ## The tools
 
@@ -396,7 +394,7 @@ One loop: **`system_model_search` → `system_model_schema` → `system_model_qu
 | `memory_save` | Typed memory operations — `remember`, `revise`, `claim`, `link`, `unlink`, `close` (and `note`); no delete. Needs the `memory` scope. Prompt-gated by this plugin. |
 | `rules_read` | List and get the org's standing rules and slash commands. |
 | `rules_write` | Save, update or delete binding guidance mounted into every session — write conservatively (prompt-gated by this plugin; needs a `read+write` key). |
-| `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope (1SI-2292)**: see [Vendor operations](#vendor-operations). |
+| `vendor_search`, `vendor_info`, `vendor_read`, `vendor_write`, `vendor_status` | The vendor flow: find an operation (`vendor_search`, which lists the connected systems and returns no input schema), read its description and input schema (`vendor_info`), run it with `vendor_read` if it only reads or `vendor_write` if it changes state (each refuses the other's operations and names the right tool), and check a run that waits with `vendor_status`. The vendor systems are the ones your org has connected: GitHub, GitLab, Jira, Linear, Monday, Sentry, Slack, Discord and databases. Operations act as the signed-in user. **`vendor_write` is not gated by this plugin, and older servers do not check its key scope**: see [Vendor operations](#vendor-operations). |
 
 A Bonez server also lists Slack-conversation tools (`send_message`, `read_thread`, and
 others). They only work inside a Slack conversation turn and are refused for any other credential, so the
@@ -418,7 +416,7 @@ Codex has no hook for this and does not need one: its plugin sets `approval_mode
 
 - **No write gate.** The write gate above does not cover `vendor_write`, on any leg. The server has its own approval step for a write that waits (`vendor_status` checks it), and the plugin's own publish tool runs through `vendor_write`, so a prompt here would fire on every push. `tests/test_gate.sh` pins the boundary.
 - **The skill is an instruction, not a guard.** It tells the agent to describe in words, and wait for a yes, before any `vendor_write`. A model can still get that wrong. For a hard stop, leave `mcp__plugin_bonez_bonez__vendor_write` off your Claude Code allow-list, so its default permission mode asks on every call, or, on Codex, uncomment the `vendor_write` `approval_mode = "prompt"` stanza in [`codex/config.toml`](codex/config.toml).
-- **Servers before Linear 1SI-2292 do not check the key's scope for vendor operations** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
+- **Older servers, released before the vendor-scope fix, do not check the key's scope for vendor operations** (see [API key scopes](#api-key-scopes)). On such a server, mint keys with that in mind: any key that reaches `/mcp` can run a write on every vendor your org has connected, as the user who owns the key.
 
 **Agents, runs and sessions.** A server with the first-party `bonez` vendor serves them through the same tools. Reads: `bonez.agent.list.v2`, `bonez.agent.read.v2`, `bonez.trigger.list.v1`, `bonez.trigger.options.v1`, `bonez.run.list.v1`, `bonez.run.read.v1`, `bonez.session.list.v1`, `bonez.session.read.v1`; `/bonez:agents` lists the agents. Writes (they need the `write` scope; the skills ask first): `bonez.agent.create.v2` (with triggers: a schedule, a Linear or GitHub event, a person), `bonez.agent.update.v1` (edit, pause, retire), `bonez.agent.run.v2` and `bonez.session.bind.v1`. On an older server `vendor_search` with vendor `bonez` returns nothing and the skill tells the agent to say so.
 
@@ -726,6 +724,8 @@ Codex both read `SKILL.md` from `.agents/skills/`).
 
 ## Development
 
+This repository is public: read [CONTRIBUTING.md](CONTRIBUTING.md) before you commit or open a pull request.
+
 ```bash
 claude --plugin-dir .         # load the working tree for one session
 ./tests/test_gate.sh          # hook gate tests
@@ -735,12 +735,13 @@ claude --plugin-dir .         # load the working tree for one session
 ./tests/test_legs.sh          # the plugin creator on the Cursor and Codex legs: tool copies, skill forks, flows
 ./tests/test_codex_approval.sh # Codex asks before memory_save and rules_write; nothing sets approval_mode to approve
 ./tests/test_client_id.sh     # the sign-in client comes from the gateway; every static config names the shipped one
+./tests/test_public_hygiene.sh # the public-repo check: no internal references (node scripts/check-public-hygiene.mjs)
 ./tests/test_windows.sh       # shared tree-hash vectors, Windows paths, LF checkout, hook commands, push smoke test
 claude plugin validate .                          # this repo's marketplace manifest
 claude plugin validate .claude-plugin/plugin.json # the plugin manifest (incl. userConfig and .mcp.json)
 ```
 
-To measure simple sessions on a running local Bonez cluster, set `CLUSTER_CLI` to the absolute path of bonez-core's `dev/cluster/bonez-cluster`. Use Python 3.10+, the signed-in Codex CLI and a Claude provider credential (the test uses Sonnet through OpenRouter when `OPENROUTER_API_KEY` is set). Each command needs a new output directory.
+To measure simple sessions against a local Bonez deployment, set `CLUSTER_CLI` to the absolute path of that deployment's management CLI (the benchmark runs its `env --json` and `token` commands). Use Python 3.10+, the signed-in Codex CLI and a Claude provider credential (the test uses Sonnet through OpenRouter when `OPENROUTER_API_KEY` is set). Each command needs a new output directory.
 
 ```bash
 python3 tests/manual/simple_sessions.py --cluster-cli "$CLUSTER_CLI" --cluster memory-handoff --pairs 12 --out /tmp/bonez-simple-turns
@@ -751,6 +752,6 @@ The benchmark alternates installed and absent profiles and discards one warm-up 
 
 On Windows run the same `.sh` files from Git Bash, or the Node ones directly: `node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/plugin_signin.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs tests/client_id.test.mjs`.
 
-`tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules (`vet()` in bonez-core's `computers/plugins.py`) and, with `oauth` on, of its sign-in side (protected-resource metadata, device flow, `/mcp` with the publish operation); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, anything in `bin/lib/` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
+`tests/lib/fake-plugin-server.mjs`, the gateway the push tests talk to, is a port of the real server's upload rules and, with `oauth` on, of its sign-in side (protected-resource metadata, device flow, `/mcp` with the publish operation); when that file changes, change the port and `tests/fake_plugin_server.test.mjs` in the same pull request. After editing `bin/bonez-package-hash.mjs`, `bin/bonez-plugin-push.mjs`, anything in `bin/lib/` or the `creating-a-plugin` skill, copy the result into `cursor/` and `codex/` (`tests/legs.test.mjs` names what drifted).
 
 CI (`.github/workflows/check.yml`) enforces JSON validity (including the Cursor manifests), version parity across `plugin.json` / `marketplace.json` / `server.json`, `bash -n` on hooks, the gate tests (Claude **and** Cursor protocol cases, including the plugin-root shim), the Codex approval test (`codex/.mcp.json` prompts on `memory_save` and `rules_write`; no file sets `approval_mode` to `approve`), skill-set parity across all three legs (Codex has `new-plugin` on top, nothing else) with the Codex divergence pinned (and the `creating-a-plugin` SKILL.md rewrites of Cursor and Codex checked line by line, with the plugin-creator tool copies and the Cursor command and Codex `new-plugin` skill held to the steps of `commands/new-plugin.md`, in `tests/legs.test.mjs`), and a Cursor plugin-structure check that resolves the marketplace source, asserts version parity across all five manifests, and executes the hook from the plugin root. A second job, on `windows-latest`, runs the tree-hash vectors, the push CLI against a fake gateway, the Windows path and line-ending guards, the write gate under Git Bash, and `tests/windows-client-checks.ps1` in Windows PowerShell 5.1 and PowerShell 7.

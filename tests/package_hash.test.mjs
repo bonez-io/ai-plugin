@@ -1,7 +1,7 @@
 // Tests for bin/bonez-package-hash.mjs and the plugin-creator template's build script.
 //
 // Offline and dependency-free (Node's built-in runner). The hash cases need only node; the template
-// build case needs `bun` and skips itself when it is missing. A loader in bonez-core implements the same
+// build case needs `bun` and skips itself when it is missing. The Bonez server's loader implements the same
 // tree-hash algorithm, so the pinned vector below must never change without that loader changing too.
 //
 // Run: node --test tests/package_hash.test.mjs   (or ./tests/test_package_hash.sh)

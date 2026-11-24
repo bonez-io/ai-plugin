@@ -1,10 +1,10 @@
 // Tests for tests/lib/fake-plugin-server.mjs: the stand-in for the gateway that every push test talks to.
 //
 // The fake is only worth having if it refuses what the real server refuses. These cases are the rows of the
-// real server's own suite (bonez-core: services/gateway/tests/computers/test_plugins.py, the parametrized
+// real server's own suite (its parametrized
 // `test_the_loaders_rules_are_applied_before_anything_is_stored` and its neighbours) plus the file-manager
 // files and the Windows backslash key that this repo's tools have to keep out of an upload. When
-// plugins.py changes a rule, this file and the fake change in the same pull request.
+// the server changes a rule, this file and the fake change in the same pull request.
 //
 // Offline and dependency-free (Node's built-in runner).
 // Run: node --test tests/fake_plugin_server.test.mjs

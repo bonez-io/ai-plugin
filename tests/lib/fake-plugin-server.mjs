@@ -6,12 +6,10 @@
 // MCP endpoint (POST /mcp: initialize, notifications/initialized, tools/call of `vendor_write` with operation
 // bonez.plugin.publish.v1, which runs the SAME vetUpload as the route). `server.signin` drives the browser's part.
 //
-// `vetUpload` is a line-for-line port of `vet()` and `_check_path()` in bonez-core's
-// services/gateway/src/bonez_gateway/computers/plugins.py, with the same order of checks, the same limits
+// `vetUpload` is a line-for-line port of the Bonez server's upload checks, with the same order of checks, the same limits
 // and the same refusal codes and wording, so a package that passes the CLI's tests here cannot be refused by
-// the real server for a rule this file does not know. Port a change to plugins.py here in the same pull
-// request; tests/fake_plugin_server.test.mjs holds the cases of the real server's own test-suite
-// (services/gateway/tests/computers/test_plugins.py).
+// the real server for a rule this file does not know. Port a change to those checks here in the same pull
+// request; tests/fake_plugin_server.test.mjs holds the cases of the real server's own test-suite.
 //
 // The tree-hash recomputation is deliberately a second, independent implementation: it does not import
 // bin/lib/plugin-tree.mjs.
@@ -21,7 +19,7 @@ import { posix } from "node:path"
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex")
 
-// plugins.py: MAX_BYTES, MAX_FILES, MAX_NAME_LEN, MAX_PATH_LEN, NAME, PATH, DIST_EXTENSIONS, ENTRY_EXTENSIONS.
+// The server's limits: MAX_BYTES, MAX_FILES, MAX_NAME_LEN, MAX_PATH_LEN, NAME, PATH, DIST_EXTENSIONS, ENTRY_EXTENSIONS.
 export const LIMITS = { MAX_BYTES: 8 * 1024 * 1024, MAX_FILES: 32, MAX_NAMES: 50, MAX_VERSIONS: 5, MAX_NAME_LEN: 128, MAX_PATH_LEN: 200 }
 const NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/
 const PATH = /^[A-Za-z0-9._/-]+$/

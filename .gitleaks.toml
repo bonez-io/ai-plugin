@@ -1,0 +1,9 @@
+# gitleaks (CI: the "Secret scan" step of .github/workflows/check.yml). The default rules, plus the exceptions below.
+title = "bonez ai-plugin"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The public Bonez CLI OAuth client id: an identifier, not a secret (RFC 8252 section 8.5)"
+regexes = ['''qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm''']

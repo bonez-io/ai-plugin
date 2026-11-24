@@ -1,4 +1,4 @@
-"""Live paired CLI benchmark. Requires a running Bonez dev cluster and signed-in clients."""
+"""Live paired CLI benchmark. Requires a running local Bonez deployment and signed-in clients."""
 
 import argparse
 import concurrent.futures
@@ -440,7 +440,7 @@ if __name__ == "__main__":
     gateway = json.loads(cluster("env", "--json"))["urls"]["gateway"]
     target = urlsplit(gateway)
     if target.scheme != "http" or target.hostname != "127.0.0.1":
-        raise ValueError("Local dev cluster required")
+        raise ValueError("Local Bonez deployment required")
     endpoint = gateway + "/api/admin/api-keys"
     token = cluster("token").splitlines()[-1]
     minted = admin(
