@@ -119,7 +119,9 @@ Sessions from before capture was on are not sent unless you ask. Look first, the
 
 2. Run it again to send the next 20. Each run sends the newest sessions not sent yet, from Claude Code,
    Codex and Cursor together. Add `--agent=claude`, `--agent=codex` or `--agent=cursor` for one tool
-   only.
+   only. For Codex this includes archived threads (`~/.codex/archived_sessions/`) and the sessions
+   Codex compressed after seven days (`.jsonl.zst`). Reading those needs Node 22.15 or later; with an
+   older Node, `backfill` and `status` say how many were left out.
 3. Run `status`: `sessions synced` goes up by the number sent.
 
 ## 3. Turn it off

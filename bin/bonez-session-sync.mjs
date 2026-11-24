@@ -34,21 +34,23 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs"
 import { appendFile } from "node:fs/promises"
-import { hostname, homedir, platform } from "node:os"
+import { hostname, homedir, platform, tmpdir } from "node:os"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
-import { gzipSync } from "node:zlib"
+import zlib, { gzipSync } from "node:zlib"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
@@ -613,17 +615,104 @@ function spawnWorker(args) {
 // Claude Code's own transcript filenames are `<session_id>.jsonl` under ~/.claude/projects/**
 // (parseClaudeFile derives sessionId this same way). Codex rollout files are
 // `rollout-<timestamp>-<session_id>.jsonl` under ~/.codex/sessions/YYYY/MM/DD/ — session_id is
-// always the trailing segment before `.jsonl`, so a suffix match is exact either way.
+// always the trailing segment before `.jsonl`, so a suffix match is exact either way. Codex also
+// compresses older ones and moves archived ones (codexRollouts), and those are found too.
 function resolveTranscriptPath(agent, sessionId) {
   if (!sessionId) return undefined
+  if (agent === "codex") return codexRollouts().find((p) => transcriptId(p).endsWith(sessionId))
   const root =
     agent === "claude"
       ? join(paths.claudeHome, "projects")
-      : agent === "cursor"
-        ? join(HOME, ".cursor", "projects")
-        : join(paths.codexHome, "sessions")
+      : join(HOME, ".cursor", "projects")
   const hits = walkFiles(root, (p) => p.endsWith(`${sessionId}.jsonl`))
   return hits[0]
+}
+
+// -------------------------------------------------------------------------------- codex rollouts
+//
+// Codex keeps a thread's rollout at $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl. A
+// background worker compresses rollouts older than seven days to `….jsonl.zst` (zstd), and an
+// archived thread moves to $CODEX_HOME/archived_sessions/ (codex-rs/rollout/src/compression.rs).
+// On a real Mac 1,087 of 1,118 rollouts were compressed, so reading only plain files under
+// sessions/ missed almost all history. Node reads zstd from 22.15 (zlib.zstdDecompressSync); on an
+// older Node the compressed ones are left alone and `backfill` and `status` say how many.
+const codexHome = () => process.env.CODEX_HOME || paths.codexHome
+const CODEX_ROLLOUT_RE = /(?:^|[\\/])rollout-[^\\/]*\.jsonl(?:\.zst)?$/
+// BONEZ_SESSION_SYNC_NO_ZSTD=1 stands in for an older Node, for the tests.
+const zstdDecompress = process.env.BONEZ_SESSION_SYNC_NO_ZSTD === "1" ? undefined : zlib.zstdDecompressSync
+const isZst = (p) => p.endsWith(".zst")
+const ZSTD_NEEDED = "Node 22.15 or later"
+
+// Every rollout on this machine, plain and compressed, live and archived. When a rollout exists both
+// ways (Codex is compressing it right now), the plain one is used.
+function codexRollouts() {
+  const all = [join(codexHome(), "sessions"), join(codexHome(), "archived_sessions")].flatMap((root) =>
+    walkFiles(root, (p) => CODEX_ROLLOUT_RE.test(p)),
+  )
+  const plain = new Set(all.filter((p) => !isZst(p)).map(transcriptId))
+  return all.filter((p) => !isZst(p) || !plain.has(transcriptId(p)))
+}
+
+// How many compressed rollouts this Node cannot read: 0 when it can.
+function unreadableCodexRollouts() {
+  return zstdDecompress ? 0 : codexRollouts().filter(isZst).length
+}
+function zstdNotice(n) {
+  return `${n} older Codex session${n === 1 ? "" : "s"} need${n === 1 ? "s" : ""} ${ZSTD_NEEDED} to be read (this is Node ${process.versions.node}).`
+}
+
+// Codex has added line shapes the vendored parser predates: an `ordinal` on every line, and
+// `token_usage_record`, `world_state` and `event_msg` (`item_completed`, `token_count`, …) lines.
+// None of them is conversation the parser keeps: the messages and tool calls are the
+// `response_item` lines. So those lines are reduced to their timestamp (the session's last
+// activity), and a tool output Codex now writes as a list of content parts is joined into the
+// text the parser expects. Anything else passes through as it was.
+const CODEX_SKIPPED_LINES = new Set(["token_usage_record", "world_state", "event_msg"])
+function normalizeCodexLine(line) {
+  let ev
+  try {
+    ev = JSON.parse(line)
+  } catch {
+    return null // a rollout being appended to can end mid-line
+  }
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return null
+  if (CODEX_SKIPPED_LINES.has(ev.type)) return typeof ev.timestamp === "string" ? JSON.stringify({ timestamp: ev.timestamp }) : null
+  const out = ev.payload?.output
+  if (Array.isArray(out) && /_call_output$/.test(String(ev.payload.type))) {
+    const text = out.map((part) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "")).filter(Boolean).join("\n")
+    return JSON.stringify({ ...ev, payload: { ...ev.payload, output: text } })
+  }
+  return line
+}
+
+// Parses one rollout, plain or compressed, through the vendored parser. The uploaded conversation
+// keeps the id the server has always filed it under, the file's stem `rollout-<ts>-<uuid>` (see
+// uploadOne for why that id stays). Returns { conversation } or { skipped: reason }.
+function parseCodexRollout(path, scrubber, repos, scope) {
+  let text
+  try {
+    const raw = readFileSync(path)
+    if (isZst(path)) {
+      if (!zstdDecompress) return { skipped: `a compressed Codex session, which needs ${ZSTD_NEEDED}` }
+      text = zstdDecompress(raw).toString("utf8")
+    } else {
+      text = raw.toString("utf8")
+    }
+  } catch (err) {
+    return { skipped: `unreadable (${err instanceof Error ? err.message : String(err)})` }
+  }
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean).map(normalizeCodexLine).filter((l) => l !== null)
+  // The vendored parser reads a file by path and names the session after it, so it gets one, with
+  // the rollout's own name, in a folder only this user can read, removed straight after.
+  const dir = mkdtempSync(join(tmpdir(), "bonez-codex-"))
+  try {
+    const copy = join(dir, `${transcriptId(path)}.jsonl`)
+    writeFileSync(copy, `${lines.join("\n")}\n`, { mode: 0o600 })
+    const conversation = parseCodexFile(copy, scrubber, repos, scope)
+    return conversation ? { conversation: { ...conversation, sourcePath: path } } : { skipped: "no messages, or outside the configured repo scope" }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 // The Codex leg's durable fallback (SPEC §3.1): SessionEnd's 3s hard cap plus a session killed
@@ -635,8 +724,7 @@ function resolveTranscriptPath(agent, sessionId) {
 // silent no-op; only a genuinely missed session gets caught, and only one per SessionStart —
 // a run of several consecutive crashes needs that many subsequent starts to fully catch up.
 function findCodexCatchupTarget(currentSessionId) {
-  const sessions = join(paths.codexHome, "sessions")
-  const files = walkFiles(sessions, (p) => p.endsWith(".jsonl")).filter((p) => !p.endsWith(`${currentSessionId}.jsonl`))
+  const files = codexRollouts().filter((p) => !transcriptId(p).endsWith(currentSessionId) && (zstdDecompress || !isZst(p)))
   const withMtime = files
     .map((p) => {
       try {
@@ -720,9 +808,10 @@ function isSidechainTranscript(path) {
 
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
-function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId, since = 0 }) {
-  if (!root || !existsSync(root)) return []
-  const files = walkFiles(root, (p) => p.endsWith(".jsonl") && match(p)).filter(
+// `files` replaces the walk of `root` (Codex's rollouts live under two roots, in two formats).
+function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId, since = 0, files: given }) {
+  if (!given && (!root || !existsSync(root))) return []
+  const files = (given ?? walkFiles(root, (p) => p.endsWith(".jsonl") && match(p))).filter(
     (p) => !excludeId || !p.endsWith(`${excludeId}.jsonl`),
   )
   const candidates = files
@@ -809,7 +898,7 @@ function findClaudeBackfillTargets(state, since = 0) {
 // A transcript's session id is its file name, except for Codex, whose rollout files are named
 // `rollout-<timestamp>-<session id>.jsonl`: the id is the UUID at the end, the same `session_id`
 // its SessionEnd hook uploads under, so a backfill never sends a session a second time.
-const transcriptId = (p) => p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
+const transcriptId = (p) => p.split(/[\\/]/).pop()?.replace(/\.jsonl(?:\.zst)?$/, "") ?? p
 const UUID_TAIL_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
 const codexTranscriptId = (p) => transcriptId(p).match(UUID_TAIL_RE)?.[1] ?? transcriptId(p)
 
@@ -819,7 +908,9 @@ const BACKFILL_AGENTS = ["claude", "codex", "cursor"]
 function findBackfillTargets(agent, state, since = 0) {
   if (agent === "claude") return findClaudeBackfillTargets(state, since)
   if (agent === "codex") {
-    return staleTranscriptTargets(join(paths.codexHome, "sessions"), { excludeId: null, state, cap: 0, idOf: codexTranscriptId, since })
+    // Compressed rollouts this Node cannot read are left out here, and counted by unreadableCodexRollouts.
+    const files = codexRollouts().filter((p) => zstdDecompress || !isZst(p))
+    return staleTranscriptTargets(null, { excludeId: null, state, cap: 0, idOf: codexTranscriptId, since, files })
   }
   return staleTranscriptTargets(join(HOME, ".cursor", "projects"), {
     excludeId: null, state, cap: 0, match: (p) => /[\\/]agent-transcripts[\\/]/.test(p), since,
@@ -1308,13 +1399,16 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   // Cursor's records carry no cwd of their own, so the workspace root arrives from the hook
   // payload instead and has to be threaded in — hence the separate call rather than one
   // uniform `parse(path, scrubber, repos, scope)`.
-  const conversation =
+  const parsed =
     agent === "cursor"
-      ? parseCursorFile(transcriptPath, scrubber, repos, scope, cwd)
-      : (agent === "claude" ? parseClaudeFile : parseCodexFile)(transcriptPath, scrubber, repos, scope)
+      ? { conversation: parseCursorFile(transcriptPath, scrubber, repos, scope, cwd) }
+      : agent === "codex"
+        ? parseCodexRollout(transcriptPath, scrubber, repos, scope)
+        : { conversation: parseClaudeFile(transcriptPath, scrubber, repos, scope) }
+  const conversation = parsed.conversation
   if (!conversation) {
     await log(
-      `upload: session=${sessionId} agent=${agent} skipped — no messages, or outside the configured repo scope`,
+      `upload: session=${sessionId} agent=${agent} skipped — ${parsed.skipped ?? "no messages, or outside the configured repo scope"}`,
     )
     return
   }
@@ -2919,6 +3013,8 @@ async function cmdBackfill(rest) {
   // One list across every harness, newest first, so a run sends the most recent work wherever it ran.
   const names = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" }
   const { perAgent, targets } = allBackfillTargets(agents, loadState(), since)
+  const unreadable = agents.includes("codex") ? unreadableCodexRollouts() : 0
+  if (unreadable) console.log(zstdNotice(unreadable))
   if (!targets.length) {
     console.log("Nothing to backfill: every session on this machine is already uploaded at its current content.")
     return
@@ -3028,6 +3124,8 @@ function cmdStatus() {
     `  last successful upload: ${lastOk ? when(lastOk) : "never"}`,
     `  log:      ${logFilePath()}`,
   )
+  const unreadable = unreadableCodexRollouts()
+  if (unreadable) lines.push(`  ${zstdNotice(unreadable)}`)
   console.log(lines.join("\n"))
 }
 
@@ -3226,6 +3324,9 @@ export {
   dataDir,
   migrateLegacyData,
   findCodexCatchupTarget,
+  codexRollouts,
+  normalizeCodexLine,
+  parseCodexRollout,
   findCursorCatchupTargets,
   findClaudeCatchupTargets,
   findClaudeBackfillTargets,

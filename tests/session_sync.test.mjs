@@ -17,7 +17,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statS
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { gunzipSync } from "node:zlib"
+import zlib, { gunzipSync } from "node:zlib"
 import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
@@ -72,7 +72,8 @@ function runCli(args, { env = {}, input = "" } = {}) {
       // in-process check below runs with the real ten minutes.
       // The capture offer (1SI-4098) would start a real device flow from any test that starts a
       // session with nothing set up; only its own tests turn it back on.
-      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
+      // A developer's own CODEX_HOME would point the Codex leg at their real rollouts.
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, CODEX_HOME: "", BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -695,6 +696,113 @@ describe("_upload — Codex leg against the stub gateway", () => {
 
     rmSync(fakeHome, { recursive: true, force: true })
     rmSync(dataDir, { recursive: true, force: true })
+  })
+})
+
+// ------------------------------------------------------------- codex: compressed, archived, new shapes
+
+// Codex compresses rollouts older than seven days to `.jsonl.zst` and moves archived threads to
+// $CODEX_HOME/archived_sessions/ (1SI-4111). The fixture has the line shapes Codex writes today, fake content.
+describe("Codex: compressed and archived rollouts, and today's line shapes (1SI-4111)", () => {
+  const ZSTD = typeof zlib.zstdCompressSync === "function"
+  const UUID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60"
+  const ARCHIVED = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61"
+  const LIVE = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a62"
+  const v2 = () => readFileSync(join(FIXTURES, "codex-rollout-v2.jsonl"))
+  const stamp = (path, ageMs) => {
+    const t = new Date(Date.now() - ageMs)
+    utimesSync(path, t, t)
+  }
+  // One compressed rollout under sessions/, one plain one under archived_sessions/, one plain recent one.
+  const codexHome = () => {
+    const home = freshDir("codex-zst")
+    const sessions = join(home, ".codex", "sessions", "2026", "11", "10")
+    const archived = join(home, ".codex", "archived_sessions")
+    mkdirSync(sessions, { recursive: true })
+    mkdirSync(archived, { recursive: true })
+    const zst = join(sessions, `rollout-2026-11-10T09-00-00-${UUID}.jsonl.zst`)
+    writeFileSync(zst, zlib.zstdCompressSync(v2()))
+    stamp(zst, 9 * 86_400_000)
+    const old = join(archived, `rollout-2026-11-12T09-00-00-${ARCHIVED}.jsonl`)
+    writeFileSync(old, v2())
+    stamp(old, 8 * 86_400_000)
+    const live = join(home, ".codex", "sessions", "2026", "11", "20", `rollout-2026-11-20T09-00-00-${LIVE}.jsonl`)
+    mkdirSync(dirname(live), { recursive: true })
+    writeFileSync(live, v2())
+    stamp(live, 86_400_000)
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    return { home, zst, old, live, env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url } }
+  }
+
+  test("today's line shapes: the conversation and tool calls are kept, the rest is skipped without failing", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const { Scrubber } = await import("../bin/vendor/agent-import.bundle.mjs")
+    const { conversation } = mod.parseCodexRollout(join(FIXTURES, "codex-rollout-v2.jsonl"), new Scrubber(), [], "global")
+    assert.equal(conversation.agent, "codex")
+    assert.equal(conversation.workspacePath, "/tmp/bonez-session-sync-fixture-repo", "session_meta's cwd, not one inside world_state")
+    assert.deepEqual(conversation.messages.map((m) => [m.role, m.tool]), [
+      ["user", undefined], ["tool", "exec_command"], ["tool", "result"], ["tool", "apply_patch"], ["tool", "result"], ["assistant", undefined],
+    ])
+    // A tool output written as a list of content parts reads as its text, not as JSON.
+    assert.equal(conversation.messages[2].text, "src/ledger.py:12:def refund_helper():\nProcess exited with code 0. Token in env: ****")
+    const raw = JSON.stringify(conversation)
+    assert.ok(!raw.includes(FAKE_API_KEY))
+    for (const left of ["WORLD STATE TEXT", "DEVELOPER INSTRUCTIONS", "ITEM COMPLETED OUTPUT"]) assert.ok(!raw.includes(left), left)
+    // event_msg lines still date the session.
+    assert.equal(new Date(conversation.updatedAt).toISOString(), "2026-11-20T10:00:08.000Z")
+    // Unparseable, null and array lines are skipped.
+    assert.equal(mod.normalizeCodexLine("null"), null)
+    assert.equal(mod.normalizeCodexLine("[1]"), null)
+    assert.equal(mod.normalizeCodexLine('{"type":"mess'), null)
+    assert.equal(mod.normalizeCodexLine('{"type":"world_state","payload":{}}'), null)
+  })
+
+  test("backfill finds compressed and archived rollouts and reads the compressed one", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, zst, env } = codexHome()
+    const dry = await runCli(["backfill", "--dry-run", "--agent=codex"], { env })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Sessions not yet uploaded at their current content: 3\n {2}Codex: 3/)
+    assert.doesNotMatch(dry.stdout, /need/)
+    // The uploaded conversation is read out of the .zst and keeps the rollout stem as its session id.
+    const before = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: UUID, cwd: "/tmp/x" }))
+    const res = await runCli(["_upload", "codex", "session-end", payloadFile], { env })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.put.length, before + 1, readFileSync(join(home, ".bonez", "session-sync", "sync.log"), "utf8"))
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, `rollout-2026-11-10T09-00-00-${UUID}`)
+    assert.equal(conversation.sourcePath, zst)
+    assert.equal(conversation.messages.at(-1).text, "Renamed refund_helper to issue_refund in src/ledger.py.")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("catch-up reaches an archived rollout", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, live, env } = codexHome()
+    rmSync(live)
+    const before = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: LIVE, cwd: "/tmp/x", source: "startup" }))
+    assert.equal((await runCli(["_upload", "codex", "session-start", payloadFile], { env })).status, 0)
+    assert.equal(gateway.calls.put.length, before + 1)
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, `rollout-2026-11-12T09-00-00-${ARCHIVED}`, "the newest other rollout is the archived one")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("on a Node without zstd the compressed ones are left alone, and backfill and status say so once", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, env } = codexHome()
+    const old = { ...env, BONEZ_SESSION_SYNC_NO_ZSTD: "1" }
+    const dry = await runCli(["backfill", "--dry-run"], { env: old })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Codex: 2\n/)
+    assert.equal(dry.stdout.match(/1 older Codex session needs Node 22\.15 or later/g)?.length, 1, dry.stdout)
+    const status = await runCli(["status"], { env: old })
+    assert.match(status.stdout, /1 older Codex session needs Node 22\.15 or later/)
+    assert.doesNotMatch((await runCli(["status"], { env })).stdout, /older Codex/)
+    rmSync(home, { recursive: true, force: true })
   })
 })
 
