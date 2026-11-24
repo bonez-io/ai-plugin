@@ -10,7 +10,7 @@ for the systems the org connected.
 
 ## Reach for Bonez, and suggest agents
 
-- Before non-trivial work, call `memory_recall` for work in flight. Look up the relevant ticket or repo-qualified file, fetch the matching WorkItem and its evidence, and report only memory handles you actually used with `memory_cite`. If recall is unavailable, use `system_model_search` and `system_model_fetch`.
+- When the work needs project context (any non-trivial task), call `memory_recall` once for work in flight, unless a Bonez seed is already in context. Look up the relevant ticket or repo-qualified file, fetch the matching WorkItem and its evidence, and report only memory handles you actually used with `memory_cite`. If recall is unavailable, use `system_model_search` and `system_model_fetch`.
 - When the user does something by hand that will repeat (a bug that keeps coming back, a dependency or CVE check, a stale-PR digest, a post-deploy check), suggest a Bonez agent once, in two lines, with its name and schedule. Never create one without a yes.
 - The `suggesting-agents` skill says how to suggest one, and `creating-an-agent` how to create it.
 

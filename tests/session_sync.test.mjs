@@ -17,7 +17,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statS
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { gunzipSync } from "node:zlib"
+import zlib, { gunzipSync } from "node:zlib"
 import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
@@ -71,7 +71,10 @@ function runCli(args, { env = {}, input = "" } = {}) {
       cwd: REPO_ROOT,
       // The catch-up's quiet period would hold back the transcripts these tests just wrote. The
       // in-process check below runs with the real ten minutes.
-      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_QUIET_MS: "0", ...env },
+      // The capture offer would start a real device flow from any test that starts a
+      // session with nothing set up; only its own tests turn it back on.
+      // A developer's own CODEX_HOME would point the Codex leg at their real rollouts.
+      env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, CODEX_HOME: "", BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
     })
     let stdout = ""
     let stderr = ""
@@ -150,9 +153,12 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
     assert.equal(mod.shouldSkip(staleChanged, "s1", 4, "hash-b"), null)
 
     // gatewayBaseUrl: default, explicit override, MCP-URL-derived fallback.
+    // An empty data folder: the gateway this machine's own `connect` paired with must not leak in.
     const savedGw = process.env.BONEZ_GATEWAY_URL
     const savedMcp = process.env.BONEZ_MCP_URL
+    const savedData = process.env.BONEZ_SESSION_SYNC_DATA
     try {
+      process.env.BONEZ_SESSION_SYNC_DATA = freshDir("gateway-default")
       delete process.env.BONEZ_GATEWAY_URL
       delete process.env.BONEZ_MCP_URL
       assert.equal(mod.gatewayBaseUrl(), "https://gateway.bonez.io")
@@ -166,6 +172,8 @@ describe("pure helpers (imported directly — isMain guard keeps this from dispa
       else process.env.BONEZ_GATEWAY_URL = savedGw
       if (savedMcp === undefined) delete process.env.BONEZ_MCP_URL
       else process.env.BONEZ_MCP_URL = savedMcp
+      if (savedData === undefined) delete process.env.BONEZ_SESSION_SYNC_DATA
+      else process.env.BONEZ_SESSION_SYNC_DATA = savedData
     }
 
     // buildBundle: exact manifest field set, matching the desktop app's importer
@@ -758,6 +766,113 @@ describe("_upload — Codex leg against the stub gateway", () => {
   })
 })
 
+// ------------------------------------------------------------- codex: compressed, archived, new shapes
+
+// Codex compresses rollouts older than seven days to `.jsonl.zst` and moves archived threads to
+// $CODEX_HOME/archived_sessions/. The fixture has the line shapes Codex writes today, fake content.
+describe("Codex: compressed and archived rollouts, and today's line shapes", () => {
+  const ZSTD = typeof zlib.zstdCompressSync === "function"
+  const UUID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60"
+  const ARCHIVED = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61"
+  const LIVE = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a62"
+  const v2 = () => readFileSync(join(FIXTURES, "codex-rollout-v2.jsonl"))
+  const stamp = (path, ageMs) => {
+    const t = new Date(Date.now() - ageMs)
+    utimesSync(path, t, t)
+  }
+  // One compressed rollout under sessions/, one plain one under archived_sessions/, one plain recent one.
+  const codexHome = () => {
+    const home = freshDir("codex-zst")
+    const sessions = join(home, ".codex", "sessions", "2026", "11", "10")
+    const archived = join(home, ".codex", "archived_sessions")
+    mkdirSync(sessions, { recursive: true })
+    mkdirSync(archived, { recursive: true })
+    const zst = join(sessions, `rollout-2026-11-10T09-00-00-${UUID}.jsonl.zst`)
+    writeFileSync(zst, zlib.zstdCompressSync(v2()))
+    stamp(zst, 9 * 86_400_000)
+    const old = join(archived, `rollout-2026-11-12T09-00-00-${ARCHIVED}.jsonl`)
+    writeFileSync(old, v2())
+    stamp(old, 8 * 86_400_000)
+    const live = join(home, ".codex", "sessions", "2026", "11", "20", `rollout-2026-11-20T09-00-00-${LIVE}.jsonl`)
+    mkdirSync(dirname(live), { recursive: true })
+    writeFileSync(live, v2())
+    stamp(live, 86_400_000)
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    return { home, zst, old, live, env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url } }
+  }
+
+  test("today's line shapes: the conversation and tool calls are kept, the rest is skipped without failing", async () => {
+    const mod = await import("../bin/bonez-session-sync.mjs")
+    const { Scrubber } = await import("../bin/vendor/agent-import.bundle.mjs")
+    const { conversation } = mod.parseCodexRollout(join(FIXTURES, "codex-rollout-v2.jsonl"), new Scrubber(), [], "global")
+    assert.equal(conversation.agent, "codex")
+    assert.equal(conversation.workspacePath, "/tmp/bonez-session-sync-fixture-repo", "session_meta's cwd, not one inside world_state")
+    assert.deepEqual(conversation.messages.map((m) => [m.role, m.tool]), [
+      ["user", undefined], ["tool", "exec_command"], ["tool", "result"], ["tool", "apply_patch"], ["tool", "result"], ["assistant", undefined],
+    ])
+    // A tool output written as a list of content parts reads as its text, not as JSON.
+    assert.equal(conversation.messages[2].text, "src/ledger.py:12:def refund_helper():\nProcess exited with code 0. Token in env: ****")
+    const raw = JSON.stringify(conversation)
+    assert.ok(!raw.includes(FAKE_API_KEY))
+    for (const left of ["WORLD STATE TEXT", "DEVELOPER INSTRUCTIONS", "ITEM COMPLETED OUTPUT"]) assert.ok(!raw.includes(left), left)
+    // event_msg lines still date the session.
+    assert.equal(new Date(conversation.updatedAt).toISOString(), "2026-11-20T10:00:08.000Z")
+    // Unparseable, null and array lines are skipped.
+    assert.equal(mod.normalizeCodexLine("null"), null)
+    assert.equal(mod.normalizeCodexLine("[1]"), null)
+    assert.equal(mod.normalizeCodexLine('{"type":"mess'), null)
+    assert.equal(mod.normalizeCodexLine('{"type":"world_state","payload":{}}'), null)
+  })
+
+  test("backfill finds compressed and archived rollouts and reads the compressed one", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, zst, env } = codexHome()
+    const dry = await runCli(["backfill", "--dry-run", "--agent=codex"], { env })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Sessions not yet uploaded at their current content: 3\n {2}Codex: 3/)
+    assert.doesNotMatch(dry.stdout, /need/)
+    // The uploaded conversation is read out of the .zst and keeps the rollout stem as its session id.
+    const before = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: UUID, cwd: "/tmp/x" }))
+    const res = await runCli(["_upload", "codex", "session-end", payloadFile], { env })
+    assert.equal(res.status, 0)
+    assert.equal(gateway.calls.put.length, before + 1, readFileSync(join(home, ".bonez", "session-sync", "sync.log"), "utf8"))
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, `rollout-2026-11-10T09-00-00-${UUID}`)
+    assert.equal(conversation.sourcePath, zst)
+    assert.equal(conversation.messages.at(-1).text, "Renamed refund_helper to issue_refund in src/ledger.py.")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("catch-up reaches an archived rollout", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, live, env } = codexHome()
+    rmSync(live)
+    const before = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: LIVE, cwd: "/tmp/x", source: "startup" }))
+    assert.equal((await runCli(["_upload", "codex", "session-start", payloadFile], { env })).status, 0)
+    assert.equal(gateway.calls.put.length, before + 1)
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, `rollout-2026-11-12T09-00-00-${ARCHIVED}`, "the newest other rollout is the archived one")
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  test("on a Node without zstd the compressed ones are left alone, and backfill and status say so once", { skip: !ZSTD && "this Node has no zstd" }, async () => {
+    const { home, env } = codexHome()
+    const old = { ...env, BONEZ_SESSION_SYNC_NO_ZSTD: "1" }
+    const dry = await runCli(["backfill", "--dry-run"], { env: old })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Codex: 2\n/)
+    assert.equal(dry.stdout.match(/1 older Codex session needs Node 22\.15 or later/g)?.length, 1, dry.stdout)
+    const status = await runCli(["status"], { env: old })
+    assert.match(status.stdout, /1 older Codex session needs Node 22\.15 or later/)
+    assert.doesNotMatch((await runCli(["status"], { env })).stdout, /older Codex/)
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
 // ------------------------------------------------------------- cursor stop / concurrent chats
 
 describe("Cursor `stop`: concurrent conversations each capture themselves", () => {
@@ -1028,7 +1143,7 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
   test("flushes the PREVIOUS conversation, never the one just starting", async () => {
     const home = freshDir("cursor-catchup")
     const root = "/tmp/bonez-session-sync-fixture-repo"
-    const slug = "tmp-bonez-session-sync-fixture-repo" // workspace path with "/" -> "-"
+    const slug = "tmp-bonez-session-sync-fixture-repo" // every run of non-alphanumerics -> "-"
     seedWorkspace(home, slug, ["old-convo", "new-convo"])
     const past = new Date(Date.now() - 60_000)
     utimesSync(join(home, ".cursor", "projects", slug, "agent-transcripts", "old-convo", "old-convo.jsonl"), past, past)
@@ -1090,6 +1205,74 @@ describe("Cursor sessionStart catch-up (the path that survives window_close)", (
     assert.equal(mod.cursorProjectSlug("/tmp/repo/"), "tmp-repo")
     assert.equal(mod.cursorProjectSlug(""), null)
     assert.equal(mod.cursorProjectSlug(undefined), null)
+    // Dots, spaces, underscores and other punctuation: each run is one "-", as in the directories Cursor wrote.
+    assert.equal(
+      mod.cursorProjectSlug("/Users/alex/Library/Application Support/Cursor/Workspaces/1771945206117/workspace.json"),
+      "Users-alex-Library-Application-Support-Cursor-Workspaces-1771945206117-workspace-json",
+    )
+    assert.equal(
+      mod.cursorProjectSlug("/Users/alex/.bonez/profiles/local/data/bonez/bonez-sessions/ses_10a8fbec1ffe2Uf8NN6aTdYCIe"),
+      "Users-alex-bonez-profiles-local-data-bonez-bonez-sessions-ses-10a8fbec1ffe2Uf8NN6aTdYCIe",
+    )
+    assert.equal(mod.cursorProjectSlug("/Users/alex/Projects/bonez/sample_3"), "Users-alex-Projects-bonez-sample-3")
+    assert.equal(mod.cursorProjectSlug("/Users/me/My Projects/app.v2 (copy)/"), "Users-me-My-Projects-app-v2-copy")
+    assert.equal(mod.cursorProjectSlug("/"), null)
+  })
+
+  test("a sub-agent's transcript (<conversation>/subagents/<id>.jsonl) is never its own session: not at a start, not from a hook", async () => {
+    const home = freshDir("cursor-subagent")
+    const root = "/tmp/bonez-session-sync-fixture-repo"
+    const slug = "tmp-bonez-session-sync-fixture-repo"
+    seedWorkspace(home, slug, ["lead-convo"])
+    const sub = join(home, ".cursor", "projects", slug, "agent-transcripts", "lead-convo", "subagents", "sub-agent-1.jsonl")
+    mkdirSync(dirname(sub), { recursive: true })
+    cpSync(join(FIXTURES, "cursor-transcript.jsonl"), sub)
+    const dataDir = freshDir("cursor-subagent-data")
+    await install(dataDir, ["--global"])
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const run = async (name, payload) => {
+      const payloadFile = join(dataDir, `${name}.json`)
+      writeFileSync(payloadFile, JSON.stringify({ workspace_roots: [root], ...payload }))
+      const res = await runCli(["_upload", "cursor", name, payloadFile], { env })
+      assert.equal(res.status, 0, res.stderr)
+    }
+    const state = () => JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))
+
+    // The start-side catch-up: the lead conversation only.
+    let before = gateway.calls.presign.length
+    await run("session-start", { hook_event_name: "sessionStart", conversation_id: "brand-new" })
+    assert.equal(gateway.calls.presign.length, before + 1)
+    assert.ok(state()["lead-convo"])
+    assert.ok(!state()["sub-agent-1"])
+
+    // A hook that names the sub-agent, by its transcript or by its id alone: nothing is sent.
+    before = gateway.calls.presign.length
+    await run("turn-end", { hook_event_name: "stop", status: "completed", conversation_id: "sub-agent-1", transcript_path: sub })
+    await run("session-end", { hook_event_name: "sessionEnd", conversation_id: "sub-agent-1" })
+    assert.equal(gateway.calls.presign.length, before)
+    assert.ok(!state()["sub-agent-1"])
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), /session=sub-agent-1 agent=cursor skipped — a sub-agent transcript/)
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
+  })
+
+  test("the catch-up finds a workspace whose path has dots, spaces and underscores", async () => {
+    const home = freshDir("cursor-dotted")
+    const root = "/tmp/Bonez Fixtures/api.v2_x"
+    seedWorkspace(home, "tmp-Bonez-Fixtures-api-v2-x", ["dotted-convo"])
+    const dataDir = freshDir("cursor-dotted-data")
+    await install(dataDir, ["--global"])
+    const payloadFile = join(dataDir, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "brand-new", workspace_roots: [root] }))
+    const before = gateway.calls.presign.length
+    const res = await runCli(["_upload", "cursor", "session-start", payloadFile], {
+      env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home },
+    })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gateway.calls.presign.length, before + 1)
+    assert.ok(JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8"))["dotted-convo"])
+    rmSync(home, { recursive: true, force: true })
+    rmSync(dataDir, { recursive: true, force: true })
   })
 })
 
@@ -2015,9 +2198,61 @@ describe("live session: start once, then repository-relative reads and edits", (
     await waitFor(() => existsSync(join(dataDir, "presence", "live-recall-1.json")))
     const note = ' This session\'s id is "live-recall-1". Pass "session": "live-recall-1" to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.'
     assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => t + note))
-    // Codex is never announced, so its text never changes.
+    // A Codex session is known by its rollout stem; a payload with no rollout names no session.
     const codex = { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }
     assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
+  })
+
+  test("codex: announced under its rollout stem, the id its upload is filed under; apply_patch touches the files it names", async () => {
+    const { repo, outside } = makeRepo()
+    const dataDir = freshDir("live-codex")
+    await install(dataDir, ["--global"])
+    const home = freshDir("live-codex-home")
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a70"
+    const id = `rollout-2026-11-24T09-00-00-${uuid}`
+    const rollout = join(home, ".codex", "sessions", "2026", "11", "24", `${id}.jsonl`)
+    mkdirSync(dirname(rollout), { recursive: true })
+    cpSync(join(FIXTURES, "codex-rollout-v2.jsonl"), rollout)
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const codexHook = (event, payload) =>
+      runCli(["hook", "codex", event], { env, input: JSON.stringify({ session_id: uuid, transcript_path: rollout, cwd: repo, ...payload }) })
+
+    await codexHook("session-start", { hook_event_name: "SessionStart", source: "startup" })
+    await started(dataDir, "codex")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "codex", repo: "acme/api" }])
+    assert.equal(forId("start", uuid).length, 0, "never under the bare UUID, which no upload uses")
+
+    const patch = [
+      "*** Begin Patch", "*** Update File: src/a.py", "@@", "-a = 1", "+a = 2", "*** Add File: src/c.py", "+c = 1",
+      "*** Delete File: src/b.py", `*** Update File: ${outside}`, "@@", "-private", "+x", "*** End Patch", "",
+    ].join("\n")
+    const res = await codexHook("tool-use", { hook_event_name: "PostToolUse", tool_name: "apply_patch", tool_input: { command: patch } })
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 1000, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    await waitFor(() => forId("events", id).length)
+    await drained(dataDir, id)
+    assert.deepEqual(forId("events", id).flatMap((c) => c.body.events).map((e) => [e.tool, e.args.path]),
+      [["edit", "acme/api/src/a.py"], ["write", "acme/api/src/c.py"]])
+
+    // The recall hook gives the patch's first file as the ref, and names the session by the same id.
+    const out = spawnSync(process.execPath, [join(REPO_ROOT, "bin", "bonez-recall-hook.mjs"), "codex"], {
+      encoding: "utf8", env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+      input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: uuid, transcript_path: rollout, cwd: repo, tool_name: "apply_patch", tool_input: { command: patch } }),
+    })
+    const context = JSON.parse(out.stdout).hookSpecificOutput.additionalContext
+    assert.match(context, /File ref \(data\): "acme\/api\/src\/a\.py"/)
+    assert.ok(context.includes(`Pass "session": "${id}" to every memory_recall call.`), context)
+
+    // The end uploads under that same id, forgets the presence, and sync-state keys it by the UUID.
+    const puts = gateway.calls.put.length
+    await codexHook("session-end", { hook_event_name: "SessionEnd", reason: "other" })
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    await waitFor(() => gateway.calls.put.length > puts)
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, id)
+    const state = () => (existsSync(join(dataDir, "sync-state.json")) ? JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8")) : {})
+    await waitFor(() => state()[uuid])
+    assert.deepEqual(Object.keys(state()), [uuid])
   })
 
   test("a 404 or 409 on events refuses the session: one failed call, not one per burst", async () => {
@@ -2259,8 +2494,9 @@ describe("capture says when it is set up but not working", () => {
     const { home, env } = homeWith("no-capture")
     const hostDir = join(home, ".claude", "plugins", "data", "bonez-bonez")
     mkdirSync(hostDir, { recursive: true })
+    // (The stub gateway runs no device flow, so the capture offer has no link and stays silent.)
     assert.equal((await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })).stdout, "")
-    assert.ok(!existsSync(join(home, ".bonez")), "nothing written for a person without capture")
+    assert.ok(!existsSync(join(home, ".bonez", "session-sync", "hook-folder.json")), "no folder written down for a person without capture")
     writeFileSync(join(hostDir, "config.json"), JSON.stringify({ enabled: false }))
     await start({ ...env, CLAUDE_PLUGIN_DATA: hostDir })
     // It also writes down the server address it uses, with where that came from.
@@ -2450,5 +2686,1191 @@ describe("a sign-in issued by one gateway is never sent to another", () => {
     assert.match(st.stdout, /gateway: {2}https:\/\/gateway\.bonez\.io \(from the default\)/)
     assert.match(st.stdout, new RegExp(`the Claude Code hook uses: ${gateway.url.replaceAll(".", "\\.")} \\(from the plugin's server address option\\)`))
     assert.match(st.stdout, new RegExp(`sign-in: {2}issued by gateway\\.bonez\\.io, not ${target.replace(".", "\\.")}`))
+  })
+})
+
+describe("capture offer: one click turns capture on", () => {
+  // The offer is what later starts show, once the setup page was opened (see the connect tests).
+  const offerEnv = (as, extra = {}) => {
+    const home = freshDir("offer")
+    mkdirSync(join(home, ".bonez", "session-sync"), { recursive: true })
+    writeFileSync(join(home, ".bonez", "session-sync", "optin.json"), JSON.stringify({ connectOpenedAt: 1 }))
+    return {
+      home,
+      env: {
+        HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "",
+        BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client", BONEZ_DEVICE_POLL_FLOOR_MS: "50",
+        BONEZ_CAPTURE_OFFER: "", ...extra,
+      },
+    }
+  }
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const optin = (home) => (existsSync(join(store(home), "optin.json")) ? JSON.parse(readFileSync(join(store(home), "optin.json"), "utf8")) : {})
+  const start = (agent, env) =>
+    runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "offer-1", cwd: "/tmp/offer", source: "startup" }) })
+
+  test("never set up: one line with the approval link, then capture is on once approved, said once", async () => {
+    // Approval after 40 polls of 50ms: late enough that the second start below is still "pending".
+    const as = await startStubOAuth({ pendingPolls: 40 })
+    try {
+      const { home, env } = offerEnv(as)
+      const first = await start("claude", env)
+      assert.ok(first.ms < 4500, `hook took ${first.ms}ms`)
+      const msg = JSON.parse(first.stdout).systemMessage
+      assert.match(msg, /^Bonez can save your coding sessions to your team's Bonez/)
+      assert.ok(msg.includes(`${as.url}/activate?user_code=WXYZ-1234`), msg)
+      assert.match(msg, /Never: \/bonez:capture off$/)
+      assert.equal(as.calls.device[0].scope, "bonez:sessions offline_access")
+      // The same day: nothing more.
+      assert.equal((await start("claude", env)).stdout, "")
+      // The person approves (the stub approves after two polls); the worker saves a global config.
+      await waitFor(() => existsSync(join(store(home), "config.json")), { timeoutMs: 8000 })
+      const cfg = JSON.parse(readFileSync(join(store(home), "config.json"), "utf8"))
+      assert.equal(cfg.enabled, true)
+      assert.equal(cfg.scope, "global")
+      assert.equal(cfg.via, "offer")
+      assert.equal(cfg.oauth.refreshToken, "rt-1")
+      assert.equal(cfg.apiKey, undefined)
+      assert.equal((statSync(join(store(home), "config.json")).mode & 0o777).toString(8), "600")
+      const on = await start("claude", env)
+      assert.match(JSON.parse(on.stdout).systemMessage, /^Bonez session capture is on: .* \/bonez:capture backfill$/)
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 1)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("a link still pending is shown again on a later day, not a new one", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      await start("claude", env)
+      const state = optin(home)
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ ...state, lastShownAt: Date.now() - 21 * 3_600_000 }))
+      const again = await start("claude", env)
+      assert.ok(JSON.parse(again.stdout).systemMessage.includes("/activate?user_code=WXYZ-1234"))
+      assert.equal(as.calls.device.length, 1)
+      assert.equal(optin(home).shown, 2)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("after three offers it waits a week", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      mkdirSync(store(home), { recursive: true })
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ connectOpenedAt: 1, shown: 3, lastShownAt: Date.now() - 2 * 86_400_000 }))
+      assert.equal((await start("claude", env)).stdout, "")
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ connectOpenedAt: 1, shown: 3, lastShownAt: Date.now() - 8 * 86_400_000 }))
+      assert.match(JSON.parse((await start("claude", env)).stdout).systemMessage, /Turn it on with one click/)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("decline: off, and never asked again; `on` withdraws the no and prints the link", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const { home, env } = offerEnv(as)
+      const no = await runCli(["decline"], { env })
+      assert.match(no.stdout, /will not ask again/)
+      writeFileSync(join(store(home), "optin.json"), JSON.stringify({ ...optin(home), lastShownAt: 0 }))
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 0)
+      const on = await runCli(["on"], { env })
+      assert.equal(on.status, 0, on.stderr)
+      assert.ok(on.stdout.includes(`${as.url}/activate?user_code=WXYZ-1234`), on.stdout)
+      assert.equal(optin(home).declinedAt, undefined)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("Codex gets a systemMessage, Cursor asks its agent to relay the line", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      const codex = JSON.parse((await start("codex", offerEnv(as).env)).stdout)
+      // Codex re-asks for hook approval after every plugin update, so its lines say so.
+      assert.match(codex.systemMessage, /Turn it on with one click: .*Never: node ".*bonez-session-sync\.mjs" decline After each Bonez update, Codex turns its hooks off until you approve them again: run \/hooks \(or Review hooks in the app\) and approve Bonez\.$/)
+      const cursor = JSON.parse((await start("cursor", offerEnv(as).env)).stdout)
+      assert.match(cursor.additional_context, /^Tell the user this once, .*"Bonez can save your coding sessions.*\/bonez-capture off"$/)
+      assert.doesNotMatch(cursor.additional_context, /\/hooks/)
+    } finally {
+      await as.close()
+    }
+  })
+
+  test("no offer with BONEZ_CAPTURE_OFFER=0, for a gateway capture does not serve, or once set up by hand", async () => {
+    const as = await startStubOAuth({ pendingPolls: 10_000 })
+    try {
+      assert.equal((await start("claude", offerEnv(as, { BONEZ_CAPTURE_OFFER: "0" }).env)).stdout, "")
+      assert.equal((await start("claude", offerEnv(as, { BONEZ_GATEWAY_URL: "https://bonez.example.com" }).env)).stdout, "")
+      const { home, env } = offerEnv(as)
+      mkdirSync(store(home), { recursive: true })
+      writeFileSync(join(store(home), "config.json"), JSON.stringify({ enabled: false, scope: "global", repos: [], apiKey: TEST_KEY }))
+      assert.equal((await start("claude", env)).stdout, "")
+      assert.equal(as.calls.device.length, 0)
+    } finally {
+      await as.close()
+    }
+  })
+})
+
+describe("backfill covers Claude Code, Codex and Cursor", () => {
+  test("dry run lists each harness's sessions newest first, by the id their own hooks upload under", async () => {
+    const home = freshDir("backfill-all")
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    const put = (path, fixture, ageMs) => {
+      mkdirSync(dirname(path), { recursive: true })
+      cpSync(join(FIXTURES, fixture), path)
+      const t = new Date(Date.now() - ageMs)
+      utimesSync(path, t, t)
+    }
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+    put(join(home, ".claude", "projects", "-work-api", "claude-old.jsonl"), "claude-transcript.jsonl", 3 * 86_400_000)
+    put(join(home, ".codex", "sessions", "2026", "11", "20", `rollout-2026-11-20T10-00-00-${uuid}.jsonl`), "codex-rollout.jsonl", 2 * 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-1", "cur-1.jsonl"), "cursor-transcript.jsonl", 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "other", "not-a-chat.jsonl"), "cursor-transcript.jsonl", 3_600_000)
+    // A Cursor sub-agent's transcript belongs to its conversation: never a session of its own.
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-1", "subagents", "cur-sub-1.jsonl"), "cursor-transcript.jsonl", 2 * 3_600_000)
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url, CODEX_HOME: join(home, ".codex") }
+    const dry = await runCli(["backfill", "--dry-run"], { env })
+    assert.equal(dry.status, 0, dry.stderr)
+    assert.match(dry.stdout, /Sessions not yet uploaded at their current content: 3/)
+    const order = [...dry.stdout.matchAll(/^ {2}\d{4}-\d\d-\d\d \d\d:\d\d {2}(\S+(?: \S+)?) +(\S+)$/gm)].map((m) => [m[1].trim(), m[2]])
+    assert.deepEqual(order, [["Cursor", "cur-1"], ["Codex", uuid], ["Claude Code", "claude-old"]])
+    assert.doesNotMatch(dry.stdout, /not-a-chat/)
+    assert.doesNotMatch(dry.stdout, /cur-sub-1/)
+    const only = await runCli(["backfill", "--dry-run", "--agent=codex"], { env })
+    assert.match(only.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Codex: 1/)
+    const bad = await runCli(["backfill", "--agent=vim"], { env })
+    assert.equal(bad.status, 1)
+    const recent = await runCli(["backfill", "--dry-run", "--since-days=2"], { env })
+    assert.match(recent.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Cursor: 1/)
+    assert.equal((await runCli(["backfill", "--since-days=0"], { env })).status, 1)
+  })
+
+  // Uploads used to key a Codex session by its rollout stem while backfill used the UUID, so a session sent once
+  // was listed, counted and sent again.
+  test("a Codex session is one sync-state entry, keyed by its UUID; an older plugin's stem key is moved on read", async () => {
+    const home = freshDir("backfill-codex-id")
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a71"
+    const stem = `rollout-2026-11-20T10-00-00-${uuid}`
+    const rollout = join(home, ".codex", "sessions", "2026", "11", "20", `${stem}.jsonl`)
+    mkdirSync(dirname(rollout), { recursive: true })
+    cpSync(join(FIXTURES, "codex-rollout.jsonl"), rollout)
+    const t = new Date(Date.now() - 2 * 86_400_000)
+    utimesSync(rollout, t, t)
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const statePath = join(dataDir, "sync-state.json")
+
+    const sent = await runCli(["backfill", "--agent=codex"], { env })
+    assert.ok(sent.stdout.includes(`[1/1] ${uuid} … ok\n\nDone: 1/1 uploaded`), sent.stdout)
+    const entry = JSON.parse(readFileSync(statePath, "utf8"))[uuid]
+    assert.ok(entry?.contentHash)
+
+    // What an older plugin wrote: the same upload under the stem, next to another tool's entry.
+    writeFileSync(statePath, JSON.stringify({ [stem]: entry, "claude-1": { agent: "claude", lastUploadedAt: 1 } }))
+    assert.match((await runCli(["backfill", "--dry-run", "--agent=codex"], { env })).stdout, /Nothing to backfill/)
+    assert.match((await runCli(["status"], { env })).stdout, /sessions synced: 2\n/)
+    // The same session from its hook is unchanged, so nothing is sent, and the stem key is gone for good.
+    const puts = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: uuid, transcript_path: rollout, cwd: "/tmp/x" }))
+    assert.equal((await runCli(["_upload", "codex", "session-end", payloadFile], { env })).status, 0)
+    assert.equal(gateway.calls.put.length, puts)
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), new RegExp(`session=${uuid} agent=codex skipped — unchanged since last upload`))
+    // A backfill that sends nothing says so, rather than counting it as uploaded.
+    utimesSync(rollout, new Date(), new Date())
+    const again = await runCli(["backfill", "--agent=codex"], { env })
+    assert.match(again.stdout, /skipped \(see the log\)\n\nDone: 0\/1 uploaded/)
+    // The next write saves the moved key: one entry for the session.
+    writeFileSync(rollout, `${readFileSync(rollout, "utf8")}{"timestamp":"2026-11-20T12:00:00.000Z","payload":{"role":"user","content":"One more thing."}}\n`)
+    assert.ok((await runCli(["backfill", "--agent=codex"], { env })).stdout.includes("Done: 1/1 uploaded"))
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(statePath, "utf8"))).sort(), ["claude-1", uuid].sort())
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe("connect: the setup page in the browser and this machine share a pairing", () => {
+  let gw
+  before(async () => {
+    gw = await startStubGateway()
+  })
+  after(async () => {
+    await gw.close()
+  })
+  // A fresh pairing script and call record per test.
+  const reset = (pairing) => {
+    for (const k of Object.keys(gw.calls)) gw.calls[k].length = 0
+    gw.answers.pairing = { create: 201, steps: ["waiting"], sessions: null, code: "K7QM-4XPA", secret: "s3cret-poll-token", ...pairing }
+  }
+  const connectEnv = (extra = {}) => {
+    const home = freshDir("connect")
+    return {
+      home,
+      env: {
+        HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_SESSION_SYNC_DATA: "", CODEX_HOME: join(home, ".codex"),
+        BONEZ_GATEWAY_URL: gw.url, BONEZ_CONNECT_NO_OPEN: "1", BONEZ_CONNECT_POLL_MS: "50",
+        BONEZ_CONNECT_TOOLS: "claude-code,codex,vim", BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0", ...extra,
+      },
+    }
+  }
+  const store = (home) => join(home, ".bonez", "session-sync")
+  const readStore = (home, f) => (existsSync(join(store(home), f)) ? JSON.parse(readFileSync(join(store(home), f), "utf8")) : undefined)
+  const put = (path, fixture, ageMs) => {
+    mkdirSync(dirname(path), { recursive: true })
+    cpSync(join(FIXTURES, fixture), path)
+    const t = new Date(Date.now() - ageMs)
+    utimesSync(path, t, t)
+  }
+  const history = (home) => {
+    put(join(home, ".claude", "projects", "-work-api", "claude-recent.jsonl"), "claude-transcript.jsonl", 2 * 86_400_000)
+    put(join(home, ".codex", "sessions", "2026", "11", "20", "rollout-2026-11-20T10-00-00-0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b.jsonl"), "codex-rollout.jsonl", 3 * 86_400_000)
+    put(join(home, ".cursor", "projects", "work-api", "agent-transcripts", "cur-old", "cur-old.jsonl"), "cursor-transcript.jsonl", 20 * 86_400_000)
+  }
+  const pairUrl = () => `${gw.url}/connect?pair=K7QM-4XPA`
+
+  test("Codex signed in by the installer is reported signed in here, before it ever calls Bonez (lab, 24 Nov)", async () => {
+    const { home, env } = connectEnv()
+    delete env.BONEZ_CONNECT_TOOLS
+    mkdirSync(join(home, ".codex"), { recursive: true })
+    const bin = join(home, "bin")
+    mkdirSync(bin)
+    const list = (url) => `Name   Url   Bearer Token Env Var  Status   Auth\nbonez  ${url}  -  enabled  OAuth\n`
+    const fake = (url) => writeFileSync(join(bin, "codex"), `#!/bin/sh\nprintf '%s' '${list(url)}'\n`, { mode: 0o755 })
+    const tools = async () => {
+      reset({ steps: ["answered"], sessions: { on: false, backfill: false } })
+      await runCli(["connect", "--opener", "installer"], { env: { ...env, PATH: bin } })
+      return gw.calls.pairings[0].body.tools.filter((t) => t.id === "codex")
+    }
+    fake(`${gw.url}/mcp`)
+    assert.deepEqual(await tools(), [{ id: "codex", installed: true, signed_in_here: true }])
+    // Signed in to another Bonez server: not this one.
+    fake("https://gateway.bonez.io/mcp")
+    assert.deepEqual(await tools(), [{ id: "codex", installed: true }])
+  })
+
+  test("answer on + backfill: the key is saved and the last 14 days are uploaded", async () => {
+    reset({ steps: ["waiting", "claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_1" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect", "--opener", "claude-code"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    const created = gw.calls.pairings[0].body
+    assert.equal(created.opener, "claude-code")
+    assert.deepEqual(created.tools, [{ id: "claude-code", installed: true }, { id: "codex", installed: true }])
+    assert.equal(created.recent_sessions, 2)
+    assert.equal(typeof created.host, "string")
+    assert.equal(created.plugin_version, JSON.parse(readFileSync(join(REPO_ROOT, ".claude-plugin", "plugin.json"), "utf8")).version)
+    assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
+    assert.equal(gw.calls.pairingResult.length, 3)
+    // No terminal: plain lines, no escape code, no spinner.
+    assert.doesNotMatch(res.stdout, /\x1b/)
+    assert.deepEqual(res.stdout.trim().split("\n").map((l) => l.trim()), [
+      "Finish in your browser",
+      "1  Open the Bonez page below and sign in",
+      pairUrl(),
+      "2  Sign in to Bonez in each tool when it asks",
+      "3  Choose whether Bonez saves your sessions",
+      "",
+      "Keep this terminal open.",
+      "It finishes setup when you answer in the browser.",
+      "Closing it is safe: it finishes the next time you use a coding tool.",
+      "",
+      "· Waiting for you in the browser…",
+      "✓ Signed in to Bonez in the browser",
+      "✓ Session saving is on",
+      "✓ Added 2 recent sessions  from the last 14 days",
+      "",
+      "All set. You can close this terminal and the setup page.",
+    ])
+    // Collected: nothing is left for a session start to pick up.
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    const cfg = readStore(home, "config.json")
+    assert.equal(cfg.enabled, true)
+    assert.equal(cfg.scope, "global")
+    assert.deepEqual(cfg.repos, [])
+    assert.equal(cfg.apiKey, "bnz_connect_key_1")
+    assert.equal(cfg.via, "connect")
+    // The key is only good on the gateway it was paired with, so the config names it: a Codex or Cursor hook
+    // has no plugin option saying which server, and must not send it to the default.
+    assert.equal(cfg.gateway, gw.url)
+    const st = await runCli(["status"], { env: { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "" } })
+    assert.match(st.stdout, new RegExp(`gateway: {2}${gw.url.replaceAll(".", "\\.")}`))
+    assert.ok(cfg.installedAt)
+    assert.equal((statSync(join(store(home), "config.json")).mode & 0o777).toString(8), "600")
+    assert.equal(gw.calls.presign.length, 2)
+    assert.ok(gw.calls.presign.every((c) => c.headers.authorization === "Bearer bnz_connect_key_1"))
+    assert.deepEqual(gw.calls.presign.map((c) => c.body.agent).sort(), ["claude-code", "codex"])
+    const optin = readStore(home, "optin.json")
+    assert.ok(optin.connectOpenedAt && optin.enabledAt && optin.announcedAt)
+  })
+
+  test("answer off: nothing saved, nothing sent", async () => {
+    reset({ steps: ["claimed", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect", "--no-open"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.opener, "installer")
+    assert.match(res.stdout, /– Session saving stays off/)
+    assert.equal(readStore(home, "config.json"), undefined)
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    assert.equal(gw.calls.presign.length, 0)
+  })
+
+  test("on without backfill saves the key and sends nothing", async () => {
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_connect_key_2" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_2")
+    assert.equal(gw.calls.presign.length, 0)
+    assert.doesNotMatch(res.stdout, /Adding/)
+  })
+
+  test("an expired link, an unknown pairing, a server without the route, or a foreign gateway: one line, non-zero", async () => {
+    reset({ steps: ["waiting", "expired"] })
+    let { home, env } = connectEnv()
+    let res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup link expired. Run this again to get a new one.")
+    assert.equal(readStore(home, "config.json"), undefined)
+
+    // The stub hands out one secret and checks another: the poll is a 404.
+    reset({ issuedSecret: "not-the-one-it-checks" })
+    ;({ env } = connectEnv())
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup link is no longer valid. Run this again to get a new one.")
+
+    reset({ create: 404 })
+    ;({ env } = connectEnv())
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "Could not start the Bonez setup: this Bonez server does not offer the setup page yet.")
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_GATEWAY_URL: "https://bonez.example.com" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.match(res.stderr, /refusing `connect`/)
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("--detach returns at once; the child finishes in the background and writes only to sync.log", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: true, backfill: false, key: "bnz_connect_key_3" } })
+    const { home, env } = connectEnv()
+    const res = await runCli(["connect", "--detach", "--opener", "codex"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 2000, `connect --detach took ${res.ms}ms`)
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_3")
+    assert.equal(gw.calls.pairings[0].body.opener, "codex")
+    await waitFor(() => readFileSync(join(store(home), "sync.log"), "utf8").includes("connect: All set."), { timeoutMs: 4000 })
+    const log = readFileSync(join(store(home), "sync.log"), "utf8")
+    assert.ok(log.includes(`connect: Open this page in your browser to finish setting up Bonez: ${pairUrl()}`), log)
+    assert.ok(log.includes("connect: Session saving is on."), log)
+    assert.ok(!log.includes("bnz_connect_key_3"), "the key is never logged")
+  })
+
+  test("BONEZ_PAIR (the Settings page's command): joins that pairing, opens nothing, then saves the key", async () => {
+    reset({ steps: ["claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_4" } })
+    const { home, env } = connectEnv({ BONEZ_CONNECT_NO_OPEN: "", BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" })
+    history(home)
+    const res = await runCli(["connect", "--opener", "installer"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings.length, 0, "no pairing of its own")
+    const joined = gw.calls.pairingJoin[0].body
+    assert.equal(joined.pair, "K7QM-4XPA.s3cret-poll-token")
+    assert.equal(joined.opener, "installer")
+    assert.deepEqual(joined.tools, [{ id: "claude-code", installed: true }, { id: "codex", installed: true }])
+    assert.equal(joined.recent_sessions, 2)
+    assert.deepEqual(gw.calls.pairingResult[0], { code: "K7QM-4XPA", secret: "s3cret-poll-token" })
+    const lines = res.stdout.trim().split("\n").map((l) => l.trim())
+    assert.equal(lines[1], "1  Continue in the Bonez page you started from")
+    assert.deepEqual(lines.slice(-5), [
+      "· Waiting for you in the browser…",
+      "✓ Session saving is on",
+      "✓ Added 2 recent sessions  from the last 14 days",
+      "",
+      "All set. You can close this terminal and the setup page.",
+    ])
+    assert.doesNotMatch(res.stdout, /Signed in to Bonez/, "the page was signed in already")
+    assert.doesNotMatch(res.stdout, /http/, "no link to open: the page is open already")
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_4")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+  })
+
+  test("--pair works like BONEZ_PAIR; a wrong, expired or malformed pair is one line, non-zero", async () => {
+    reset({ steps: ["answered"], sessions: { on: false, backfill: false, key: null } })
+    let { env } = connectEnv()
+    let res = await runCli(["connect", "--pair", "k7qm4xpa.s3cret-poll-token"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairingJoin[0].body.pair, "K7QM-4XPA.s3cret-poll-token")
+    assert.match(res.stdout, /Session saving stays off/)
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.not-the-secret-at-all" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command is no longer valid. Copy a new one from the Bonez page.")
+
+    reset({ join: 410 })
+    ;({ env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command expired. Copy a new one from the Bonez page.")
+
+    reset()
+    ;({ env } = connectEnv({ BONEZ_PAIR: "nonsense" }))
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "The setup command is incomplete. Copy it again from the Bonez page.")
+    assert.equal(gw.calls.pairingJoin.length, 0)
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("a hook's background connect ignores a BONEZ_PAIR left in the environment", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" })
+    const res = await runCli(["connect", "--detach", "--opener", "codex"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    await waitFor(() => existsSync(join(store(home), "sync.log")) && readFileSync(join(store(home), "sync.log"), "utf8").includes("stays off"), { timeoutMs: 8000 })
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairingJoin.length, 0)
+  })
+
+  test("session start with nothing set up opens the page once and says so; later starts do not", async () => {
+    reset({ steps: ["waiting", "answered"], sessions: { on: false, backfill: false, key: null } })
+    const { home, env } = connectEnv({ BONEZ_CAPTURE_OFFER: "", BONEZ_OAUTH_CLIENT_ID: "" })
+    const start = (agent) =>
+      runCli(["hook", agent, "session-start"], { env, input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-1", cwd: "/tmp/c" }) })
+    const first = await start("claude")
+    assert.ok(first.ms < 4500, `hook took ${first.ms}ms`)
+    assert.equal(
+      JSON.parse(first.stdout).systemMessage,
+      `Bonez opened a setup page in your browser to finish connecting. If it did not open: ${pairUrl()}`,
+    )
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairings[0].body.opener, "claude-code")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+    await waitFor(() => gw.calls.pairingResult.length >= 2, { timeoutMs: 4000 })
+    assert.equal((await start("claude")).stdout, "")
+    assert.equal((await start("cursor")).stdout, "")
+    assert.equal(gw.calls.pairings.length, 1)
+  })
+
+  test("the hook says nothing when the server has no setup page, or with BONEZ_CAPTURE_OFFER=0", async () => {
+    reset({ create: 404 })
+    const { home, env } = connectEnv({ BONEZ_CAPTURE_OFFER: "", BONEZ_OAUTH_CLIENT_ID: "" })
+    const input = JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-2", cwd: "/tmp/c" })
+    const res = await runCli(["hook", "codex", "session-start"], { env, input })
+    assert.equal(res.stdout, "")
+    assert.ok(readStore(home, "optin.json").connectOpenedAt)
+    const off = connectEnv({ BONEZ_CAPTURE_OFFER: "0" })
+    assert.equal((await runCli(["hook", "claude", "session-start"], { env: off.env, input })).stdout, "")
+    assert.equal(readStore(off.home, "optin.json"), undefined)
+    assert.equal(gw.calls.pairings.length, 1)
+  })
+
+  test("at most the 200 newest sessions of the last 14 days: what the page is told and what is added", async () => {
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_connect_cap_1" } })
+    let { home, env } = connectEnv()
+    for (let i = 0; i < 205; i++) put(join(home, ".claude", "projects", "-work-api", `cap-${i}.jsonl`), "claude-transcript.jsonl", 86_400_000 + i * 60_000)
+    let res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.recent_sessions, 200)
+
+    // The same cap on what is added (made small here, so the test need not upload 200): the newest first.
+    reset({ steps: ["answered"], sessions: { on: true, backfill: true, key: "bnz_connect_cap_2" } })
+    ;({ home, env } = connectEnv({ BONEZ_CONNECT_BACKFILL_MAX: "1" }))
+    history(home)
+    res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings[0].body.recent_sessions, 1)
+    assert.equal(gw.calls.presign.length, 1)
+    assert.equal(gw.calls.presign[0].body.agent, "claude-code", "the newest of the two")
+    assert.match(res.stdout, /✓ Added 1 recent session  from the last 14 days/)
+  })
+
+  test("tool sign-ins the gateway reports are shown as they arrive", async () => {
+    reset({
+      steps: ["claimed", "answered"],
+      tools: [{ id: "codex", signed_in: true }, { id: "cursor", signed_in: false }],
+      sessions: { on: true, backfill: false, key: "bnz_connect_key_6" },
+    })
+    const { env } = connectEnv()
+    const res = await runCli(["connect"], { env })
+    assert.equal(res.status, 0, res.stderr)
+    assert.match(res.stdout, /✓ Codex signed in/)
+    assert.doesNotMatch(res.stdout, /Cursor signed in/)
+  })
+
+  // ---- the terminal closes before the answer: the setup still finishes
+
+  const startInput = JSON.stringify({ hook_event_name: "SessionStart", session_id: "c-9", cwd: "/tmp/c" })
+  const startConnect = (env) => {
+    const child = spawn(process.execPath, [SCRIPT, "connect"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, BONEZ_SESSION_SYNC_QUIET_MS: "0", BONEZ_CAPTURE_OFFER: "0", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    child.stdout.resume()
+    child.stderr.resume()
+    return { child, closed: new Promise((r) => child.on("close", r)) }
+  }
+  const helperPid = async (home) => waitFor(() => readStore(home, "connect-progress.json")?.pid, { timeoutMs: 8000 })
+  const writePending = (home, fields) => {
+    mkdirSync(store(home), { recursive: true })
+    writeFileSync(join(store(home), "pending-connect.json"), JSON.stringify({
+      code: "K7QM-4XPA", secret: "s3cret-poll-token", gateway: gw.url, expiresAt: Date.now() + 25 * 60_000, ...fields,
+    }), { mode: 0o600 })
+  }
+
+  test("the pairing is written down at once, and the helper finishes alone when the window closes", async () => {
+    reset({ steps: ["waiting"], sessions: { on: true, backfill: false, key: "bnz_connect_key_7" } })
+    const { home, env } = connectEnv()
+    const { child, closed } = startConnect(env)
+    const pid = await helperPid(home)
+    const pending = readStore(home, "pending-connect.json")
+    assert.deepEqual([pending.code, pending.secret, pending.gateway], ["K7QM-4XPA", "s3cret-poll-token", gw.url])
+    assert.equal((statSync(join(store(home), "pending-connect.json")).mode & 0o777).toString(8), "600")
+    assert.notEqual(pid, child.pid, "the waiting runs in a process of its own")
+    child.kill("SIGHUP") // the terminal window closes
+    await closed
+    gw.answers.pairing.steps = ["answered"] // then the person answers in the browser
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_7")
+    assert.equal(readStore(home, "config.json").via, "connect")
+    await waitFor(() => readStore(home, "connect-progress.json")?.finished)
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+  })
+
+  test("terminal and helper both gone before the answer: the next session start collects the key and adds the sessions", async () => {
+    reset({ steps: ["waiting"], sessions: { on: true, backfill: true, key: "bnz_connect_key_8" } })
+    const { home, env } = connectEnv()
+    history(home)
+    const { child, closed } = startConnect(env)
+    const pid = await helperPid(home)
+    child.kill("SIGHUP")
+    process.kill(pid, "SIGKILL") // a restart, say: nothing is waiting any more
+    await closed
+    gw.answers.pairing.steps = ["answered"]
+    const before = gw.calls.pairingResult.length
+
+    const res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.ok(res.ms < 4500, `hook took ${res.ms}ms`)
+    assert.equal(gw.calls.pairingResult.length, before + 1, "one request")
+    const cfg = readStore(home, "config.json")
+    assert.deepEqual([cfg.apiKey, cfg.scope, cfg.via, cfg.gateway, cfg.enabled], ["bnz_connect_key_8", "global", "connect", gw.url, true])
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    // Nobody saw the answer arrive, so this start says it, once.
+    assert.match(JSON.parse(res.stdout).systemMessage, /^Bonez is saving your sessions on this computer now.*being added in the background\.$/)
+    await waitFor(() => gw.calls.presign.length === 2, { timeoutMs: 8000 })
+    assert.ok(gw.calls.presign.every((c) => c.headers.authorization === "Bearer bnz_connect_key_8"))
+    assert.equal((await runCli(["hook", "claude", "session-start"], { env, input: startInput })).stdout, "")
+  })
+
+  test("a pending pairing still waiting, with nobody polling: the start says nothing and a helper takes it up", async () => {
+    reset({ steps: ["claimed"], sessions: { on: true, backfill: false, key: "bnz_connect_key_9" } })
+    const { home, env } = connectEnv()
+    writePending(home)
+    const res = await runCli(["hook", "codex", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.ok(readStore(home, "pending-connect.json"))
+    await helperPid(home)
+    gw.answers.pairing.steps = ["answered"]
+    await waitFor(() => readStore(home, "config.json"), { timeoutMs: 8000 })
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_9")
+  })
+
+  test("an expired, unknown or long-gone pending pairing is cleared and nothing is saved", async () => {
+    reset({ steps: ["expired"] })
+    let { home, env } = connectEnv()
+    writePending(home, { expiresAt: Date.now() - 60_000 })
+    let res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    assert.equal(readStore(home, "config.json"), undefined)
+
+    reset({ issuedSecret: "x", secret: "the-server-forgot-it" })
+    ;({ home, env } = connectEnv())
+    writePending(home)
+    res = await runCli(["hook", "cursor", "session-start"], { env, input: startInput })
+    assert.equal(res.stdout, "")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+
+    reset({ steps: ["answered"], sessions: { on: true, backfill: false, key: "bnz_too_late" } })
+    ;({ home, env } = connectEnv())
+    writePending(home, { expiresAt: Date.now() - 9 * 86_400_000 })
+    res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(gw.calls.pairingResult.length, 0, "past the gateway's 7 days: not even asked")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+    assert.equal(readStore(home, "config.json"), undefined)
+  })
+
+  test("the session start stays silent and fast when the gateway is down or hangs, and keeps the pairing", async () => {
+    const closed = await new Promise((r) => { const srv = createServer().listen(0, "127.0.0.1", () => { const { port } = srv.address(); srv.close(() => r(port)) }) })
+    let { home, env } = connectEnv()
+    writePending(home, { gateway: `http://127.0.0.1:${closed}` })
+    let res = await runCli(["hook", "claude", "session-start"], { env, input: startInput })
+    assert.equal(res.status, 0)
+    assert.equal(res.stdout, "")
+    assert.equal(res.stderr, "")
+    assert.ok(res.ms < 2500, `hook took ${res.ms}ms`)
+    assert.ok(readStore(home, "pending-connect.json"), "kept for the next start")
+
+    const sockets = []
+    const hang = await new Promise((r) => { const srv = createServer((s) => sockets.push(s)).listen(0, "127.0.0.1", () => r(srv)) })
+    try {
+      ;({ home, env } = connectEnv())
+      writePending(home, { gateway: `http://127.0.0.1:${hang.address().port}` })
+      res = await runCli(["hook", "codex", "session-start"], { env, input: startInput })
+      assert.equal(res.stdout, "")
+      assert.ok(res.ms < 3500, `hook took ${res.ms}ms against a gateway that never answers`)
+      assert.ok(readStore(home, "pending-connect.json"))
+    } finally {
+      for (const s of sockets) s.destroy()
+      hang.close()
+    }
+  })
+
+  // install.sh's side of `install-ui`: one tab-separated event per line on stdin.
+  const events = (...rows) => rows.map((r) => r.join("\t")).join("\n") + "\n"
+  const installRows = [
+    ["working", "Claude Code"],
+    ["tool", "done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate"],
+    ["working", "Codex"],
+    ["tool", "done", "Codex", "added", "Signed in"],
+    ["tool", "skipped", "OpenCode", "not found", ""],
+    ["claude-app", "https://claude.ai/customize/connectors?modal=add-custom-connector"],
+  ]
+  // A terminal as install.sh starts it, without one: BONEZ_FORCE_TTY draws the full screen into the pipe.
+  const screenEnv = (extra = {}) => connectEnv({ BONEZ_FORCE_TTY: "1", TERM: "xterm-256color", TERM_PROGRAM: "", COLUMNS: "80", LINES: "40", ...extra })
+
+  test("install-ui `end 0`: the tool rows and All set, on the full screen and in plain lines; no setup is started", async () => {
+    reset()
+    let { home, env } = screenEnv()
+    let res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    const s = screenOf(res.stdout)
+    assert.ok(s.entered && s.restored, "the screen is taken and given back")
+    assert.ok(s.frame.includes("  ✓ Codex         added      Signed in"), s.frame.join("\n"))
+    assert.ok(s.frame.includes("  All set. Bonez is in your coding tools."))
+    assert.deepEqual(s.summary.filter(Boolean), [
+      "  bonez  Connecting your coding tools",
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  All set. Bonez is in your coding tools.",
+    ])
+    assert.equal(gw.calls.pairings.length + gw.calls.pairingJoin.length, 0, "no pairing")
+    assert.equal(existsSync(join(store(home), "pending-connect.json")), false)
+
+    // From the Settings page (BONEZ_PAIR) the page finishes it: the screen says to go back to it.
+    ;({ env } = screenEnv({ BONEZ_PAIR: "K7QM-4XPA.s3cret-poll-token" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.ok(screenOf(res.stdout).summary.includes("    Go back to the Bonez page in your browser to finish."))
+    assert.equal(gw.calls.pairingJoin.length, 0)
+
+    // A pipe, CI or TERM=dumb: plain lines, no escape code, the same words.
+    ;({ env } = connectEnv({ TERM: "dumb" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "0"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.doesNotMatch(res.stdout, /\x1b/)
+    const plain = res.stdout.split("\n").filter(Boolean)
+    assert.deepEqual(plain.slice(-5), [
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  All set. Bonez is in your coding tools.",
+    ])
+    assert.ok(!res.stdout.includes("adding"), "no working row in plain lines")
+  })
+
+  test("install-ui `end 1` goes on to connect on the same screen, and finishes with the summary", async () => {
+    reset({ steps: ["waiting", "claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_ui" } })
+    const { home, env } = screenEnv()
+    history(home)
+    const res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 0, res.stderr)
+    assert.equal(gw.calls.pairings.length, 1)
+    assert.equal(gw.calls.pairings[0].body.opener, "installer")
+    assert.equal(readStore(home, "config.json").apiKey, "bnz_connect_key_ui")
+    const s = screenOf(res.stdout)
+    assert.ok(s.entered && s.restored)
+    assert.equal(res.stdout.split("\x1b[?1049h").length, 2, "one screen, from the first tool to the end")
+    // The last frame: the tool rows, the panel, the events and All set, all on one screen.
+    for (const l of ["  ✓ Codex         added      Signed in", "  ✓ Session saving is on", "  All set. You can close this terminal and the setup page."]) {
+      assert.ok(s.frame.includes(l), s.frame.join("\n"))
+    }
+    assert.ok(s.frame.some((l) => l.includes("Finish in your browser")))
+    assert.deepEqual(s.summary.filter(Boolean), [
+      "  bonez  Connecting your coding tools",
+      "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate",
+      "  ✓ Codex         added      Signed in",
+      "  – OpenCode      not found",
+      "  · Optional: Claude app → claude.ai/customize/connectors",
+      "  ✓ Signed in to Bonez in the browser",
+      "  ✓ Session saving is on",
+      "  ✓ Added 2 recent sessions  from the last 14 days",
+      "  All set. You can close this terminal and the setup page.",
+    ])
+  })
+
+  test("install-ui `fail`: the failure is on the screen, no setup starts, non-zero; a pipe closed early is a failure too", async () => {
+    reset()
+    let { env } = screenEnv()
+    let res = await runCli(["install-ui"], {
+      env,
+      input: events(installRows[0], ["tool", "failed", "Cursor", "failed", ""], ["detail", "cursor: permission denied"], ["fail", "Bonez could not be added to Cursor."], ["end", "1"]),
+    })
+    assert.equal(res.status, 1)
+    assert.equal(gw.calls.pairings.length, 0, "no connect after a failure")
+    let s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ Cursor        failed"))
+    assert.ok(s.summary.includes("    cursor: permission denied"), "a failed tool keeps its details")
+    assert.ok(s.summary.includes("  ✗ Bonez could not be added to Cursor."))
+    assert.ok(!s.summary.some((l) => l.includes("All set")))
+
+    // install.sh died: the pipe closes with no `end`.
+    ;({ env } = screenEnv())
+    res = await runCli(["install-ui"], { env, input: events(installRows[0], installRows[1]) })
+    assert.equal(res.status, 1)
+    s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ The installer stopped before it finished. Run it again."))
+
+    // Plain: the failure is the bare words on stderr.
+    ;({ env } = connectEnv({ TERM: "dumb" }))
+    res = await runCli(["install-ui"], { env, input: events(["fail", "Bonez could not be added to Cursor."], ["end", "0"]) })
+    assert.equal(res.status, 1)
+    assert.equal(res.stderr.trim(), "Bonez could not be added to Cursor.")
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("install-ui `end 1` against a foreign gateway or a failed pairing: one ✗ line, the screen given back, non-zero", async () => {
+    reset({ create: 404 })
+    let { env } = screenEnv()
+    let res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 1)
+    let s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ Could not start the Bonez setup: this Bonez server does not offer the setup page yet."), s.summary.join("\n"))
+
+    reset()
+    ;({ env } = screenEnv({ BONEZ_GATEWAY_URL: "https://bonez.example.com" }))
+    res = await runCli(["install-ui"], { env, input: events(...installRows, ["end", "1"]) })
+    assert.equal(res.status, 1)
+    s = screenOf(res.stdout)
+    assert.ok(s.restored)
+    assert.ok(s.summary.includes("  ✗ This Bonez server does not offer session saving."))
+    assert.equal(gw.calls.pairings.length, 0)
+  })
+
+  test("install-ui on Ctrl-C: the screen is given back with what was done, exit 130", async () => {
+    reset()
+    const { env } = screenEnv()
+    const child = spawn(process.execPath, [SCRIPT, "install-ui"], { cwd: REPO_ROOT, env: { ...process.env, ...env } })
+    let stdout = ""
+    child.stdout.on("data", (d) => (stdout += d))
+    const closed = new Promise((r) => child.on("close", (status) => r(status)))
+    child.stdin.write(events(...installRows.slice(0, 4)))
+    await waitFor(() => stdout.includes("Signed in"), { timeoutMs: 5000 })
+    child.kill("SIGINT")
+    assert.equal(await closed, 130)
+    const s = screenOf(stdout)
+    assert.ok(s.restored, "the cursor and the normal screen are back")
+    assert.ok(s.summary.includes("  ✓ Codex         added      Signed in"), s.summary.join("\n"))
+  })
+
+  test("install-ui keeps Codex's sign-in link through connect, and in the summary until the gateway says Codex signed in", async () => {
+    const url = `https://auth.bonez.io/authorize?client_id=qFX0&state=${"s".repeat(240)}&end`
+    const rows = [
+      ["tool", "done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate"],
+      ["tool", "done", "Codex", "added", "Signing in, in your browser…"],
+      ["detail", `Sign-in link: ${url}`],
+      ["tool", "done", "Cursor", "added", "Next: reload, then MCPs › bonez › Authenticate"],
+    ]
+    for (const signedIn of [false, true]) {
+      reset({
+        steps: ["waiting", "claimed", "waiting", "answered"],
+        ...(signedIn && { tools: [{ id: "codex", signed_in: true }] }),
+        sessions: { on: true, backfill: false, key: "bnz_connect_key_link" },
+      })
+      const { env } = screenEnv({ LINES: "24" })
+      const res = await runCli(["install-ui"], { env, input: events(...rows, ["end", "1"]) })
+      assert.equal(res.status, 0, res.stderr)
+      const s = screenOf(res.stdout)
+      // On the screen while the browser step runs (the panel is up, the other tools folded), the link stays.
+      const withPanel = s.frames.map((f) => unstyled(f)).filter((f) => f.includes("Finish in your browser"))
+      assert.ok(withPanel.length > 0)
+      assert.ok(withPanel[0].includes(`    Sign-in link: ${url}`), withPanel[0])
+      for (const f of s.frames) assert.ok(drawnRows(f, 80) <= 24, unstyled(f))
+      assert.equal(s.summary.includes(`    Sign-in link: ${url}`), !signedIn, s.summary.join("\n"))
+      assert.equal(s.summary.includes("  ✓ Codex signed in"), signedIn)
+      if (signedIn) assert.ok(!s.frame.some((l) => l.includes("Sign-in link")), "gone from the screen once signed in")
+    }
+  })
+
+  test("--help lists install-ui and exits 0; the dispatcher keeps the lines install.sh greps for", async () => {
+    const res = await runCli(["--help"])
+    assert.equal(res.status, 0)
+    assert.match(res.stdout, /bonez-session-sync\.mjs install-ui /)
+    assert.match(res.stdout, /bonez-session-sync\.mjs connect /)
+    assert.equal((await runCli(["no-such-command"])).status, 1)
+    // install.sh's `can`: grep -Eq "case [\"']$1[\"']:" bin/bonez-session-sync.mjs
+    const source = readFileSync(SCRIPT, "utf8")
+    for (const sub of ["connect", "install-ui"]) assert.match(source, new RegExp(`case ["']${sub}["']:`))
+  })
+
+  test("--demo plays the installer with no network and no file", async () => {
+    reset()
+    for (const joining of [[], ["--joining"]]) {
+      const { home, env } = connectEnv()
+      const res = await runCli(["connect", "--demo", ...joining, "--speed=50"], { env })
+      assert.equal(res.status, 0, res.stderr)
+      assert.match(res.stdout, /Keep this terminal open/)
+      assert.match(res.stdout, /All set\./)
+      assert.doesNotMatch(res.stdout, /\x1b/)
+      assert.deepEqual(readdirSync(home), [], "nothing written")
+    }
+    assert.equal(Object.values(gw.calls).reduce((n, c) => n + c.length, 0), 0, "nothing sent")
+  })
+})
+
+describe("the installer's terminal view degrades cleanly", () => {
+  const tty = (extra = {}) => {
+    let out = ""
+    return { stream: { isTTY: true, columns: 80, write: (s) => { out += s }, ...extra }, text: () => out }
+  }
+  test("a terminal gets colour marks and a spinner; NO_COLOR keeps the spinner without colour", async () => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    const t = tty()
+    const view = createView({ out: t.stream, caps: terminalCaps({ stream: t.stream, env: { TERM: "xterm-256color" }, platform: "darwin" }) })
+    view.waiting("Waiting for you in the browser…", Date.now() + 60_000)
+    view.done("Session saving is on")
+    view.end()
+    assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Session saving is on/, "the mark is green, the words are not")
+    assert.match(t.text(), /\x1b\[33m⠋/)
+    const n = tty()
+    const plainColour = createView({ out: n.stream, caps: terminalCaps({ stream: n.stream, env: { TERM: "xterm", NO_COLOR: "" }, platform: "darwin" }) })
+    plainColour.waiting("Waiting", 0)
+    plainColour.done("Done")
+    plainColour.end()
+    assert.doesNotMatch(n.text(), /\x1b\[\d+m/)
+    assert.match(n.text(), /⠋ Waiting/)
+  })
+  test("TERM=dumb, CI or a pipe: plain lines, no escape code; a Windows console gets ASCII marks", async () => {
+    const { terminalCaps, createView } = await import("../bin/lib/connect-tui.mjs")
+    for (const env of [{ TERM: "dumb" }, { TERM: "xterm", CI: "true" }]) {
+      const t = tty()
+      const view = createView({ out: t.stream, caps: terminalCaps({ stream: t.stream, env, platform: "darwin" }) })
+      view.waiting("Waiting", Date.now() + 60_000)
+      view.progress(1, 3)
+      view.done("Done")
+      view.close()
+      assert.doesNotMatch(t.text(), /\x1b/)
+      assert.equal(t.text(), "  · Waiting\n  ✓ Done\n")
+    }
+    assert.equal(terminalCaps({ stream: { isTTY: false }, env: {}, platform: "darwin" }).live, false)
+    const win = terminalCaps({ stream: { isTTY: true }, env: { TERM: "xterm" }, platform: "win32" })
+    assert.equal(win.links, false)
+    assert.equal(win.unicode, false)
+    assert.equal(terminalCaps({ stream: { isTTY: true }, env: { WT_SESSION: "1" }, platform: "win32" }).unicode, true)
+  })
+})
+
+// The full screen as a test sees it: the frames drawn on the alternate screen, the last one, and the summary
+// left in the scrollback once the screen is given back.
+const ALT_ON = "\x1b[?1049h"
+const ALT_OFF = "\x1b[?25h\x1b[?1049l"
+function unstyled(s) {
+  return s.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").replace(/\r/g, "")
+}
+// Rows a frame takes on a terminal `cols` wide: a line longer than the width wraps.
+function drawnRows(frame, cols) {
+  return unstyled(frame).split("\n").reduce((n, l) => n + Math.max(1, Math.ceil([...l].length / cols)), 0)
+}
+function screenOf(text) {
+  const at = text.lastIndexOf(ALT_OFF)
+  const during = at < 0 ? text : text.slice(0, at)
+  // Taking the screen clears it (`ESC[H ESC[2J`); every frame after that starts at the top left.
+  const frames = during.split("\x1b[H").slice(2)
+  return {
+    entered: text.startsWith(ALT_ON),
+    restored: at >= 0 && text.indexOf(ALT_OFF) === at,
+    frames,
+    frame: unstyled(frames.at(-1) ?? "").split("\n"),
+    summary: at < 0 ? [] : unstyled(text.slice(at + ALT_OFF.length)).split("\n"),
+  }
+}
+
+describe("the installer's screen: the Bonez mark, columns, the panel, links and the width", () => {
+  // The screen installs process handlers while it is up (signals, exit, a crash); every test gives the screen back,
+  // and with it every handler, so the test runner keeps only its own.
+  const watched = ["exit", "SIGINT", "SIGTERM", "SIGHUP", "SIGWINCH", "uncaughtException", "unhandledRejection"]
+  const listeners = () => Object.fromEntries(watched.map((e) => [e, process.listenerCount(e)]))
+  let before0
+  before(() => {
+    before0 = listeners()
+  })
+  after(() => {
+    assert.deepEqual(listeners(), before0, "a screen left process handlers installed")
+  })
+
+  const term = ({ columns = 80, rows = 40, env = { TERM: "xterm-256color" }, platform = "darwin" } = {}) => {
+    let out = ""
+    const stream = { isTTY: true, columns, rows, write: (s) => { out += s } }
+    return { stream, env, platform, text: () => out }
+  }
+  const open = async (t) => {
+    const { createView, terminalCaps } = await import("../bin/lib/connect-tui.mjs")
+    return createView({ out: t.stream, caps: terminalCaps(t) })
+  }
+
+  test("it takes the alternate screen and gives it back with a summary; its handlers live only while it is up", async () => {
+    const { activeView } = await import("../bin/lib/connect-tui.mjs")
+    const t = term()
+    const view = await open(t)
+    assert.equal(t.text(), "", "nothing is drawn, and nothing installed, before the first change")
+    assert.deepEqual(listeners(), before0)
+    view.header()
+    assert.equal(activeView(), view)
+    assert.ok(watched.every((e) => process.listenerCount(e) === before0[e] + 1), "one handler per event while up")
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.end()
+    view.end() // a second end (the exit handler after an explicit one) does nothing
+    assert.equal(activeView(), undefined)
+    assert.deepEqual(listeners(), before0)
+    const s = screenOf(t.text())
+    assert.ok(s.entered && s.restored, "alternate screen on, then off, exactly once")
+    assert.ok(t.text().includes("\x1b[?25l"), "the cursor is hidden while it draws")
+    assert.deepEqual(s.summary.filter(Boolean), ["  bonez  Connecting your coding tools", "  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate"])
+    // A view that never drew takes nothing and gives nothing back.
+    const quiet = term()
+    ;(await open(quiet)).end()
+    assert.equal(quiet.text(), "")
+    assert.deepEqual(listeners(), before0)
+  })
+
+  test("the header is the drawn wordmark in ink with the dim line under it; ASCII gets the word", async () => {
+    const { WORDMARK } = await import("../bin/lib/connect-tui.mjs")
+    assert.equal(WORDMARK.length, 4)
+    assert.ok(WORDMARK.every((row) => /^[ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█]+$/.test(row) && [...row].length <= 40))
+    const t = term()
+    const view = await open(t)
+    view.header()
+    view.end()
+    assert.deepEqual(screenOf(t.text()).frame.slice(0, 7), ["", ...WORDMARK.map((r) => `  ${r}`), "", "  Connecting your coding tools"])
+    assert.ok(t.text().includes(`  ${WORDMARK[0]}\x1b[K`), "the wordmark is never coloured")
+    const a = term({ platform: "win32" })
+    const ascii = await open(a)
+    ascii.header()
+    ascii.end()
+    assert.deepEqual(screenOf(a.text()).frame.filter(Boolean), ["  bonez  Connecting your coding tools"])
+  })
+
+  test("tool rows are columns that fit the width; a next step that does not fit goes under the state", async () => {
+    const t = term()
+    const view = await open(t)
+    view.toolWorking("Claude Code")
+    assert.ok(screenOf(t.text()).frame.includes("  · Claude Code   adding…"), "the tool being added has a yellow dot")
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.tool("done", "Cursor", "added", "Next: a step far too long to share its line with the tool's name and state, so it wraps")
+    view.end()
+    const { frame, summary } = screenOf(t.text())
+    for (const shown of [frame, summary]) {
+      const at = shown.indexOf("  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate")
+      assert.ok(at > 0, shown.join("\n"))
+      assert.equal(shown[at + 1], "  ✓ Cursor        added")
+      assert.match(shown[at + 2], /^ {18}Next: a step far too long/)
+    }
+    assert.ok(!frame.some((l) => l.includes("adding…")), "the working row gives way to the result")
+    assert.match(t.text(), /\x1b\[32m✓\x1b\[0m Claude Code/)
+  })
+
+  test("the Claude app is one dim line: a link where the terminal has links, a short place to go elsewhere", async () => {
+    const { CLAUDE_CONNECTOR_DEMO_URL: url } = await import("../bin/lib/connect-tui.mjs")
+    const it = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    const linked = await open(it)
+    linked.claudeApp(url)
+    linked.end()
+    assert.ok(it.text().includes(`\x1b]8;;${url}\x1b\\Optional: add Bonez to the Claude app ↗\x1b]8;;\x1b\\`))
+    assert.equal(screenOf(it.text()).frame.filter((l) => l.includes("Claude app")).length, 1)
+    const ap = term({ env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
+    const unlinked = await open(ap)
+    unlinked.claudeApp(url)
+    unlinked.end()
+    assert.doesNotMatch(ap.text(), /\x1b\]8/)
+    assert.deepEqual(screenOf(ap.text()).frame.filter((l) => l.includes("Claude app")), ["  · Optional: Claude app → claude.ai/customize/connectors"])
+    assert.ok(screenOf(ap.text()).summary.includes("  · Optional: Claude app → claude.ai/customize/connectors"))
+  })
+
+  test("the panel stays inside 80 columns, says where to continue, and keeps the waiting time under its edge", async () => {
+    for (const [joining, first] of [[true, "1  Continue in the Bonez page you started from"], [false, "1  Sign in on the Bonez page that just opened"]]) {
+      const t = term()
+      const view = await open(t)
+      view.header()
+      view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+      view.finish({ joining, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: true })
+      view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+      view.end()
+      const shown = screenOf(t.text()).frame
+      assert.ok(shown.every((l) => [...l].length <= 80), shown.join("\n"))
+      assert.ok(shown.some((l) => l.includes(first)))
+      assert.ok(shown.some((l) => l.includes("Keep this terminal open.")))
+      assert.equal(shown.some((l) => l.includes("pair=K7QM-4XPA")), !joining)
+      assert.ok(shown.includes("  ✓ Claude Code   added      Next: /mcp › bonez › Authenticate"), shown.join("\n"))
+      // One blank row of padding inside the top and bottom edges, no more.
+      const top = shown.findIndex((l) => l.includes("╭"))
+      const bottom = shown.findIndex((l) => l.includes("╰"))
+      const blank = (l) => /^ *│ *│$/.test(l)
+      assert.ok(blank(shown[top + 1]) && !blank(shown[top + 2]) && blank(shown[bottom - 1]) && !blank(shown[bottom - 2]))
+      const edge = shown[bottom].length
+      assert.equal(shown.find((l) => l.includes("min left")).length, edge, "the time ends under the panel's edge")
+    }
+  })
+
+  test("a short terminal keeps the header and the live line; the middle gives way", async () => {
+    const t = term({ rows: 14 })
+    const view = await open(t)
+    view.header()
+    for (const name of ["Claude Code", "Codex", "Cursor", "OpenCode"]) view.tool("done", name, "added")
+    view.finish({ joining: false, url: "https://app.bonez.io/settings/connect-tools?pair=K7QM-4XPA", opened: true })
+    view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+    for (let i = 0; i < 6; i++) view.done(`Tool ${i} signed in`)
+    view.end()
+    const { frames, summary } = screenOf(t.text())
+    for (const f of frames) assert.ok(unstyled(f).split("\n").length <= 14, unstyled(f))
+    const last = unstyled(frames.at(-1)).split("\n")
+    assert.equal(last[1], "  bonez  Connecting your coding tools", "a one-line header")
+    assert.ok(last.includes("  ✓ Claude Code, Codex, Cursor, OpenCode added"), "the tools fold into one line")
+    assert.match(last.at(-1), /Waiting for you in the browser…/)
+    // The scrollback keeps everything: every tool and every event.
+    for (let i = 0; i < 6; i++) assert.ok(summary.includes(`  ✓ Tool ${i} signed in`))
+    assert.ok(summary.includes("  ✓ OpenCode      added"))
+  })
+
+  // install.sh's Codex sign-in link: about 300 characters.
+  const LONG_URL = `https://auth.bonez.io/authorize?response_type=code&client_id=qFX0abcdefghijklmnopqrstuvwxyz012345&redirect_uri=${encodeURIComponent("http://127.0.0.1:8787/callback")}&scope=${encodeURIComponent("openid offline_access bonez:read bonez:memory bonez:write")}&state=${"s".repeat(64)}&code_challenge=${"c".repeat(43)}&code_challenge_method=S256&end`
+  const withCodexLink = (view) => {
+    view.header()
+    view.tool("done", "Claude Code", "added", "Next: /mcp › bonez › Authenticate")
+    view.tool("done", "Codex", "added", "Signing in, in your browser…")
+    view.detail(`Sign-in link: ${LONG_URL}`)
+    view.tool("done", "Cursor", "added", "Next: reload, then MCPs › bonez › Authenticate")
+    view.finish({ joining: false, url: "https://app.bonez.io/connect?pair=K7QM-4XPA", opened: true })
+    view.waiting("Waiting for you in the browser…", Date.now() + 29 * 60_000)
+  }
+
+  test("a long sign-in link: one row with its middle cut where the terminal shows links, still opening the whole address", async () => {
+    assert.ok(LONG_URL.length > 280)
+    const t = term({ rows: 40, env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    const view = await open(t)
+    withCodexLink(view)
+    view.end()
+    const { frames, frame, summary } = screenOf(t.text())
+    for (const f of frames) {
+      assert.ok(unstyled(f).split("\n").every((l) => [...l].length <= 79), "nothing reaches the last column")
+      assert.ok(drawnRows(f, 80) <= 40)
+    }
+    const shown = frame.find((l) => l.includes("Sign-in link:"))
+    assert.match(shown, /^ {4}Sign-in link: https:\/\/auth\.bonez\.io\/auth[^…]*…[^…]*code_challenge_method=S256&end$/)
+    assert.equal([...shown].length, 79)
+    assert.ok(t.text().includes(`\x1b]8;;${LONG_URL}\x1b\\`), "the link opens the whole address")
+    assert.ok(summary.includes(`    Sign-in link: ${LONG_URL}`), "the scrollback keeps the whole address")
+  })
+
+  test("a long sign-in link where the terminal has no links: drawn whole over several rows, and the rows count", async () => {
+    for (const rows of [40, 24, 14]) {
+      const t = term({ rows, env: { TERM: "xterm-256color", TERM_PROGRAM: "Apple_Terminal" } })
+      const view = await open(t)
+      withCodexLink(view)
+      for (let i = 0; i < 5; i++) view.done(`Step ${i}`)
+      view.end()
+      const { frames, summary } = screenOf(t.text())
+      for (const f of frames) assert.ok(drawnRows(f, 80) <= rows, `${drawnRows(f, 80)} rows on a ${rows}-row terminal:\n${unstyled(f)}`)
+      if (rows >= 24) assert.ok(screenOf(t.text()).frame.includes(`    Sign-in link: ${LONG_URL}`), `rows ${rows}`)
+      assert.match(unstyled(frames.at(-1)), /Waiting for you in the browser…/, "the live line stays")
+      assert.ok(summary.includes(`    Sign-in link: ${LONG_URL}`))
+    }
+  })
+
+  test("the Codex sign-in link stays when the tools fold, until Codex signs in; then it goes, from the summary too", async () => {
+    const t = term({ rows: 24, env: { TERM: "xterm-256color", TERM_PROGRAM: "iTerm.app" } })
+    const view = await open(t)
+    withCodexLink(view)
+    let { frame } = screenOf(t.text())
+    assert.ok(frame.includes("  ✓ Claude Code, Cursor added"), frame.join("\n"))
+    assert.ok(frame.includes("  ✓ Codex         added      Signing in, in your browser…"), frame.join("\n"))
+    assert.ok(frame.some((l) => l.startsWith("    Sign-in link: https://")))
+    view.toolSignedIn("Codex")
+    view.end()
+    let summary
+    ;({ frame, summary } = screenOf(t.text()))
+    assert.ok(frame.includes("  ✓ Claude Code, Codex, Cursor added"), frame.join("\n"))
+    assert.ok(!frame.some((l) => l.includes("Sign-in link")))
+    assert.ok(frame.includes("  ✓ Codex signed in"))
+    assert.ok(!summary.some((l) => l.includes("Sign-in link")), "signed in: the link is not left behind")
+    assert.ok(summary.includes("  ✓ Codex signed in"))
+
+    // A row sent again replaces the row and its details: install.sh can say Codex signed in itself.
+    const again = term({ rows: 40 })
+    const resent = await open(again)
+    resent.tool("done", "Codex", "added", "Signing in, in your browser…")
+    resent.detail(`Sign-in link: ${LONG_URL}`)
+    resent.tool("done", "Cursor", "added")
+    resent.tool("done", "Codex", "added", "Signed in")
+    resent.detail("a note for Codex")
+    resent.end()
+    const s = screenOf(again.text())
+    assert.deepEqual(s.frame.filter((l) => /Codex|Cursor|note|Sign-in/.test(l)), [
+      "  ✓ Codex         added      Signed in",
+      "    a note for Codex",
+      "  ✓ Cursor        added",
+    ])
+  })
+
+  test("a failure is a red ✗ on the screen and in the summary; Ctrl-C leaves what is left to do", async () => {
+    const t = term()
+    const view = await open(t)
+    view.tool("done", "Codex", "added", "Signed in")
+    view.tool("failed", "Cursor", "failed", undefined, ["cursor: permission denied", "Fix: chmod u+w ~/.cursor"])
+    view.fail("Could not start the Bonez setup: could not reach gateway.bonez.io.")
+    view.end()
+    const { frame, summary } = screenOf(t.text())
+    assert.match(t.text(), /\x1b\[31m✗\x1b\[0m Could not start/)
+    for (const shown of [frame, summary]) {
+      assert.ok(shown.includes("  ✗ Could not start the Bonez setup: could not reach gateway.bonez.io."), shown.join("\n"))
+      assert.ok(shown.includes("    Fix: chmod u+w ~/.cursor"), "a failed tool keeps its own words")
+    }
+
+    const c = term()
+    const waiting = await open(c)
+    waiting.setLeaving("Setup goes on in the background and finishes when you answer in the browser:", "https://app.bonez.io/connect?pair=K7QM-4XPA")
+    waiting.finish({ joining: false, url: "https://app.bonez.io/connect?pair=K7QM-4XPA", opened: true })
+    waiting.waiting("Waiting for you in the browser…", Date.now() + 60_000)
+    waiting.end({ interrupted: true })
+    assert.deepEqual(screenOf(c.text()).summary.filter(Boolean).slice(-2), [
+      "  · Setup goes on in the background and finishes when you answer in the browser:",
+      "    https://app.bonez.io/connect?pair=K7QM-4XPA",
+    ])
   })
 })

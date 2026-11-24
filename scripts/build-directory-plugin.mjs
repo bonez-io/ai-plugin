@@ -17,7 +17,7 @@ const write = (p, s) => {
 
 // Skills and commands that need what this variant lacks (bin/ tools, code templates, a server URL choice).
 const EXCLUDE_SKILLS = ["creating-a-plugin"];
-const EXCLUDE_COMMANDS = ["new-plugin.md", "connect.md"];
+const EXCLUDE_COMMANDS = ["new-plugin.md", "connect.md", "capture.md"];
 
 // [file, source text, replacement]. Every source text must still exist: drift fails the build, and the
 // error lists EVERY stale entry at once. When a skill's prose changes, update its source text here to the
