@@ -96,6 +96,9 @@ jobs:
       - name: Session capture tests
         run: ./tests/test_session_sync.sh
 
+      - name: OpenCode completed-turn capture
+        run: node --test tests/opencode_capture.test.mjs
+
       - name: Package hash tool tests
         run: ./tests/test_package_hash.sh
 

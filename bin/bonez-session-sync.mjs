@@ -1445,11 +1445,19 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   // The Codex conversation still UPLOADS under the whole stem `rollout-<ts>-<uuid>`. The pipeline
   // keys the Session node on it (`user:<user id>:<sessionId>`, import_activities._session_key),
   // so a session uploaded before as the stem would come back as a second Session under the UUID.
-  const dedupKey = agent === "codex" ? codexTranscriptId(conversation.sessionId) : conversation.sessionId || sessionId
+  return uploadConversation({ agent, cfg, scope, repos, conversation, scrubber })
+}
+
+async function uploadConversation({ agent, cfg, scope, repos, conversation, scrubber }) {
+  const dedupKey = agent === "codex" ? codexTranscriptId(conversation.sessionId) : conversation.sessionId
   const messageCount = conversation.messages.length
   const contentHash = contentHashOf(conversation)
   const state = loadState()
-  const skipReason = shouldSkip(state, dedupKey, messageCount, contentHash)
+  // OpenCode delivers completed turns, rather than multiple tool hooks per turn. A rapid
+  // second turn can be the last one: only skip an identical snapshot for that surface.
+  const skipReason = agent === "opencode"
+    ? state[dedupKey]?.contentHash === contentHash && "unchanged since last upload"
+    : shouldSkip(state, dedupKey, messageCount, contentHash)
   if (skipReason) {
     await log(`upload: session=${dedupKey} agent=${agent} skipped — ${skipReason}`)
     return
@@ -1508,6 +1516,36 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     `upload: session=${dedupKey} agent=${agent} messages=${messageCount} redactions=${scrubReport.total} bytes=${gz.length} upload_id=${pre.json.upload_id} OK`,
   )
   return true
+}
+
+export async function captureOpenCode(session, readMessages) {
+  const cwd = session.location?.directory
+  const allowed = () => {
+    const cfg = loadConfig()
+    return !disabledByEnv() && cfg?.enabled && hasCredential(cfg) && isAbsolute(cwd) &&
+      inCaptureScope(cfg, cwd) && captureGatewayAllowed(gatewayBaseUrl()) && !signInMismatch(cfg, gatewayBaseUrl()) && cfg
+  }
+  if (!cwd || session.parentID || !session.id || !allowed()) return
+  const records = await readMessages()
+  const cfg = allowed()
+  if (!cfg) return
+  const scrubber = new Scrubber()
+  const messages = []
+  for (const m of records) {
+    // Only the visible conversation. Never include tools, reasoning, system messages or attachments.
+    const text = m.type === "user" ? m.text : m.type === "assistant"
+      ? m.content?.filter(p => p.type === "text").map(p => p.text).join("\n") : null
+    if (typeof text !== "string" || !text.trim()) continue
+    messages.push({ role: m.type, text: scrubber.scrubText(text), cwd,
+      ...(m.id && { sourceId: m.id }), ...(m.time?.created && { ts: m.time.created }) })
+  }
+  if (!messages.some(m => m.role === "user")) return
+  const { scope, repos } = captureScope(cfg)
+  return uploadConversation({ agent: "opencode", cfg, scope, repos, scrubber, conversation: {
+    agent: "opencode", sessionId: session.id, workspacePath: cwd, repo: repoFor(cwd, repos),
+    title: messages.find(m => m.role === "user").text.slice(0, 120), messages,
+    createdAt: messages[0].ts, updatedAt: messages.at(-1).ts,
+  } })
 }
 
 async function cmdUpload(agent, event, payloadFile) {
