@@ -447,7 +447,7 @@ function gatewaySource() {
   if (process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL) return "the plugin's server address option"
   if (process.env.BONEZ_GATEWAY_URL) return "BONEZ_GATEWAY_URL"
   if (process.env.BONEZ_MCP_URL) return "BONEZ_MCP_URL"
-  if (!gatewayBaseUrl().startsWith("https://gateway.bonez.io")) return "the setup page you paired with"
+  if (gatewayBaseUrl() !== "https://gateway.bonez.io") return "the setup page you paired with"
   return "the default"
 }
 
