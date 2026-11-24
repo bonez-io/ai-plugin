@@ -531,9 +531,14 @@ describe("standalone capture and memory hooks", () => {
       if (leg === "codex") assert.match(run("SessionStart", undefined, "\ufeff", "\ufeff"), /memory_recall/)
       if (leg !== "claude") assert.match(run(cursor ? "postToolUse" : "PostToolUse", leg === "codex" ? "apply_patch" : "Read"), /refs/)
       assert.equal(run(cursor ? "postToolUse" : "PostToolUse", "system_model_fetch"), "")
-      if (!cursor) {
+      if (leg === "claude") {
         assert.ok(hooks.SessionStart.every(group => group.hooks.every(hook => hook.type !== "mcp_tool")),
           "Opening an idle host must not perform a System Model read")
+      }
+      if (leg === "codex") {
+        // Codex's one System Model read is the seed. Codex runs SessionStart hooks when the first turn starts
+        // (codex-rs/core/src/session/turn.rs, run_pending_session_start_hooks), so an idle host reads nothing.
+        assert.deepEqual(hooks.SessionStart.flatMap(group => group.hooks.filter(hook => hook.type === "mcp_tool").map(hook => hook.tool)), ["memory_recall"])
       }
       if (leg === "claude") {
         const scratch = mkdtempSync(join(tmpdir(), "bonez-file-hook-"))
@@ -561,7 +566,7 @@ describe("standalone capture and memory hooks", () => {
   }
 })
 
-describe("first-prompt seed (1SI-3585)", () => {
+describe("the session seed, over each harness's own sign-in (1SI-3585, 1SI-4111)", () => {
   test("Claude makes no Bonez call per prompt: the agent recalls once on its own sign-in, as the SessionStart context asks", () => {
     // Claude Code honours `once` only in skill frontmatter, and `if` only on tool events
     // (code.claude.com/docs/en/hooks, "Common fields"), so an mcp_tool UserPromptSubmit hook runs, and blocks,
@@ -578,67 +583,69 @@ describe("first-prompt seed (1SI-3585)", () => {
     assert.match(JSON.parse(out.stdout).hookSpecificOutput.additionalContext, /call memory_recall with \{\} once/)
   })
 
-  for (const [leg, event, field] of [["codex", "UserPromptSubmit", "session_id"], ["cursor", "beforeSubmitPrompt", "conversation_id"]]) {
-    test(leg + " fetches it on the first prompt with repo and prompt, and fails open", async () => {
-      const { createServer } = await import("node:http")
-      const { spawn } = await import("node:child_process")
-      const { writeFileSync } = await import("node:fs")
-      const calls = []
-      let delay = 0
-      let oldServer = false // a server from before the `session` argument refuses it
-      const server = createServer((req, res) => {
-        let body = ""
-        req.on("data", (c) => (body += c))
-        req.on("end", () => setTimeout(() => {
-          const msg = JSON.parse(body)
-          if (msg.method === "tools/call") calls.push({ auth: req.headers.authorization, consumer: req.headers["x-bonez-mcp-consumer"], ...msg.params })
-          const refused = oldServer && msg.method === "tools/call" && "session" in msg.params.arguments
-          res.writeHead(msg.id ? 200 : 202, { "content-type": "application/json" })
-          res.end(msg.id ? JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: msg.method === "initialize"
-            ? { protocolVersion: "2025-06-18" } : refused ? { isError: true, content: [{ type: "text", text: "unexpected argument: session" }] }
-            : { content: [{ type: "text", text: "Work in flight: refund ledger" }] } }) : "")
-        }, delay))
-      })
-      await new Promise((r) => server.listen(0, "127.0.0.1", r))
-      const scratch = mkdtempSync(join(tmpdir(), "bonez-seed-"))
-      try {
-        for (const args of [["init", "-q"], ["remote", "add", "origin", "git@github.com:acme/api.git"]]) spawnSync("git", args, { cwd: scratch })
-        writeFileSync(join(scratch, "config.json"), JSON.stringify({ apiKey: "bnz_test_key" }))
-        const cmd = leg === "cursor" ? ["bash", [join(REPO, "cursor/hooks/session-sync.sh"), "recall"]]
-          : ["node", [join(REPO, "codex/bin/bonez-recall-hook.mjs"), "codex"]]
-        const run = (session, extra = {}) => new Promise((done) => {
-          const child = spawn(cmd[0], cmd[1], { cwd: scratch, env: { ...process.env, HOME: scratch, BONEZ_SESSION_SYNC_DATA: scratch,
-            BONEZ_GATEWAY_URL: `http://127.0.0.1:${server.address().port}`, ...extra } })
-          let out = ""
-          const started = Date.now()
-          child.stdout.on("data", (c) => (out += c))
-          child.on("close", () => done({ out, ms: Date.now() - started }))
-          child.stdin.end(JSON.stringify({ hook_event_name: event, [field]: session, cwd: scratch, workspace_roots: [scratch], prompt: "Fix the refund" }))
-        })
-        const session = "s-" + process.pid + "-" + leg + "-" + Date.now()
-        const first = JSON.parse((await run(session)).out)
-        assert.match(leg === "cursor" ? first.additional_context : first.hookSpecificOutput.additionalContext, /refund ledger/)
-        assert.deepEqual(calls, [{ auth: "Bearer bnz_test_key", consumer: leg + "-plugin", name: "memory_recall",
-          arguments: { message: "Fix the refund", repo: "acme/api", session } }])
-        assert.equal((await run(session)).out, "", "later prompts do not re-fetch")
-        assert.equal(calls.length, 1)
-        delay = 10_000
-        const slow = await run(session + "-slow")
-        assert.equal(slow.out, "")
-        assert.ok(slow.ms < 4500, `fail open took ${slow.ms} ms`)
-        oldServer = true
-        delay = 0
-        calls.length = 0
-        const old = JSON.parse((await run(session + "-old")).out)
-        assert.match(leg === "cursor" ? old.additional_context : old.hookSpecificOutput.additionalContext, /refund ledger/)
-        assert.deepEqual(calls.map((c) => "session" in c.arguments), [true, false], "an older server gets the call again without session")
-        const foreign = await run(session + "-foreign", { BONEZ_GATEWAY_URL: "https://bonez.example.com" })
-        assert.equal(foreign.out, "", "the capture key never leaves Bonez-operated servers")
-      } finally {
-        server.closeAllConnections()
-        server.close()
-        rmSync(scratch, { recursive: true, force: true })
-      }
+  // Codex: UserPromptSubmit ignores matchers and mcp_tool hooks run synchronously (developers.openai.com/codex/hooks,
+  // "Matcher patterns" and "MCP tool hooks"), so a prompt hook would block every prompt. SessionStart runs when the
+  // first turn starts (codex-rs/core/src/session/turn.rs) and waits for the MCP server (core/src/hook_mcp_executor.rs,
+  // McpToolStartup::Wait): once per session, on Codex's own sign-in. Its plain-text answer is model context
+  // (hooks/src/events/session_start.rs).
+  test("Codex seeds a session once, with an mcp_tool SessionStart hook on its own bonez server; no prompt hook", () => {
+    const hooks = JSON.parse(read("codex", "hooks/hooks.json")).hooks
+    assert.equal(hooks.UserPromptSubmit, undefined)
+    const seeds = Object.entries(hooks).flatMap(([event, groups]) => groups.flatMap((g) =>
+      g.hooks.filter((h) => h.type === "mcp_tool").map((h) => ({ event, matcher: g.matcher, ...h }))))
+    assert.deepEqual(seeds, [{ event: "SessionStart", matcher: "^(startup|clear)$", type: "mcp_tool", server: "bonez",
+      tool: "memory_recall", timeout: 5, statusMessage: "Loading what Bonez knows" }])
+    assert.ok(JSON.parse(read("codex", ".mcp.json")).mcpServers.bonez, "the hook names the plugin's own server")
+    const matcher = new RegExp(seeds[0].matcher)
+    for (const source of ["startup", "clear"]) assert.match(source, matcher)
+    for (const source of ["resume", "compact", "fork"]) assert.doesNotMatch(source, matcher)
+    // The command SessionStart hooks keep their place: the Windows checks read SessionStart[0].
+    assert.ok(hooks.SessionStart[0].hooks.every((h) => h.type === "command"))
+  })
+
+  test("Cursor has no prompt hook; its session-start context and its rule ask the agent to call memory_recall", () => {
+    const hooks = JSON.parse(read("cursor", "hooks/hooks.json")).hooks
+    assert.equal(hooks.beforeSubmitPrompt, undefined, "beforeSubmitPrompt's output is only {continue, user_message}: it cannot add context")
+    const out = spawnSync("bash", [join(REPO, "cursor/hooks/session-sync.sh"), "recall"], {
+      cwd: REPO, encoding: "utf8", input: JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "c-1" }),
     })
-  }
+    assert.match(JSON.parse(out.stdout).additional_context, /call memory_recall with \{\} once, before planning: no Bonez seed is added/)
+    assert.match(read("cursor", "rules", "bonez.mdc"), /When the work needs project context[^\n]*call `memory_recall` once/)
+  })
+
+  test("no recall hook calls the network or reads a stored credential", async () => {
+    const source = read("bin", "bonez-recall-hook.mjs")
+    for (const gone of ["plugin-login", "apiKey", "callTool", "fetch("]) assert.ok(!source.includes(gone), gone)
+    const { createServer } = await import("node:http")
+    const { spawn } = await import("node:child_process")
+    const { writeFileSync } = await import("node:fs")
+    let requests = 0
+    const server = createServer((req, res) => {
+      requests++
+      res.end("{}")
+    })
+    await new Promise((r) => server.listen(0, "127.0.0.1", r))
+    const scratch = mkdtempSync(join(tmpdir(), "bonez-seed-"))
+    try {
+      writeFileSync(join(scratch, "config.json"), JSON.stringify({ apiKey: "bnz_test_key" }))
+      for (const [leg, cmd, event] of [
+        ["codex", ["node", [join(REPO, "codex/bin/bonez-recall-hook.mjs"), "codex"]], "UserPromptSubmit"],
+        ["cursor", ["bash", [join(REPO, "cursor/hooks/session-sync.sh"), "recall"]], "beforeSubmitPrompt"],
+      ]) {
+        const out = await new Promise((done) => {
+          const child = spawn(cmd[0], cmd[1], { cwd: scratch, env: { ...process.env, HOME: scratch, BONEZ_SESSION_SYNC_DATA: scratch,
+            BONEZ_GATEWAY_URL: `http://127.0.0.1:${server.address().port}` } })
+          let text = ""
+          child.stdout.on("data", (c) => (text += c))
+          child.on("close", () => done(text))
+          child.stdin.end(JSON.stringify({ hook_event_name: event, session_id: "s-1", conversation_id: "s-1", cwd: scratch, prompt: "Fix the refund" }))
+        })
+        assert.equal(out, "", leg)
+      }
+      assert.equal(requests, 0)
+    } finally {
+      server.close()
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  })
 })
