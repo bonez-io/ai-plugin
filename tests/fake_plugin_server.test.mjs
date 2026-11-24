@@ -200,4 +200,21 @@ describe("over http", () => {
       await server.close()
     }
   })
+
+  // The gateway's public sign-in settings. `cli_client_id` is the Bonez CLI client of the Auth0 tenant the server
+  // signs in with, for the command-line sign-ins.
+  test("/auth/config names the authorization server, and the CLI client only when told to", async () => {
+    const plain = await startFakePluginServer({ oauth: {} })
+    const named = await startFakePluginServer({ oauth: { cliClientId: "serverCliClient" } })
+    try {
+      const a = await call(plain, "GET", "/auth/config")
+      assert.equal(a.status, 200)
+      assert.equal(a.body.auth0.domain, new URL(plain.url).host)
+      assert.equal(a.body.auth0.cli_client_id, undefined)
+      assert.equal((await call(named, "GET", "/auth/config")).body.auth0.cli_client_id, "serverCliClient")
+    } finally {
+      await plain.close()
+      await named.close()
+    }
+  })
 })

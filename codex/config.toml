@@ -9,7 +9,10 @@
 # (the same client and callback the plugin's .mcp.json and cursor/mcp.json use).
 
 # The URL below is Bonez's own cloud. For your own Bonez server (for example
-# https://bonez.example.com), replace it with `https://<your server>/mcp`.
+# https://bonez.example.com), replace it with `https://<your server>/mcp`. The client_id is
+# the Bonez CLI app of Bonez's hosted service; a server whose sign-in uses a different Auth0
+# tenant names its own as
+# `auth0.cli_client_id` in https://<your server>/auth/config, and its install page writes it here.
 [mcp_servers.bonez]
 url = "https://gateway.bonez.io/mcp"
 scopes = ["bonez:read", "bonez:memory", "bonez:write"]

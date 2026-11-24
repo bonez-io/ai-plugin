@@ -63,6 +63,7 @@ import {
   repoFor,
   walkFiles,
 } from "./vendor/agent-import.bundle.mjs"
+import { gatewayClientId, SHIPPED_CLIENT_ID } from "./lib/client-id.mjs"
 import { git, originRepo } from "./lib/git.mjs"
 
 const SELF_PATH = fileURLToPath(import.meta.url)
@@ -113,7 +114,9 @@ const CLAUDE_BACKFILL_BATCH = 25
 // returns a device_code + user_code rather than "unknown client".
 // Empty would make `login` refuse with a pointer at the key lane instead of failing deep in
 // the flow. BONEZ_OAUTH_CLIENT_ID overrides it for testing against another Auth0 app.
-const OAUTH_CLIENT_ID_BUILTIN = "qFX0bzskdcDBhbJaBBwGoiLN5yWkBrMm"
+// It is the client of Bonez's hosted service: a server whose sign-in uses a different Auth0
+// tenant names its own in /auth/config, and `login` uses that one (lib/client-id.mjs).
+const OAUTH_CLIENT_ID_BUILTIN = SHIPPED_CLIENT_ID
 
 // -------------------------------------------------------------------------------- data dir
 
@@ -864,6 +867,10 @@ async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
     )
   }
   const as = await discoverAuthServer(gatewayUrl)
+  // An explicit BONEZ_OAUTH_CLIENT_ID wins; else the client the gateway names for that
+  // authorization server; else the shipped one. The refresh token belongs to the client that got
+  // it, so the id is stored with the tokens and every refresh uses it.
+  const clientId = process.env.BONEZ_OAUTH_CLIENT_ID ?? (await gatewayClientId(gatewayUrl, as.issuer)) ?? OAUTH_CLIENT_ID
   // `audience` rather than RFC 8707 `resource`: Auth0's device-code endpoint is documented in
   // terms of `audience`, and it is what decides whether the issued token's `aud` is the MCP
   // resource the gateway validates against. `resource` works on /authorize once the tenant's
@@ -871,7 +878,7 @@ async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
   const start = await fetchJson(as.deviceEndpoint, {
     method: "POST",
     headers: FORM_HEADERS,
-    body: formBody({ client_id: OAUTH_CLIENT_ID, scope: OAUTH_SCOPES, audience: as.resource }),
+    body: formBody({ client_id: clientId, scope: OAUTH_SCOPES, audience: as.resource }),
   })
   if (!start.ok) {
     throw new Error(`device authorization failed (HTTP ${start.status}): ${start.json.error_description ?? start.text}`)
@@ -905,10 +912,10 @@ async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
       body: formBody({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: deviceCode,
-        client_id: OAUTH_CLIENT_ID,
+        client_id: clientId,
       }),
     })
-    if (res.ok && res.json.access_token) return { ...tokensFrom(res.json), issuer: as.issuer }
+    if (res.ok && res.json.access_token) return { ...tokensFrom(res.json), issuer: as.issuer, clientId }
     const err = res.json.error
     if (err === "authorization_pending") continue
     if (err === "slow_down") {
@@ -933,7 +940,9 @@ function tokensFrom(payload) {
   }
 }
 
-async function refreshAccessToken(gatewayUrl, refreshToken) {
+// `clientId`: the one the sign-in used. A credential from before it was stored was always
+// signed in as OAUTH_CLIENT_ID.
+async function refreshAccessToken(gatewayUrl, refreshToken, clientId = OAUTH_CLIENT_ID) {
   const as = await discoverAuthServer(gatewayUrl)
   const res = await fetchJson(as.tokenEndpoint, {
     method: "POST",
@@ -941,7 +950,7 @@ async function refreshAccessToken(gatewayUrl, refreshToken) {
     body: formBody({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: OAUTH_CLIENT_ID,
+      client_id: clientId,
     }),
   })
   if (!res.ok || !res.json.access_token) {
@@ -979,8 +988,8 @@ async function resolveBearer(cfg, gatewayUrl) {
     const stored = current.oauth ?? oauth
     if (stored.accessToken && stored.expiresAt && Date.now() < stored.expiresAt - TOKEN_SKEW_MS) return stored
     if (!stored.refreshToken) throw new Error("the stored access token expired and there is no refresh token — run `login` again")
-    const next = { ...(await refreshAccessToken(gatewayUrl, stored.refreshToken)), issuer: stored.issuer ?? oauth.issuer,
-      ...(stored.gateway && { gateway: stored.gateway }) }
+    const next = { ...(await refreshAccessToken(gatewayUrl, stored.refreshToken, stored.clientId)), issuer: stored.issuer ?? oauth.issuer,
+      ...(stored.clientId && { clientId: stored.clientId }), ...(stored.gateway && { gateway: stored.gateway }) }
     saveConfig({ ...current, oauth: next })
     return next
   }, 15_000)

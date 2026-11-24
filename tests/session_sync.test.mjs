@@ -22,6 +22,7 @@ import { createServer } from "node:net"
 
 import { startStubGateway } from "./lib/stub-gateway.mjs"
 import { startStubOAuth } from "./lib/stub-oauth.mjs"
+import { SHIPPED_CLIENT_ID } from "../bin/lib/client-id.mjs"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, "..")
@@ -347,19 +348,23 @@ describe("OAuth credential lane (1SI-1033)", () => {
       // Inside TOKEN_SKEW_MS of expiry, so it must refresh rather than hand back a token that
       // would expire mid-upload.
       const cfg = { enabled: true, scope: "global", repos: [],
-                    oauth: { accessToken: "at-stale", refreshToken: "rt-1", expiresAt: Date.now() + 30_000 } }
+                    oauth: { accessToken: "at-stale", refreshToken: "rt-1", expiresAt: Date.now() + 30_000,
+                             clientId: "serverCliClient" } }
       writeFileSync(join(dataDir, "config.json"), JSON.stringify(cfg))
 
       const bearer = await mod.resolveBearer(cfg, as.url)
       assert.equal(bearer, "at-refreshed-1")
       assert.equal(as.calls.token[0].grant_type, "refresh_token")
       assert.equal(as.calls.token[0].refresh_token, "rt-1")
+      // The refresh token belongs to the client the sign-in used (the one the gateway named).
+      assert.equal(as.calls.token[0].client_id, "serverCliClient")
 
       const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
       assert.equal(written.oauth.accessToken, "at-refreshed-1")
       // Auth0 rotated the refresh token; the rotated one must be what we keep.
       assert.equal(written.oauth.refreshToken, "rt-2")
       // Fields the refresh has no business touching survive it.
+      assert.equal(written.oauth.clientId, "serverCliClient")
       assert.equal(written.enabled, true)
       assert.equal(written.scope, "global")
     } finally {
@@ -383,6 +388,9 @@ describe("OAuth credential lane (1SI-1033)", () => {
       const written = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
       // Storing null here would lock the user out of every future refresh silently.
       assert.equal(written.oauth.refreshToken, "rt-keep")
+      // A sign-in from before the client was stored was made as this build's client, and refreshes as it.
+      assert.equal(as.calls.token[0].client_id, process.env.BONEZ_OAUTH_CLIENT_ID ?? SHIPPED_CLIENT_ID)
+      assert.equal(written.oauth.clientId, undefined)
     } finally {
       if (savedDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA
       else process.env.CLAUDE_PLUGIN_DATA = savedDataDir
@@ -478,6 +486,65 @@ describe("OAuth credential lane (1SI-1033)", () => {
       // Capture would have died silently within the hour, in a background process nobody
       // watches. Nothing must be written.
       assert.equal(existsSync(join(dataDir, "config.json")), false)
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  // A self-hosted or separate Bonez server whose sign-in uses a different Auth0 tenant names
+  // its own CLI client in /auth/config. The shipped id means nothing to that tenant.
+  test("login signs in as the client the gateway names, and stores it for the refreshes", async () => {
+    const dataDir = freshDir("oauth-gateway-client")
+    const as = await startStubOAuth({ cliClientId: "serverCliClient" })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: undefined,
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      assert.equal(res.status, 0, res.stderr)
+      assert.equal(as.calls.authConfig, 1)
+      assert.equal(as.calls.device[0].client_id, "serverCliClient")
+      assert.ok(as.calls.token.every((t) => t.client_id === "serverCliClient"))
+      const cfg = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"))
+      assert.equal(cfg.oauth.clientId, "serverCliClient")
+    } finally {
+      await as.close()
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  for (const [label, opts] of [
+    ["names no client (a gateway from before the field)", {}],
+    ["names a client for another authorization server", { cliClientId: "otherTenantCliClient", authDomain: "auth.other.example" }],
+  ]) {
+    test(`login keeps the shipped client when the gateway ${label}`, async () => {
+      const dataDir = freshDir("oauth-shipped-client")
+      const as = await startStubOAuth(opts)
+      try {
+        const res = await runCli(["login", "--global"], {
+          env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: undefined,
+                 BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+        })
+        assert.equal(res.status, 0, res.stderr)
+        assert.equal(as.calls.device[0].client_id, SHIPPED_CLIENT_ID)
+      } finally {
+        await as.close()
+        rmSync(dataDir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test("login: BONEZ_OAUTH_CLIENT_ID still wins over the gateway's client", async () => {
+    const dataDir = freshDir("oauth-env-client")
+    const as = await startStubOAuth({ cliClientId: "serverCliClient" })
+    try {
+      const res = await runCli(["login", "--global"], {
+        env: { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: as.url, BONEZ_OAUTH_CLIENT_ID: "test-client",
+               BONEZ_DEVICE_POLL_FLOOR_MS: "1" },
+      })
+      assert.equal(res.status, 0, res.stderr)
+      assert.equal(as.calls.device[0].client_id, "test-client")
     } finally {
       await as.close()
       rmSync(dataDir, { recursive: true, force: true })
