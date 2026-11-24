@@ -16,6 +16,18 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "^(startup|clear)$",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "bonez",
+            "tool": "memory_recall",
+            "timeout": 5,
+            "statusMessage": "Loading what Bonez knows"
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -39,17 +51,11 @@
             "command": "node \"$PLUGIN_ROOT/bin/bonez-recall-hook.mjs\" codex",
             "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-recall-hook.mjs\" codex",
             "timeout": 5
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
+          },
           {
             "type": "command",
-            "command": "node \"$PLUGIN_ROOT/bin/bonez-recall-hook.mjs\" codex",
-            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-recall-hook.mjs\" codex",
+            "command": "node \"$PLUGIN_ROOT/bin/bonez-session-sync.mjs\" hook codex tool-use",
+            "commandWindows": "node \"%PLUGIN_ROOT%/bin/bonez-session-sync.mjs\" hook codex tool-use",
             "timeout": 5
           }
         ]

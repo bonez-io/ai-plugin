@@ -16,7 +16,7 @@ const write = (p, s) => { fs.mkdirSync(path.dirname(path.join(out, p)), { recurs
 const manifest = JSON.parse(fs.readFileSync(src("cursor/.cursor-plugin/plugin.json"), "utf8"));
 const mcp = JSON.parse(fs.readFileSync(src("cursor/mcp.json"), "utf8"));
 const v = manifest.version;
-const EXCLUDE_COMMANDS = ["bonez-new-plugin.md"];
+const EXCLUDE_COMMANDS = ["bonez-new-plugin.md", "bonez-capture.md"];
 const FORBIDDEN = [/\bhooks?\b/i, /\bgate\b/i, /bonez-plugin/, /CLAUDE_PLUGIN_ROOT/, /creating-a-plugin/, /new-plugin/,
   /bonez_url/, /BONEZ_/, /\bbin\//, /session-sync/];
 

@@ -33,22 +33,24 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readSync,
   readdirSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs"
 import { appendFile } from "node:fs/promises"
-import { hostname, homedir, platform } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
-import { gzipSync } from "node:zlib"
-import { spawn } from "node:child_process"
+import { hostname, homedir, platform, tmpdir } from "node:os"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import zlib, { gzipSync } from "node:zlib"
+import { execFileSync, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 
@@ -64,6 +66,7 @@ import {
 } from "./vendor/agent-import.bundle.mjs"
 import { gatewayClientId, SHIPPED_CLIENT_ID } from "./lib/client-id.mjs"
 import { git, originRepo } from "./lib/git.mjs"
+import { applyPatchFiles } from "./lib/apply-patch.mjs"
 
 const SELF_PATH = fileURLToPath(import.meta.url)
 
@@ -308,7 +311,23 @@ function hasCredential(cfg) {
   return Boolean(cfg?.apiKey || cfg?.oauth?.refreshToken || cfg?.oauth?.accessToken)
 }
 
-const loadState = () => readJsonSafe(statePath(), {})
+// sync-state keys a Codex session by its UUID. Older plugins keyed an upload by the
+// rollout stem `rollout-<ts>-<uuid>` while backfill and its counts used the UUID, so one session
+// could be listed, counted and sent twice. Those keys are moved to the UUID on read (the newer
+// entry wins when both exist); the next write saves the result.
+const ROLLOUT_KEY_RE = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+function migrateStateKeys(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return {}
+  for (const key of Object.keys(state)) {
+    const uuid = ROLLOUT_KEY_RE.exec(key)?.[1]
+    if (!uuid || (state[key]?.agent && state[key].agent !== "codex")) continue
+    const entry = state[key]
+    delete state[key]
+    if (!state[uuid] || (state[uuid].lastUploadedAt ?? 0) < (entry?.lastUploadedAt ?? 0)) state[uuid] = entry
+  }
+  return state
+}
+const loadState = () => migrateStateKeys(readJsonSafe(statePath(), {}))
 function saveState(state) {
   writeJsonAtomic(statePath(), state, 0o600)
 }
@@ -430,6 +449,7 @@ function gatewaySource() {
   if (process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL) return "the plugin's server address option"
   if (process.env.BONEZ_GATEWAY_URL) return "BONEZ_GATEWAY_URL"
   if (process.env.BONEZ_MCP_URL) return "BONEZ_MCP_URL"
+  if (gatewayBaseUrl() !== "https://gateway.bonez.io") return "the setup page you paired with"
   return "the default"
 }
 
@@ -469,6 +489,11 @@ function gatewayBaseUrl() {
   if (process.env.BONEZ_GATEWAY_URL) return process.env.BONEZ_GATEWAY_URL.replace(/\/+$/, "")
   const mcpUrl = process.env.BONEZ_MCP_URL
   if (mcpUrl) return mcpUrl.replace(/\/mcp\/?$/, "")
+  // The gateway `connect` paired with: its key is only good there. Codex and Cursor hooks have no
+  // plugin option naming the server, so without this a key from qa (or a local lab) would go to the default.
+  // Resolved without `dataDir()`, whose answer is cached for the process on first use.
+  const paired = readJsonSafe(join(resolveDataDir(process.env.CLAUDE_PLUGIN_DATA), "config.json"), {})?.gateway
+  if (typeof paired === "string" && captureGatewayAllowed(paired)) return paired.replace(/\/+$/, "")
   return "https://gateway.bonez.io"
 }
 
@@ -527,17 +552,31 @@ async function cmdHook(agent, event) {
 
   const claudeStart = agent === "claude" && event === "session-start"
   if (claudeStart) rememberHookFolder()
+  // A setup answered in the browser after its terminal closed is finished here.
+  if (event === "session-start") {
+    try {
+      await collectPendingAtStart()
+    } catch {
+      /* silent: the next start asks again */
+    }
+  }
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
     // never installed, or explicitly disabled. Settings left in a folder the hook no longer
     // reads are neither: say so, once a day.
     if (claudeStart && !cfg && strandedSettings().length) notifyOnce("stranded", "Bonez session capture is set up, but its settings are in an older folder this plugin no longer reads, so nothing uploads.")
+    // Never set up on this machine: open the setup page once, then offer it on later starts
+    //. A config that exists but is off is a choice someone made, and is left alone.
+    // A setup still waiting for its answer in the browser is not offered again.
+    else if (!cfg && event === "session-start" && !readPending() && !(await openConnectOnce(agent))) await offerCapture(agent)
     return
   }
 
   const raw = readStdinSync()
   if (!raw || !raw.trim()) return
-  if (claudeStart) {
+  if (event === "session-start" && announceEnabled(agent)) {
+    /* the one "capture is on" line after a yes from the offer; nothing else this start */
+  } else if (claudeStart) {
     const notice = captureNotice(cfg)
     if (notice) notifyOnce(notice.reason, notice.text)
   }
@@ -570,7 +609,7 @@ async function cmdHook(agent, event) {
     }
   }
   // The upload ends the session for teammates; its presence is no longer needed.
-  const id = hostSessionId(agent, payload)
+  const id = liveSessionId(agent, payload)
   if (event === "session-end" && typeof id === "string" && SESSION_ID_RE.test(id)) forgetPresence(id)
 }
 
@@ -595,17 +634,104 @@ function spawnWorker(args) {
 // Claude Code's own transcript filenames are `<session_id>.jsonl` under ~/.claude/projects/**
 // (parseClaudeFile derives sessionId this same way). Codex rollout files are
 // `rollout-<timestamp>-<session_id>.jsonl` under ~/.codex/sessions/YYYY/MM/DD/ — session_id is
-// always the trailing segment before `.jsonl`, so a suffix match is exact either way.
+// always the trailing segment before `.jsonl`, so a suffix match is exact either way. Codex also
+// compresses older ones and moves archived ones (codexRollouts), and those are found too.
 function resolveTranscriptPath(agent, sessionId) {
   if (!sessionId) return undefined
+  if (agent === "codex") return codexRollouts().find((p) => transcriptId(p).endsWith(sessionId))
   const root =
     agent === "claude"
       ? join(paths.claudeHome, "projects")
-      : agent === "cursor"
-        ? join(HOME, ".cursor", "projects")
-        : join(paths.codexHome, "sessions")
+      : join(HOME, ".cursor", "projects")
   const hits = walkFiles(root, (p) => p.endsWith(`${sessionId}.jsonl`))
   return hits[0]
+}
+
+// -------------------------------------------------------------------------------- codex rollouts
+//
+// Codex keeps a thread's rollout at $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl. A
+// background worker compresses rollouts older than seven days to `….jsonl.zst` (zstd), and an
+// archived thread moves to $CODEX_HOME/archived_sessions/ (codex-rs/rollout/src/compression.rs).
+// On a real Mac 1,087 of 1,118 rollouts were compressed, so reading only plain files under
+// sessions/ missed almost all history. Node reads zstd from 22.15 (zlib.zstdDecompressSync); on an
+// older Node the compressed ones are left alone and `backfill` and `status` say how many.
+const codexHome = () => process.env.CODEX_HOME || paths.codexHome
+const CODEX_ROLLOUT_RE = /(?:^|[\\/])rollout-[^\\/]*\.jsonl(?:\.zst)?$/
+// BONEZ_SESSION_SYNC_NO_ZSTD=1 stands in for an older Node, for the tests.
+const zstdDecompress = process.env.BONEZ_SESSION_SYNC_NO_ZSTD === "1" ? undefined : zlib.zstdDecompressSync
+const isZst = (p) => p.endsWith(".zst")
+const ZSTD_NEEDED = "Node 22.15 or later"
+
+// Every rollout on this machine, plain and compressed, live and archived. When a rollout exists both
+// ways (Codex is compressing it right now), the plain one is used.
+function codexRollouts() {
+  const all = [join(codexHome(), "sessions"), join(codexHome(), "archived_sessions")].flatMap((root) =>
+    walkFiles(root, (p) => CODEX_ROLLOUT_RE.test(p)),
+  )
+  const plain = new Set(all.filter((p) => !isZst(p)).map(transcriptId))
+  return all.filter((p) => !isZst(p) || !plain.has(transcriptId(p)))
+}
+
+// How many compressed rollouts this Node cannot read: 0 when it can.
+function unreadableCodexRollouts() {
+  return zstdDecompress ? 0 : codexRollouts().filter(isZst).length
+}
+function zstdNotice(n) {
+  return `${n} older Codex session${n === 1 ? "" : "s"} need${n === 1 ? "s" : ""} ${ZSTD_NEEDED} to be read (this is Node ${process.versions.node}).`
+}
+
+// Codex has added line shapes the vendored parser predates: an `ordinal` on every line, and
+// `token_usage_record`, `world_state` and `event_msg` (`item_completed`, `token_count`, …) lines.
+// None of them is conversation the parser keeps: the messages and tool calls are the
+// `response_item` lines. So those lines are reduced to their timestamp (the session's last
+// activity), and a tool output Codex now writes as a list of content parts is joined into the
+// text the parser expects. Anything else passes through as it was.
+const CODEX_SKIPPED_LINES = new Set(["token_usage_record", "world_state", "event_msg"])
+function normalizeCodexLine(line) {
+  let ev
+  try {
+    ev = JSON.parse(line)
+  } catch {
+    return null // a rollout being appended to can end mid-line
+  }
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return null
+  if (CODEX_SKIPPED_LINES.has(ev.type)) return typeof ev.timestamp === "string" ? JSON.stringify({ timestamp: ev.timestamp }) : null
+  const out = ev.payload?.output
+  if (Array.isArray(out) && /_call_output$/.test(String(ev.payload.type))) {
+    const text = out.map((part) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "")).filter(Boolean).join("\n")
+    return JSON.stringify({ ...ev, payload: { ...ev.payload, output: text } })
+  }
+  return line
+}
+
+// Parses one rollout, plain or compressed, through the vendored parser. The uploaded conversation
+// keeps the id the server has always filed it under, the file's stem `rollout-<ts>-<uuid>` (see
+// uploadOne for why that id stays). Returns { conversation } or { skipped: reason }.
+function parseCodexRollout(path, scrubber, repos, scope) {
+  let text
+  try {
+    const raw = readFileSync(path)
+    if (isZst(path)) {
+      if (!zstdDecompress) return { skipped: `a compressed Codex session, which needs ${ZSTD_NEEDED}` }
+      text = zstdDecompress(raw).toString("utf8")
+    } else {
+      text = raw.toString("utf8")
+    }
+  } catch (err) {
+    return { skipped: `unreadable (${err instanceof Error ? err.message : String(err)})` }
+  }
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean).map(normalizeCodexLine).filter((l) => l !== null)
+  // The vendored parser reads a file by path and names the session after it, so it gets one, with
+  // the rollout's own name, in a folder only this user can read, removed straight after.
+  const dir = mkdtempSync(join(tmpdir(), "bonez-codex-"))
+  try {
+    const copy = join(dir, `${transcriptId(path)}.jsonl`)
+    writeFileSync(copy, `${lines.join("\n")}\n`, { mode: 0o600 })
+    const conversation = parseCodexFile(copy, scrubber, repos, scope)
+    return conversation ? { conversation: { ...conversation, sourcePath: path } } : { skipped: "no messages, or outside the configured repo scope" }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 // The Codex leg's durable fallback (SPEC §3.1): SessionEnd's 3s hard cap plus a session killed
@@ -617,8 +743,7 @@ function resolveTranscriptPath(agent, sessionId) {
 // silent no-op; only a genuinely missed session gets caught, and only one per SessionStart —
 // a run of several consecutive crashes needs that many subsequent starts to fully catch up.
 function findCodexCatchupTarget(currentSessionId) {
-  const sessions = join(paths.codexHome, "sessions")
-  const files = walkFiles(sessions, (p) => p.endsWith(".jsonl")).filter((p) => !p.endsWith(`${currentSessionId}.jsonl`))
+  const files = codexRollouts().filter((p) => !transcriptId(p).endsWith(currentSessionId) && (zstdDecompress || !isZst(p)))
   const withMtime = files
     .map((p) => {
       try {
@@ -631,8 +756,8 @@ function findCodexCatchupTarget(currentSessionId) {
   withMtime.sort((a, b) => b.mtime - a.mtime)
   const newest = withMtime[0]
   if (!newest) return null
-  const sessionId = newest.p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? newest.p
-  return { sessionId, transcriptPath: newest.p }
+  // The rollout's UUID, the `session_id` its own SessionEnd uploads under.
+  return { sessionId: codexTranscriptId(newest.p), transcriptPath: newest.p }
 }
 
 // Cursor's own SessionStart catch-up — and unlike Codex's, this one is not defensive
@@ -655,17 +780,21 @@ function findCodexCatchupTarget(currentSessionId) {
 //
 // So: flush on the NEXT sessionStart instead, from disk. Scoped to the current workspace's
 // transcript directory, because that is the one case where the new session's workspace_roots
-// is also the right workspace for the old conversation — Cursor's project directories are the
-// workspace path with "/" swapped for "-", so the mapping is exact rather than guessed. One
-// conversation per start, newest first, skipping anything sync-state already has.
+// is also the right workspace for the old conversation. One conversation per start, newest first,
+// skipping anything sync-state already has.
+//
+// Cursor names a project directory after the workspace path with every run of characters other than
+// ASCII letters and digits turned into one "-", and none at either end; case is kept. Checked against
+// every workspace Cursor recorded on a real Mac (workspaceStorage/*/workspace.json against
+// ~/.cursor/projects, 36 of 36): `/Users/me/Library/Application Support/Cursor/Workspaces/17719/workspace.json`
+// is `Users-me-Library-Application-Support-Cursor-Workspaces-17719-workspace-json`, `/Users/me/.bonez/a/ses_1`
+// is `Users-me-bonez-a-ses-1`. Mapping only "/" missed 7 of them. Lossy like Claude's, so it maps path to
+// directory only. A Windows root (`c:\Users\me\proj`, `/c:/Users/me/proj`) comes out `c-Users-me-proj` by the
+// same rule (unverified on Windows; its file system is case-insensitive, so the drive letter's case does not
+// matter). Non-ASCII letters are assumed to map like punctuation (not seen yet).
 function cursorProjectSlug(workspaceRoot) {
   if (!workspaceRoot) return null
-  // A Windows root (`c:\Users\me\proj`, or `/c:/Users/me/proj`) gets the same rule once its
-  // separators are "/" and its drive colon is gone: `c-Users-me-proj`. (Unverified on Windows: the
-  // exact slug Cursor writes there has not been looked at; the file system is case-insensitive
-  // there, so a drive letter in the other case still finds the directory.)
-  const root = isWindowsPath(workspaceRoot) ? workspaceRoot.replace(/\\/g, "/").replace(/^\/?([A-Za-z]):/, "$1") : workspaceRoot
-  return root.replace(/^\/+/, "").replace(/\/+$/, "").split("/").join("-")
+  return workspaceRoot.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || null
 }
 
 // A path from a Windows machine: a drive letter (`C:\x`, `C:/x`, `/c:/x`) or a UNC share. Told apart
@@ -677,8 +806,10 @@ function isWindowsPath(p) {
 
 // A sub-agent's transcript is part of its lead session, never a session of its own. Claude Code
 // files it under <session>/subagents/ and marks every one of its lines `"isSidechain":true`, so
-// either says so. Only the head is read: the marker sits near the start of every record. (A
-// key inside a message's text is escaped, `\"isSidechain\":`, so it cannot match.)
+// either says so. Cursor files it under agent-transcripts/<conversation>/subagents/<id>.jsonl, with
+// no marker in the lines, so the folder is what says so there. Only the head is read: the marker
+// sits near the start of every record. (A key inside a message's text is escaped,
+// `\"isSidechain\":`, so it cannot match.)
 function isSidechainTranscript(path) {
   if (path.split(/[\\/]/).slice(0, -1).includes("subagents")) return true
   let fd
@@ -696,14 +827,15 @@ function isSidechainTranscript(path) {
 
 // The staleness rule itself, shared by every catch-up leg. It is the subtle part of all of
 // this, so it lives in exactly one place: a second copy is a second chance to get it wrong.
-function staleTranscriptTargets(root, { excludeId, state, cap }) {
-  if (!root || !existsSync(root)) return []
-  const files = walkFiles(root, (p) => p.endsWith(".jsonl")).filter(
+// `files` replaces the walk of `root` (Codex's rollouts live under two roots, in two formats).
+function staleTranscriptTargets(root, { excludeId, state, cap, match = () => true, idOf = transcriptId, since = 0, files: given }) {
+  if (!given && (!root || !existsSync(root))) return []
+  const files = (given ?? walkFiles(root, (p) => p.endsWith(".jsonl") && match(p))).filter(
     (p) => !excludeId || !p.endsWith(`${excludeId}.jsonl`),
   )
   const candidates = files
     .map((p) => {
-      const id = p.split(/[\\/]/).pop()?.replace(/\.jsonl$/, "") ?? p
+      const id = idOf(p)
       let mtime
       try {
         mtime = statSync(p).mtimeMs
@@ -719,6 +851,7 @@ function staleTranscriptTargets(root, { excludeId, state, cap }) {
       // come back as often as it actually changes; uploadOne's own content-hash check then
       // drops the ones where the mtime moved but the content did not.
       if (prev && mtime <= (prev.lastUploadedAt ?? 0)) return null
+      if (mtime < since) return null // older than the caller asked for (`backfill --since-days`)
       if (Date.now() - mtime < CATCHUP_QUIET_MS) return null // probably still running
       if (isSidechainTranscript(p)) return null // read only for the stale ones
       return { transcriptPath: p, sessionId: id, mtime }
@@ -777,8 +910,40 @@ function findClaudeCatchupTargets(currentSessionId, workspaceRoot, state) {
 // `backfill` sweeps EVERY project directory, not just the current workspace — the whole point
 // is the history a per-workspace drip can never reach. Same staleness rule, no cap here (the
 // caller batches), and no current session to exclude.
-function findClaudeBackfillTargets(state) {
-  return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0 })
+function findClaudeBackfillTargets(state, since = 0) {
+  return staleTranscriptTargets(join(HOME, ".claude", "projects"), { excludeId: null, state, cap: 0, since })
+}
+
+// A transcript's session id is its file name, except for Codex, whose rollout files are named
+// `rollout-<timestamp>-<session id>.jsonl`: there the plugin's own bookkeeping (sync-state, the
+// backfill list and its counts) uses the UUID at the end, the hooks' `session_id`, so a session
+// is one entry however it was found. The id uploaded to the server stays the stem (uploadOne).
+const transcriptId = (p) => p.split(/[\\/]/).pop()?.replace(/\.jsonl(?:\.zst)?$/, "") ?? p
+const UUID_TAIL_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+const codexTranscriptId = (p) => transcriptId(p).match(UUID_TAIL_RE)?.[1] ?? transcriptId(p)
+
+// Every harness's history, for `backfill`. Cursor keeps other files under projects/,
+// so only its agent-transcripts count.
+const BACKFILL_AGENTS = ["claude", "codex", "cursor"]
+function findBackfillTargets(agent, state, since = 0) {
+  if (agent === "claude") return findClaudeBackfillTargets(state, since)
+  if (agent === "codex") {
+    // Compressed rollouts this Node cannot read are left out here, and counted by unreadableCodexRollouts.
+    const files = codexRollouts().filter((p) => zstdDecompress || !isZst(p))
+    return staleTranscriptTargets(null, { excludeId: null, state, cap: 0, idOf: codexTranscriptId, since, files })
+  }
+  return staleTranscriptTargets(join(HOME, ".cursor", "projects"), {
+    excludeId: null, state, cap: 0, match: (p) => /[\\/]agent-transcripts[\\/]/.test(p), since,
+  })
+}
+
+// Every harness's backfill targets in one list, newest first.
+function allBackfillTargets(agents, state, since = 0) {
+  const perAgent = agents.map((agent) => ({ agent, targets: findBackfillTargets(agent, state, since) }))
+  const targets = perAgent
+    .flatMap(({ agent, targets: ts }) => ts.map((t) => ({ ...t, agent })))
+    .sort((a, b) => b.mtime - a.mtime)
+  return { perAgent, targets }
 }
 
 // ------------------------------------------------------------------- credential (key or OAuth)
@@ -857,7 +1022,7 @@ function formBody(fields) {
 
 const FORM_HEADERS = { "content-type": "application/x-www-form-urlencoded" }
 
-async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
+async function deviceLogin(gatewayUrl, { onPrompt = console.log, onCode = () => {} } = {}) {
   if (!OAUTH_CLIENT_ID) {
     throw new Error(
       "OAuth login is not configured in this build.\n" +
@@ -884,6 +1049,7 @@ async function deviceLogin(gatewayUrl, { onPrompt = console.log } = {}) {
   }
   const { device_code: deviceCode, user_code: userCode, expires_in: expiresIn } = start.json
   const verifyUrl = start.json.verification_uri_complete || start.json.verification_uri
+  onCode({ verifyUrl, userCode, expiresIn: expiresIn ?? 900, complete: Boolean(start.json.verification_uri_complete) })
   onPrompt(
     [
       "",
@@ -1245,7 +1411,9 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — transcript not found (${transcriptPath ?? "unresolved"})`)
     return
   }
-  if (agent === "claude" && isSidechainTranscript(transcriptPath)) {
+  // The live hooks too: a Cursor hook can hand over a sub-agent's transcript_path, and an id with no path
+  // can resolve to one under subagents/.
+  if ((agent === "claude" || agent === "cursor") && isSidechainTranscript(transcriptPath)) {
     await log(`upload: session=${sessionId} agent=${agent} skipped — a sub-agent transcript, part of its lead session`)
     return
   }
@@ -1255,29 +1423,29 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   // Cursor's records carry no cwd of their own, so the workspace root arrives from the hook
   // payload instead and has to be threaded in — hence the separate call rather than one
   // uniform `parse(path, scrubber, repos, scope)`.
-  const conversation =
+  const parsed =
     agent === "cursor"
-      ? parseCursorFile(transcriptPath, scrubber, repos, scope, cwd)
-      : (agent === "claude" ? parseClaudeFile : parseCodexFile)(transcriptPath, scrubber, repos, scope)
+      ? { conversation: parseCursorFile(transcriptPath, scrubber, repos, scope, cwd) }
+      : agent === "codex"
+        ? parseCodexRollout(transcriptPath, scrubber, repos, scope)
+        : { conversation: parseClaudeFile(transcriptPath, scrubber, repos, scope) }
+  const conversation = parsed.conversation
   if (!conversation) {
     await log(
-      `upload: session=${sessionId} agent=${agent} skipped — no messages, or outside the configured repo scope`,
+      `upload: session=${sessionId} agent=${agent} skipped — ${parsed.skipped ?? "no messages, or outside the configured repo scope"}`,
     )
     return
   }
 
-  // The local dedup key is the CONVERSATION's own sessionId (parseClaudeFile/parseCodexFile's
-  // filename-derived id — for Claude that's the same string as the hook's session_id, since
-  // Claude transcript filenames ARE `<session_id>.jsonl`; for Codex it's the whole
-  // `rollout-<timestamp>-<session_id>` stem, NOT the bare id the SessionEnd hook payload
-  // carries). Keying on the caller-supplied `sessionId` instead would work fine for the normal
-  // SessionEnd path, but the SessionStart catch-up path (findCodexCatchupTarget) has no hook-
-  // provided id for the OLD session to begin with and can only ever derive this same filename
-  // stem — so the two paths would file the same file under two different local keys and never
-  // recognize each other's work as "already synced" (the server-side unit_key, which IS this
-  // conversation.sessionId, would still MERGE-converge correctly either way; this only affects
-  // local bookkeeping, i.e. whether we needlessly re-upload).
-  const dedupKey = conversation.sessionId || sessionId
+  // The local dedup key comes from the CONVERSATION, never the caller, so every path that finds
+  // one file (a hook's id, the catch-up, backfill) files it under one key. For Claude and Cursor
+  // that is the file name, the hook's session id. For Codex it is the UUID at the end of the
+  // rollout stem: the hooks' `session_id`, and the id backfill lists and counts.
+  //
+  // The Codex conversation still UPLOADS under the whole stem `rollout-<ts>-<uuid>`. The pipeline
+  // keys the Session node on it (`user:<user id>:<sessionId>`, import_activities._session_key),
+  // so a session uploaded before as the stem would come back as a second Session under the UUID.
+  const dedupKey = agent === "codex" ? codexTranscriptId(conversation.sessionId) : conversation.sessionId || sessionId
   const messageCount = conversation.messages.length
   const contentHash = contentHashOf(conversation)
   const state = loadState()
@@ -1339,6 +1507,7 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
   await log(
     `upload: session=${dedupKey} agent=${agent} messages=${messageCount} redactions=${scrubReport.total} bytes=${gz.length} upload_id=${pre.json.upload_id} OK`,
   )
+  return true
 }
 
 async function cmdUpload(agent, event, payloadFile) {
@@ -1386,6 +1555,7 @@ async function cmdUpload(agent, event, payloadFile) {
   }
 
   if (agent === "codex" && event === "session-start") {
+    await announceSession(agent, cfg, payload, typeof payload.cwd === "string" && payload.cwd ? payload.cwd : undefined)
     const target = findCodexCatchupTarget(payload.session_id ?? "")
     if (!target) {
       await log("upload: codex session-start — no other session to catch up")
@@ -1476,8 +1646,8 @@ function workspaceRootFrom(payload) {
 // `owner/name`, the surface, and repository-relative file paths. Never content, a prompt, a
 // command, a title or a laptop path. There is no end call: the transcript upload ends it.
 //
-// Claude Code and Cursor only. Codex's transcript id (the rollout file stem) is not its hook
-// session id, so an announced Codex session would never meet its own upload.
+// Codex too, under the id its upload is filed under: the rollout stem, not the hook's
+// session_id (liveSessionId). The two must be one id, or the live session never ends.
 //
 // Files under <data>/presence/, per host session id:
 //   <id>.json    written by the start worker: {repo, root} once announced, {refused} after a
@@ -1503,9 +1673,22 @@ function hostSessionId(agent, payload) {
     payload.session_id
 }
 
-// The host session id, when capture's start succeeded for it (the recall hook names it to the model).
+// The id the gateway knows this session by, live and once uploaded: the Session node's key is
+// `user:<user id>:<id>` both ways. For Claude Code and Cursor it is the host's session id. A Codex
+// session uploads under its rollout stem `rollout-<ts>-<uuid>` (uploadOne), so it is announced under
+// that too, read off `transcript_path`, which every Codex hook carries (SessionStart included: Codex
+// writes the rollout before it runs the hook, codex-rs/core session hook_transcript_path). Without a
+// rollout whose name ends in the hook's session_id there is no id, and nothing is announced.
+function liveSessionId(agent, payload) {
+  if (agent !== "codex") return hostSessionId(agent, payload)
+  const uuid = payload?.session_id
+  const stem = typeof payload?.transcript_path === "string" ? transcriptId(payload.transcript_path) : ""
+  return typeof uuid === "string" && UUID_TAIL_RE.test(uuid) && stem.startsWith("rollout-") && stem.endsWith(uuid) ? stem : undefined
+}
+
+// The live id, when capture's start succeeded for it (the recall hook names it to the model).
 function announcedSessionId(agent, payload) {
-  const id = hostSessionId(agent, payload)
+  const id = liveSessionId(agent, payload)
   if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return undefined
   const announced = readJsonSafe(presencePath(id, "json"), null)
   return announced && !announced.refused ? id : undefined
@@ -1558,8 +1741,8 @@ async function sessionsCall(cfg, gatewayUrl, id, route, body) {
 
 // Runs in the session-start worker, never in the hook.
 async function announceSession(agent, cfg, payload, cwd) {
-  if (agent !== "claude" && agent !== "cursor") return
-  const id = hostSessionId(agent, payload)
+  if (agent !== "claude" && agent !== "cursor" && agent !== "codex") return
+  const id = liveSessionId(agent, payload)
   prunePresence()
   // Every start that is not announced says why, in one line.
   const skip = (why) => log(`presence: start session=${typeof id === "string" ? id.slice(0, 128) : "?"} agent=${agent} not announced — ${why}`)
@@ -1595,27 +1778,45 @@ async function announceSession(agent, cfg, payload, cwd) {
   }
 }
 
+// The files one tool call touched, as { tool, path } with the path as the tool was given it. Codex
+// edits through apply_patch, whose input is a patch naming any number of files.
+function touchedFiles(agent, payload) {
+  if (agent === "codex") return payload.tool_name === "apply_patch" ? applyPatchFiles(payload.tool_input) : []
+  const tool = PRESENCE_TOOLS[payload.tool_name]
+  const path = payload.tool_input?.file_path ?? payload.tool_input?.path
+  return tool && typeof path === "string" && path ? [{ tool, path }] : []
+}
+
 // The tool hook's whole job: local reads, one append, at most one spawn. No Git, no network.
 function recordTouch(agent, payload) {
-  if (agent !== "claude" && agent !== "cursor") return
-  const tool = PRESENCE_TOOLS[payload.tool_name]
-  const id = hostSessionId(agent, payload)
-  if (!tool || typeof id !== "string" || !SESSION_ID_RE.test(id)) return
+  if (agent !== "claude" && agent !== "cursor" && agent !== "codex") return
+  const touched = touchedFiles(agent, payload)
+  const id = liveSessionId(agent, payload)
+  if (!touched.length || typeof id !== "string" || !SESSION_ID_RE.test(id)) return
   const announced = readJsonSafe(presencePath(id, "json"), null)
   if (typeof announced?.repo !== "string" || typeof announced.root !== "string") return
-  const given = payload.tool_input?.file_path ?? payload.tool_input?.path
   const base = (typeof payload.cwd === "string" && payload.cwd) || workspaceRootFrom(payload)
-  if (typeof given !== "string" || !given || (!isAbsolute(given) && !base)) return
-  let file = resolve(base || "", given)
-  try {
-    file = realpathSync.native(file)
-  } catch {
-    /* a file deleted since keeps the path it was given */
+  const at = new Date().toISOString()
+  let lines = ""
+  for (const { tool, path: given } of touched) {
+    if (!isAbsolute(given) && !base) continue
+    let file = resolve(base || "", given)
+    try {
+      file = realpathSync.native(file)
+    } catch {
+      // A file deleted since keeps its name, in its folder's real path (the root is a real path too).
+      try {
+        file = join(realpathSync.native(dirname(file)), basename(file))
+      } catch {
+        /* its folder is gone too: the path as given */
+      }
+    }
+    const rel = relative(announced.root, file)
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || /[\x00-\x1f\x7f]/.test(rel)) continue
+    lines += `${JSON.stringify({ tool, args: { path: `${announced.repo}/${rel.split(sep).join("/")}` }, at })}\n`
   }
-  const rel = relative(announced.root, file)
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || /[\x00-\x1f\x7f]/.test(rel)) return
-  const path = `${announced.repo}/${rel.split(sep).join("/")}`
-  appendFileSync(presencePath(id, "ndjson"), `${JSON.stringify({ tool, args: { path }, at: new Date().toISOString() })}\n`, { mode: 0o600 })
+  if (!lines) return
+  appendFileSync(presencePath(id, "ndjson"), lines, { mode: 0o600 })
   if (takePresenceLock(id)) spawnWorker(["_presence", id])
 }
 
@@ -1792,6 +1993,929 @@ function notifyOnce(reason, text) {
   }
 }
 
+// -------------------------------------------------------------------------------- opt-in offer
+
+// Capture used to stay off until someone ran `login` by hand, and nothing told anyone to, so no
+// customer ever turned it on. Now a session start on a machine that never set capture up offers it
+// with a ready approval link: one click in the browser and capture is on, for every repo. The
+// offer is the device flow `login` runs, started by a detached worker so the hook stays fast.
+//
+// The state lives in the shared store (one per machine, whichever client asked), not the
+// config: there is no config until the person says yes, and a "no" must not look like an install.
+const optinPath = () => join(CANONICAL_DATA_DIR, "optin.json")
+const OFFER_FIRST_SHOWS = 3 // the first few offers, at most one a day…
+const OFFER_DAILY_MS = 20 * 60 * 60 * 1000
+const OFFER_WEEKLY_MS = 7 * DAY_MS // …then at most one a week, until a yes or a no
+const OFFER_WAIT_MS = 3500 // how long the hook waits for the worker's link (3 round trips: ~2.4s on prod Auth0)
+const OFFER_LINK_MIN_MS = 3 * 60_000 // a pending link with less time left than this is not shown
+
+function readOptin() {
+  return readJsonSafe(optinPath(), {})
+}
+
+function writeOptin(next) {
+  try {
+    mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(optinPath(), next, 0o600)
+  } catch {
+    /* the offer is advisory */
+  }
+}
+
+// Whether this start may show the offer: never after a no, never with BONEZ_CAPTURE_OFFER=0 (for CI
+// and shared machines), never for a gateway capture does not serve, and on a slowing schedule otherwise.
+function offerDue(state, now = Date.now()) {
+  if (process.env.BONEZ_CAPTURE_OFFER === "0" || !OAUTH_CLIENT_ID) return false
+  if (state.declinedAt || state.enabledAt) return false
+  if (!captureGatewayAllowed(gatewayBaseUrl())) return false
+  const shown = state.shown ?? 0
+  if (!state.lastShownAt) return true
+  const gap = now - state.lastShownAt
+  return shown < OFFER_FIRST_SHOWS ? gap > OFFER_DAILY_MS : gap > OFFER_WEEKLY_MS
+}
+
+// How the person runs a capture subcommand from where they are: the plugin's slash command where
+// the client has one, the script itself otherwise.
+function captureCmd(agent, sub) {
+  if (agent === "claude") return `/bonez:capture ${sub}`
+  if (agent === "cursor") return `/bonez-capture ${sub}`
+  return `node "${SELF_PATH}" ${sub === "off" ? "decline" : sub}`
+}
+
+function offerText(agent, verifyUrl) {
+  return (
+    `Bonez can save your coding sessions to your team's Bonez, so it learns from them (secrets are removed on this machine first). ` +
+    `Turn it on with one click: ${verifyUrl} — Not now: ignore this. Never: ${captureCmd(agent, "off")}`
+  )
+}
+
+function enabledText(agent, state = {}) {
+  if (state.enabledVia === "connect") {
+    return (
+      "Bonez is saving your sessions on this computer now: you turned it on in the browser." +
+      (state.backfillStartedAt ? " Your sessions from the last 14 days are being added in the background." : "")
+    )
+  }
+  return (
+    "Bonez session capture is on: sessions on this machine are now saved to your team's Bonez when they end. " +
+    `To add your recent sessions too: ${captureCmd(agent, "backfill")}`
+  )
+}
+
+// What each client can show the person at session start. Claude Code shows a hook's
+// `systemMessage` to the person and keeps it out of the model's context; Codex shows it as a
+// warning in its UI (developers.openai.com/codex/hooks). Cursor's sessionStart has no field the
+// person sees (`user_message` is not enforced there), so its offer reaches the person through the
+// agent, as context it is asked to relay once (cursor.com/docs/agent/hooks).
+//
+// In Codex every line also says how to keep the hooks on. Codex approves a plugin's hooks against a
+// hash of the hook definition AND of every file in the plugin folder (codex-rs/hooks/src/engine/
+// plugin_fingerprint.rs, plugin_trust.rs), so any update, even one that changes only the version,
+// turns all of Bonez's hooks off until the person approves them again. Keeping hooks.json the same
+// across releases cannot avoid that, so the person is told instead.
+const CODEX_REVIEW_HOOKS = "After each Bonez update, Codex turns its hooks off until you approve them again: run /hooks (or Review hooks in the app) and approve Bonez."
+function emitNotice(agent, text) {
+  if (agent === "codex") text = `${text} ${CODEX_REVIEW_HOOKS}`
+  if (agent === "cursor") {
+    const relay = `Tell the user this once, at the start of your first reply, word for word, then carry on with their request: "${text}"`
+    process.stdout.write(JSON.stringify({ additional_context: relay }))
+    return
+  }
+  process.stdout.write(JSON.stringify({ systemMessage: text }))
+}
+
+// The first session start after the person approved the offer says so, once.
+function announceEnabled(agent) {
+  const state = readOptin()
+  if (!state.enabledAt || state.announcedAt) return false
+  writeOptin({ ...state, announcedAt: Date.now() })
+  emitNotice(agent, enabledText(agent, state))
+  return true
+}
+
+// Hook path: no config on this machine. Show the "capture is on" line once after a yes, or the
+// offer when it is due. Waits at most OFFER_WAIT_MS for the worker's link; with no link in time it
+// says nothing and counts nothing, so the next start tries again.
+async function offerCapture(agent) {
+  if (announceEnabled(agent)) return
+  const state = readOptin()
+  if (!offerDue(state)) return
+  let pending = state.pending
+  if (!(pending?.verifyUrl && pending.expiresAt - Date.now() > OFFER_LINK_MIN_MS)) {
+    const nonce = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+    writeOptin({ ...state, pending: { nonce, startedAt: Date.now() } })
+    if (!spawnWorker(["_optin", nonce])) return
+    const deadline = Date.now() + OFFER_WAIT_MS
+    pending = undefined
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100))
+      const p = readOptin().pending
+      if (p?.nonce !== nonce) return // another start took over the offer
+      if (p.verifyUrl) {
+        pending = p
+        break
+      }
+      if (p.error) return
+    }
+    if (!pending) return
+  }
+  const now = Date.now()
+  writeOptin({ ...readOptin(), lastShownAt: now, shown: (state.shown ?? 0) + 1 })
+  emitNotice(agent, offerText(agent, pending.verifyUrl))
+}
+
+// Detached worker: runs the device flow the offer links to, and turns capture on, for every repo,
+// when the person approves. Leaves the state as it found it on any failure, so the offer comes back.
+async function cmdOptinWorker(nonce) {
+  const ours = () => readOptin().pending?.nonce === nonce
+  try {
+    const tokens = await deviceLogin(gatewayBaseUrl(), {
+      onPrompt: () => {},
+      onCode: ({ verifyUrl, expiresIn }) => {
+        if (!ours()) throw new Error("superseded")
+        writeOptin({ ...readOptin(), pending: { nonce, verifyUrl, expiresAt: Date.now() + expiresIn * 1000 } })
+      },
+    })
+    if (!ours()) return
+    if (!tokens.refreshToken) throw new Error("no refresh token was issued")
+    if (loadConfig()) return // set up by hand meanwhile; that choice stands
+    saveConfig({
+      enabled: true,
+      scope: "global",
+      repos: [],
+      oauth: { ...tokens, gateway: gatewayBaseUrl() },
+      installedAt: new Date().toISOString(),
+      via: "offer",
+    })
+    const { pending: _done, ...rest } = readOptin()
+    writeOptin({ ...rest, enabledAt: Date.now() })
+    await log("opt-in: approved in the browser — capture is on (global)")
+  } catch (err) {
+    if (ours()) {
+      const { pending: _gone, ...rest } = readOptin()
+      writeOptin(rest)
+    }
+    await log(`opt-in: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// Start the offer's flow by hand (the slash command's "on"): print the approval link and return at
+// once, while a detached worker waits for the approval. Unlike `login` it never blocks, so an
+// agent's shell tool can run it. A previous "no" is withdrawn by asking for this.
+async function cmdOn() {
+  if (refuseForeignGateway("on")) return
+  const cfg = loadConfig()
+  if (cfg?.enabled && hasCredential(cfg)) {
+    console.log("bonez session capture: already on. `status` shows the last upload.")
+    return
+  }
+  const { declinedAt: _no, ...state } = readOptin()
+  const nonce = createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+  writeOptin({ ...state, pending: { nonce, startedAt: Date.now() } })
+  if (!spawnWorker(["_optin", nonce])) {
+    console.error("bonez session capture: could not start the sign-in. Run `login --global` instead.")
+    process.exitCode = 1
+    return
+  }
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100))
+    const p = readOptin().pending
+    if (p?.nonce !== nonce) break
+    if (p.verifyUrl) {
+      console.log(
+        [
+          "Open this link and approve, to turn Bonez session capture on for every repo on this machine:",
+          `  ${p.verifyUrl}`,
+          `The link works for ${Math.max(1, Math.round((p.expiresAt - Date.now()) / 60_000))} minutes. Nothing else to do: capture turns on when you approve.`,
+          "Check with `status` afterwards.",
+        ].join("\n"),
+      )
+      return
+    }
+  }
+  console.error(`bonez session capture: the sign-in did not start. See ${logFilePath()}, or run \`login --global\`.`)
+  process.exitCode = 1
+}
+
+function cmdDecline() {
+  const state = readOptin()
+  const { pending: _gone, ...rest } = state
+  writeOptin({ ...rest, declinedAt: Date.now() })
+  const cfg = loadConfig()
+  if (cfg?.enabled) {
+    cfg.enabled = false
+    saveConfig(cfg)
+  }
+  console.log("bonez session capture: off, and Bonez will not ask again. Turn it on any time with `login --global`.")
+}
+
+// -------------------------------------------------------------------------------- connect
+
+// The setup page in the browser and this machine share a pairing (specs/plugin-connect/CONTRACT.md in
+// the workspace): `connect` creates it, the person signs in and answers on the page, and `connect`
+// picks the answer up here: a sessions key to save, and whether to add the recent sessions too.
+const CONNECT_RECENT_DAYS = 14
+// At most this many of those sessions, the newest across every tool: what the page says and what is added.
+// BONEZ_CONNECT_BACKFILL_MAX overrides it, only so a test need not write 200 transcripts.
+const _parsedConnectMax = Number.parseInt(process.env.BONEZ_CONNECT_BACKFILL_MAX ?? "", 10)
+const CONNECT_BACKFILL_MAX = Number.isFinite(_parsedConnectMax) && _parsedConnectMax > 0 ? _parsedConnectMax : 200
+const connectTargets = () =>
+  allBackfillTargets(BACKFILL_AGENTS, loadState(), Date.now() - CONNECT_RECENT_DAYS * DAY_MS).targets.slice(0, CONNECT_BACKFILL_MAX)
+const CONNECT_TOOL_IDS = ["claude-code", "codex", "cursor", "opencode", "claude-app"]
+const CONNECT_OPENERS = new Set(["claude-code", "codex", "cursor", "opencode", "installer"])
+const CONNECT_OPENER_FOR = { claude: "claude-code", codex: "codex", cursor: "cursor" }
+const CONNECT_MAX_POLL_ERRORS = 10
+const CONNECT_HTTP_TIMEOUT_MS = 15_000
+// Only so the tests need not wait the server's two seconds a poll.
+const _parsedConnectPoll = Number.parseInt(process.env.BONEZ_CONNECT_POLL_MS ?? "", 10)
+const CONNECT_POLL_MS = Number.isFinite(_parsedConnectPoll) && _parsedConnectPoll > 0 ? _parsedConnectPoll : undefined
+
+const newNonce = () => createHash("sha256").update(`${process.pid}:${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16)
+
+function onPath(name) {
+  const win = process.platform === "win32"
+  for (const dir of (process.env.PATH ?? "").split(win ? ";" : ":")) {
+    if (!dir) continue
+    for (const ext of win ? ["", ".exe", ".cmd", ".bat"] : [""]) if (existsSync(join(dir, name + ext))) return true
+  }
+  return false
+}
+
+// The tools on this machine the setup page lists. BONEZ_CONNECT_TOOLS=claude-code,codex replaces the
+// detection (tests; an empty value means none).
+function detectTools() {
+  const override = process.env.BONEZ_CONNECT_TOOLS
+  let ids
+  if (override !== undefined) {
+    ids = override.split(",").map((s) => s.trim()).filter((s) => CONNECT_TOOL_IDS.includes(s))
+  } else {
+    const home = homedir()
+    const localAppData = process.env.LOCALAPPDATA
+    const found = {
+      "claude-code": existsSync(join(home, ".claude")) || onPath("claude"),
+      codex: Boolean(process.env.CODEX_HOME && existsSync(process.env.CODEX_HOME)) || existsSync(join(home, ".codex")),
+      cursor: existsSync(join(home, ".cursor")),
+      opencode: existsSync(join(home, ".config", "opencode")) || onPath("opencode"),
+      "claude-app":
+        process.platform === "darwin"
+          ? existsSync("/Applications/Claude.app") || existsSync(join(home, "Applications", "Claude.app"))
+          : process.platform === "win32" && Boolean(localAppData && existsSync(join(localAppData, "AnthropicClaude"))),
+    }
+    ids = CONNECT_TOOL_IDS.filter((id) => found[id])
+  }
+  // Codex signs in from the installer and first calls Bonez the next time it starts, so the page cannot see it yet:
+  // it is told Codex holds a sign-in here, or it would ask the person to approve a browser tab that never opened.
+  const codexSigned = ids.includes("codex") && override === undefined && codexSignedIn(gatewayBaseUrl())
+  return [...new Set(ids)].map((id) => ({ id, installed: true, ...(id === "codex" && codexSigned && { signed_in_here: true }) }))
+}
+
+// Whether Codex holds a Bonez sign-in for this server: `codex mcp list` shows OAuth on its bonez row. The ChatGPT
+// app's bundled CLI counts, as it does for the installer. False when it cannot be told.
+function codexSignedIn(base) {
+  const app = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+  const bin = onPath("codex") ? "codex" : process.platform === "darwin" && existsSync(app) ? app : undefined
+  if (!bin) return false
+  try {
+    const out = execFileSync(bin, ["mcp", "list"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+    const url = `${base.replace(/\/+$/, "")}/mcp`
+    return out.split("\n").some((l) => {
+      const cols = l.trim().split(/\s+/)
+      return cols[0] === "bonez" && cols[1] === url && cols.includes("OAuth")
+    })
+  } catch {
+    return false
+  }
+}
+
+// The version of the plugin this script ships in (any of its three manifests).
+function pluginVersion() {
+  for (const dir of [".claude-plugin", ".codex-plugin", ".cursor-plugin"]) {
+    const v = readJsonSafe(join(SELF_PATH, "..", "..", dir, "plugin.json"), null)?.version
+    if (typeof v === "string") return v
+  }
+  return undefined
+}
+
+// The page link comes from the server and goes to a shell command, so only a plain http(s) link is opened.
+function safeBrowserUrl(u) {
+  try {
+    const p = new URL(u)
+    return (p.protocol === "https:" || p.protocol === "http:") && /^[A-Za-z0-9:/?#=&.,_~%+-]+$/.test(u)
+  } catch {
+    return false
+  }
+}
+
+function openInBrowser(url) {
+  let cmd = "xdg-open"
+  let args = [url]
+  if (process.platform === "darwin") cmd = "open"
+  else if (process.platform === "win32") {
+    // `start`'s first quoted argument is a window title; `&` would end the command in cmd.
+    cmd = "cmd"
+    args = ["/c", "start", '""', url.replace(/&/g, "^&")]
+  } else if (!onPath("xdg-open")) return false
+  try {
+    const child = spawn(cmd, args, { detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: process.platform === "win32" })
+    child.on("error", () => {})
+    child.unref()
+    return true
+  } catch {
+    return false
+  }
+}
+
+// `CODE.SECRET`: the pairing Settings -> Bonez Plugin made and put in its install command (BONEZ_PAIR).
+function parsePair(raw) {
+  const m = /^([A-Za-z0-9]{4}-?[A-Za-z0-9]{4})\.([A-Za-z0-9_-]{16,128})$/.exec(String(raw ?? "").trim())
+  if (!m) return undefined
+  const bare = m[1].replace("-", "").toUpperCase()
+  return { code: `${bare.slice(0, 4)}-${bare.slice(4)}`, secret: m[2] }
+}
+
+function parseConnectArgs(rest) {
+  const o = { opener: "installer", open: process.env.BONEZ_CONNECT_NO_OPEN !== "1", detach: false, quiet: false, nonce: undefined, pair: process.env.BONEZ_PAIR || undefined }
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]
+    if (a === "--opener") o.opener = rest[++i]
+    else if (a.startsWith("--opener=")) o.opener = a.slice("--opener=".length)
+    else if (a === "--pair") o.pair = rest[++i]
+    else if (a.startsWith("--pair=")) o.pair = a.slice("--pair=".length)
+    else if (a === "--no-open") o.open = false
+    else if (a === "--detach") o.detach = true
+    else if (a === "--quiet") o.quiet = true // the detached child: sync.log only
+    else if (a === "--nonce") o.nonce = rest[++i]
+    // The demo: the whole installer with fake timing, no network, no file touched.
+    else if (a === "--demo") o.demo = true
+    else if (a === "--joining") o.demoJoining = true
+    else if (a.startsWith("--until=")) o.until = a.slice("--until=".length)
+    else if (a.startsWith("--speed=")) o.speed = Math.max(0.1, Number(a.slice("--speed=".length)) || 1)
+  }
+  if (!CONNECT_OPENERS.has(o.opener)) o.opener = "installer"
+  // A hook's background `connect` makes its own pairing: a BONEZ_PAIR left in the environment is not for it.
+  if ((o.detach || o.quiet) && !rest.some((a) => a === "--pair" || a.startsWith("--pair="))) o.pair = undefined
+  return o
+}
+
+function startConnectWorker({ opener, open = true, nonce }) {
+  return spawnWorker(["connect", "--quiet", "--opener", opener, ...(open ? [] : ["--no-open"]), ...(nonce ? ["--nonce", nonce] : [])])
+}
+
+// What the detached child tells the hook that started it (by nonce): the page link, or that it failed.
+function markConnect(nonce, fields) {
+  if (!nonce) return
+  const state = readOptin()
+  if (state.connect?.nonce === nonce) writeOptin({ ...state, connect: { ...state.connect, ...fields } })
+}
+
+// ---- the pending pairing: setup survives a closed terminal
+//
+// The installer used to wait in the foreground: close the terminal, answer in the browser, and the key the
+// page minted was never collected. Now the pairing is written down as soon as there is one
+// (pending-connect.json, 0600), a detached poller waits for the answer whether or not the terminal stays
+// open, and every session start that finds a pairing nobody is polling asks once and finishes the setup.
+// The foreground only shows what the poller reports (connect-progress.json).
+const pendingPath = () => join(CANONICAL_DATA_DIR, "pending-connect.json")
+const progressPath = () => join(CANONICAL_DATA_DIR, "connect-progress.json")
+// The gateway keeps an answered key it could not hand over for 7 days; past that, a pairing is gone.
+const PENDING_KEEP_MS = 8 * DAY_MS
+const HOOK_COLLECT_TIMEOUT_MS = 1500
+const POLLER_STALE_MS = 60_000
+const WORKER_START_GRACE_MS = 10_000
+const CONNECT_TOOL_LABELS = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor", opencode: "OpenCode", "claude-app": "Claude app" }
+
+function writeCanonical(path, value) {
+  mkdirSync(CANONICAL_DATA_DIR, { recursive: true, mode: 0o700 })
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
+function readPending() {
+  const p = readJsonSafe(pendingPath(), null)
+  return p && typeof p.code === "string" && typeof p.secret === "string" && typeof p.gateway === "string" ? p : undefined
+}
+
+function writePending(p) {
+  writeCanonical(pendingPath(), p)
+}
+
+function clearPending(code) {
+  const p = readPending()
+  if (!p || (code !== undefined && p.code !== code)) return
+  try {
+    unlinkSync(pendingPath())
+  } catch {
+    /* gone already */
+  }
+}
+
+function readProgress(code) {
+  const p = readJsonSafe(progressPath(), null)
+  return p && p.code === code ? p : undefined
+}
+
+function reportProgress(code, patch) {
+  try {
+    writeCanonical(progressPath(), { ...(readProgress(code) ?? {}), ...patch, code, at: Date.now() })
+  } catch {
+    /* the view only; the work goes on */
+  }
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err?.code === "EPERM"
+  }
+}
+
+// Someone is polling this pairing right now (the installer's background helper, or a hook's).
+function pollerAlive(code) {
+  const p = readProgress(code)
+  return Boolean(p && !p.finished && p.pid !== process.pid && pidAlive(p.pid) && Date.now() - (p.heartbeatAt ?? 0) < POLLER_STALE_MS)
+}
+
+function pairingResult(gateway, code, secret, timeoutMs) {
+  return fetchJson(`${gateway}/connect/pairing-result`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, secret }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+}
+
+const validKey = (key) => typeof key === "string" && key.startsWith("bnz_")
+
+// Save the sessions key the way `connect` always has: every repo, from the setup page, for the gateway it
+// was paired with. `announce`: the next session start says it once (a hook collected it, nobody saw it).
+function saveConnectedKey(key, gateway, { announce = false, backfill = false } = {}) {
+  const cfg = { enabled: true, scope: "global", repos: [], apiKey: key, gateway, installedAt: new Date().toISOString(), via: "connect" }
+  saveConfig(cfg)
+  // An offer still in flight sees its pending link gone and stops.
+  const { declinedAt: _no, pending: _offer, announcedAt: _said, backfillStartedAt: _bf, ...state } = readOptin()
+  const now = Date.now()
+  writeOptin({ ...state, enabledAt: now, enabledVia: "connect", ...(backfill && { backfillStartedAt: now }), ...(!announce && { announcedAt: now }) })
+  return cfg
+}
+
+// The last 14 days of every harness, one session at a time.
+async function connectBackfill(cfg, onProgress = () => {}) {
+  const targets = connectTargets()
+  const total = targets.length
+  let added = 0
+  let done = 0
+  onProgress(0, total)
+  for (const t of targets) {
+    try {
+      if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) added++
+    } catch (err) {
+      await log(`connect: backfill ${t.sessionId} failed — ${err instanceof Error ? err.message : String(err)}`)
+    }
+    onProgress(++done, total)
+  }
+  return { total, added }
+}
+
+// Polls one pairing until it is answered, expires or is gone, then saves the key and adds the recent
+// sessions. Runs detached (the installer's helper, a hook's), or in the foreground when no helper could
+// start. Says what happens in sync.log and reports it to the view through connect-progress.json.
+async function waitForAnswer(p, { nonce } = {}) {
+  const say = (line) => log(`connect: ${line}`)
+  const report = (patch) => reportProgress(p.code, patch)
+  const finish = async (fields, line) => {
+    report({ ...fields, finished: true })
+    if (fields.error) markConnect(nonce, { error: fields.error })
+    if (line) await say(line)
+  }
+  const intervalMs = CONNECT_POLL_MS ?? Math.max(1, Number(p.pollInterval) || 2) * 1000
+  report({ pid: process.pid, heartbeatAt: Date.now(), finished: false })
+  let errors = 0
+  let answer
+  for (;;) {
+    if (Date.now() > p.expiresAt + intervalMs) {
+      clearPending(p.code)
+      const error = "The setup link expired. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    await sleep(intervalMs)
+    let res
+    try {
+      res = await pairingResult(p.gateway, p.code, p.secret, CONNECT_HTTP_TIMEOUT_MS)
+    } catch {
+      res = undefined
+    }
+    report({ heartbeatAt: Date.now() })
+    if (res?.status === 404) {
+      clearPending(p.code)
+      const error = "The setup link is no longer valid. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    if (!res?.ok) {
+      // The pairing stays written down: the next session start picks the answer up.
+      if (++errors >= CONNECT_MAX_POLL_ERRORS) {
+        const error = "Lost contact with Bonez while waiting. Setup finishes the next time you use a coding tool."
+        return finish({ error }, error)
+      }
+      continue
+    }
+    errors = 0
+    const { status, tools } = res.json
+    if (Array.isArray(tools)) {
+      const signedIn = tools.filter((t) => t && t.signed_in && CONNECT_TOOL_IDS.includes(t.id)).map((t) => t.id)
+      report({ tools: signedIn })
+    }
+    if (status === "expired") {
+      clearPending(p.code)
+      const error = "The setup link expired. Run this again to get a new one."
+      return finish({ error }, error)
+    }
+    if (status === "answered") {
+      answer = res.json.sessions ?? {}
+      break
+    }
+    if (status === "claimed" && !readProgress(p.code)?.claimed) {
+      report({ claimed: true })
+      if (!p.joining) await say("You're signed in. Finish the steps in your browser…")
+    }
+  }
+
+  if (!answer.on) {
+    clearPending(p.code)
+    markConnect(nonce, { result: "off" })
+    return finish({ answer: { on: false } }, "Session saving stays off. You can turn it on later with /bonez:capture on.")
+  }
+  if (!validKey(answer.key)) {
+    clearPending(p.code)
+    const error = "Session saving was turned on, but this computer did not get its key. Run this again."
+    return finish({ error }, error)
+  }
+  // The page already said it is on, so the next session start does not say it again.
+  const cfg = saveConnectedKey(answer.key, p.gateway)
+  clearPending(p.code)
+  markConnect(nonce, { result: "on" })
+  report({ answer: { on: true, backfill: Boolean(answer.backfill) }, saved: true })
+  await say("Session saving is on.")
+
+  if (answer.backfill) {
+    if (disabledByEnv()) {
+      report({ backfill: { skipped: "env" } })
+      await say("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
+    } else {
+      const { total, added } = await connectBackfill(cfg, (done, n) => report({ backfill: { done, total: n }, heartbeatAt: Date.now() }))
+      report({ backfill: { done: total, total, added } })
+      if (!total) await say("No recent sessions to add.")
+      else await say(`Adding ${total} recent session${total === 1 ? "" : "s"}… ${added}/${total}`)
+      if (added < total) await say(`${total - added} were skipped or failed (see ${logFilePath()}). Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+    }
+  }
+  return finish({ ok: true }, "All set. You can close the setup page.")
+}
+
+// Session start: a pairing that nobody is polling (the terminal and its helper are gone, or the computer
+// restarted) gets one quick question. Answered with a key: setup finishes here. Gone or expired: forgotten.
+// Still waiting: a helper starts polling again. One request, a short timeout, and silence on any failure.
+async function collectPendingAtStart() {
+  const p = readPending()
+  if (!p) return
+  if (!captureGatewayAllowed(p.gateway) || !(Number(p.expiresAt) > 0) || Date.now() > p.expiresAt + PENDING_KEEP_MS) {
+    clearPending(p.code)
+    return
+  }
+  if (pollerAlive(p.code)) return
+  let res
+  try {
+    res = await pairingResult(p.gateway, p.code, p.secret, HOOK_COLLECT_TIMEOUT_MS)
+  } catch {
+    return
+  }
+  if (res.status === 404 || res.status === 410) {
+    clearPending(p.code)
+    await log("connect: the pending setup is gone from the server; forgotten")
+    return
+  }
+  if (!res.ok) return
+  const { status, sessions } = res.json
+  if (status === "expired") {
+    clearPending(p.code)
+    await log("connect: the pending setup expired before it was answered; forgotten")
+    return
+  }
+  if (status !== "answered") {
+    if (Date.now() < p.expiresAt) spawnWorker(["_connect-wait", p.code])
+    return
+  }
+  if (!sessions?.on) {
+    clearPending(p.code)
+    reportProgress(p.code, { answer: { on: false }, finished: true })
+    await log("connect: answered in the browser while no terminal waited: session saving stays off")
+    return
+  }
+  if (!validKey(sessions.key)) {
+    // Collected by someone else already, or the server hands a key out once and it went missing.
+    clearPending(p.code)
+    await log("connect: answered in the browser, but there was no key left to collect")
+    return
+  }
+  saveConnectedKey(sessions.key, p.gateway, { announce: true, backfill: Boolean(sessions.backfill) && !disabledByEnv() })
+  clearPending(p.code)
+  reportProgress(p.code, { answer: { on: true, backfill: Boolean(sessions.backfill) }, saved: true, finished: true, ok: true })
+  await log("connect: collected the key a closed terminal left behind — session saving is on (global)")
+  if (sessions.backfill && !disabledByEnv()) spawnWorker(["_connect-backfill"])
+}
+
+async function cmdConnectWaitWorker(code) {
+  const p = readPending()
+  if (!p || p.code !== code || pollerAlive(code)) return
+  await waitForAnswer(p)
+}
+
+async function cmdConnectBackfillWorker() {
+  const cfg = loadConfig()
+  if (!cfg?.enabled || !cfg.apiKey || disabledByEnv()) return
+  const { total, added } = await connectBackfill(cfg)
+  await log(`connect: added ${added}/${total} recent sessions in the background`)
+}
+
+// `given`: the screen install-ui already drew the tool rows on; it carries on here.
+async function cmdConnect(rest, given) {
+  const o = parseConnectArgs(rest)
+  if (o.demo) {
+    const { playDemo } = await import("./lib/connect-tui.mjs")
+    await playDemo({ until: o.until, speed: o.speed, joining: o.demoJoining })
+    return
+  }
+  if (o.detach) {
+    if (!startConnectWorker(o)) {
+      console.error("Could not start the Bonez setup in the background.")
+      process.exitCode = 1
+    }
+    return
+  }
+  const base = gatewayBaseUrl()
+  if (!captureGatewayAllowed(base) && given) {
+    given.fail("This Bonez server does not offer session saving.")
+    process.exitCode = 1
+    return
+  }
+  if (!captureGatewayAllowed(base)) {
+    markConnect(o.nonce, { error: "not a Bonez-operated gateway" })
+    if (o.quiet) {
+      await log("connect: not a Bonez-operated gateway")
+      process.exitCode = 1
+    } else refuseForeignGateway("connect")
+    return
+  }
+  let view = given
+  if (!o.quiet && !view) {
+    view = await connectView()
+    // Plain output starts at the panel, as it always has; the full screen always has its header.
+    if (view.caps.live) view.header()
+  }
+  const say = o.quiet ? (line) => log(`connect: ${line}`) : async () => {}
+  const fail = async (line) => {
+    markConnect(o.nonce, { error: line })
+    if (o.quiet) await log(`connect: ${line}`)
+    else view.fail(line)
+    process.exitCode = 1
+  }
+
+  const recent = connectTargets().length
+  const report = {
+    opener: o.opener,
+    tools: detectTools(),
+    recent_sessions: recent,
+    host: hostname().slice(0, 64),
+    ...(pluginVersion() && { plugin_version: pluginVersion() }),
+  }
+  // From Settings -> Bonez Plugin's command: the page made the pairing and is open, so join it and open nothing.
+  const joining = o.pair !== undefined
+  const pair = joining ? parsePair(o.pair) : undefined
+  if (joining && !pair) return fail("The setup command is incomplete. Copy it again from the Bonez page.")
+  let pairing
+  try {
+    const res = await fetchJson(`${base}${joining ? "/connect/pairings/join" : "/connect/pairings"}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(joining ? { pair: `${pair.code}.${pair.secret}`, ...report } : report),
+      signal: AbortSignal.timeout(CONNECT_HTTP_TIMEOUT_MS),
+    })
+    if (joining && res.status === 410) return fail("The setup command expired. Copy a new one from the Bonez page.")
+    if (joining && res.status === 404) return fail("The setup command is no longer valid. Copy a new one from the Bonez page.")
+    if (res.status === 404) throw new Error("this Bonez server does not offer the setup page yet")
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (joining) {
+      pairing = { ...res.json, code: pair.code, secret: pair.secret }
+    } else {
+      if (typeof res.json.code !== "string" || typeof res.json.secret !== "string" || !safeBrowserUrl(res.json.url)) {
+        throw new Error("the server's answer was not understood")
+      }
+      pairing = res.json
+    }
+  } catch (err) {
+    const why = err?.host ? `could not reach ${err.host}` : err instanceof Error ? err.message : String(err)
+    return fail(`Could not start the Bonez setup: ${why}.`)
+  }
+
+  const { url, code, secret } = pairing
+  const expiresAt = Number(pairing.expires_at) > 0 ? Number(pairing.expires_at) * 1000 : Date.now() + 30 * 60_000
+  const pending = { code, secret, gateway: base, expiresAt, pollInterval: pairing.poll_interval, joining, opener: o.opener, createdAt: Date.now() }
+  // Written down before anything else, so an answer given after this terminal is gone is still collected.
+  writePending(pending)
+  writeCanonical(progressPath(), { code, at: Date.now() })
+  // Opened once per machine: the session-start hook does not open another page after this.
+  const optin = readOptin()
+  writeOptin({ ...optin, connectOpenedAt: optin.connectOpenedAt ?? Date.now() })
+  let opened = false
+  if (joining) {
+    markConnect(o.nonce, { expiresAt })
+    await say("Continue on the Bonez page in your browser.")
+  } else {
+    markConnect(o.nonce, { url, expiresAt })
+    opened = o.open && openInBrowser(url)
+    await say(opened ? `Opened the Bonez setup page in your browser: ${url}` : `Open this page in your browser to finish setting up Bonez: ${url}`)
+  }
+
+  // The hook's own background child is already detached: it polls itself.
+  if (o.quiet) return waitForAnswer(pending, { nonce: o.nonce })
+
+  view.finish({ joining, url, opened })
+  if (joining) view.setLeaving("Setup goes on in the background and finishes when you answer in the browser.")
+  else view.setLeaving("Setup goes on in the background and finishes when you answer in the browser:", url)
+  return watchConnect(view, pending, { started: spawnWorker(["_connect-wait", code]) })
+}
+
+// install.sh's screen: on a terminal, install.sh starts this first and tells it what it does, one
+// line per change on stdin (tab-separated: `working NAME`, `tool STATE NAME WORD NEXT`, `detail TEXT`,
+// `claude-app URL`, `fail TEXT`, `end CONNECT`), so the tool steps and the browser steps are one screen from the
+// start. With `end 1` it goes on to `connect` (BONEZ_PAIR and BONEZ_GATEWAY_URL come from install.sh). A `detail`
+// belongs to the last `tool` row sent; a `tool` row sent again under the same name replaces it and its details.
+// A detail with an address in it (Codex's `Sign-in link: <url>`) stays on the screen and in the summary until
+// that tool is signed in.
+async function cmdInstallUi() {
+  const view = await connectView()
+  view.header()
+  // Lines from install.sh, until `end` (or until it closes the pipe without one).
+  async function* lines() {
+    let buf = ""
+    process.stdin.setEncoding("utf8")
+    for await (const chunk of process.stdin) {
+      buf += chunk
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        yield buf.slice(0, i)
+        buf = buf.slice(i + 1)
+      }
+    }
+    if (buf) yield buf
+  }
+  let end
+  for await (const raw of lines()) {
+    const [kind, ...f] = raw.split("\t")
+    if (kind === "working") view.toolWorking(f[0])
+    else if (kind === "tool") view.tool(f[0], f[1], f[2], f[3] || undefined)
+    else if (kind === "detail") view.detail(f[0])
+    else if (kind === "claude-app") view.claudeApp(f[0])
+    else if (kind === "fail") {
+      view.fail(f[0])
+      process.exitCode = 1
+    } else if (kind === "end") {
+      end = { connect: f[0] === "1" }
+      break
+    }
+  }
+  if (!end) {
+    view.fail("The installer stopped before it finished. Run it again.")
+    process.exitCode = 1
+    return
+  }
+  if (process.exitCode) return
+  if (end.connect) return cmdConnect(["--opener", "installer"], view)
+  if (process.env.BONEZ_PAIR) view.note("Go back to the Bonez page in your browser to finish.")
+  view.allSet("Bonez is in your coding tools.")
+  if (view.caps.live) await sleep(800)
+}
+
+async function connectView() {
+  const { createView } = await import("./lib/connect-tui.mjs")
+  return createView()
+}
+
+// The foreground: shows what the background helper reports, until it is done. Closing the terminal ends
+// only this; Ctrl-C says the setup goes on. If no helper runs, this process polls itself.
+async function watchConnect(view, p, { started }) {
+  const { code } = p
+  const t0 = Date.now()
+  let takenOver = started ? undefined : waitForAnswer(p)
+  // Ctrl-C, the window closing: the screen is given back with what is left to do (the full-screen view does it
+  // itself); setup goes on in the background either way.
+  if (!view.caps.live) {
+    view.setLeaving("Stopped watching. Setup goes on in the background and finishes when you answer in the browser.")
+    process.on("SIGINT", () => {
+      view.end({ interrupted: true })
+      process.exit(0)
+    })
+    process.on("SIGHUP", () => process.exit(0))
+    process.on("SIGTERM", () => process.exit(0))
+  }
+
+  const shown = { claimed: false, tools: new Set(), answer: false, saved: false, backfill: false }
+  view.waiting(`Waiting for you in the browser${view.caps.unicode ? "…" : "..."}`, p.expiresAt)
+  for (;;) {
+    await sleep(120)
+    const pr = readProgress(code) ?? {}
+    if (pr.claimed && !shown.claimed) {
+      shown.claimed = true
+      if (!p.joining) view.done("Signed in to Bonez in the browser")
+    }
+    for (const id of pr.tools ?? []) {
+      if (shown.tools.has(id)) continue
+      shown.tools.add(id)
+      view.toolSignedIn(CONNECT_TOOL_LABELS[id] ?? id)
+    }
+    if (pr.answer && !shown.answer) {
+      shown.answer = true
+      if (!pr.answer.on) {
+        view.stopLive()
+        view.skipped("Session saving stays off", "Turn it on later in Settings > Bonez Plugin, or with /bonez:capture on")
+      }
+    }
+    if (pr.saved && !shown.saved) {
+      shown.saved = true
+      view.stopLive()
+      view.done("Session saving is on")
+    }
+    const bf = pr.backfill
+    if (bf && !shown.backfill) {
+      if (bf.skipped) {
+        shown.backfill = true
+        view.note("BONEZ_SESSION_SYNC=0 is set, so recent sessions were not added.")
+      } else if (bf.added !== undefined) {
+        shown.backfill = true
+        view.stopLive()
+        if (!bf.total) view.done("No recent sessions to add")
+        else {
+          const what = `recent session${bf.total === 1 ? "" : "s"}`
+          view.done(bf.added === bf.total ? `Added ${bf.total} ${what}` : `Added ${bf.added} of ${bf.total} ${what}`, `from the last ${CONNECT_RECENT_DAYS} days`)
+        }
+        if (bf.added < bf.total) view.note(`${bf.total - bf.added} were skipped or failed. Try them again with: backfill --since-days=${CONNECT_RECENT_DAYS}`)
+      } else if (bf.total) {
+        view.progress(bf.done ?? 0, bf.total)
+      }
+    }
+    if (pr.finished) {
+      if (takenOver) await takenOver
+      if (pr.error) {
+        view.fail(pr.error)
+        process.exitCode = 1
+      } else if (pr.ok) view.allSet()
+      else view.stopLive()
+      // A moment on the finished screen before it is given back with its summary.
+      if (view.caps.live) await sleep(800)
+      return
+    }
+    // The helper died before it finished (or never said it started): this process polls instead. The
+    // pairing is still written down, so a session start can finish it if this terminal closes too.
+    if (!takenOver && Date.now() - t0 > WORKER_START_GRACE_MS && !(pidAlive(pr.pid) && Date.now() - (pr.heartbeatAt ?? 0) < POLLER_STALE_MS)) {
+      takenOver = waitForAnswer({ ...p, ...(readPending()?.code === code ? {} : { expiresAt: 0 }) })
+    }
+  }
+}
+
+// Hook path, on a machine with no capture settings: open the setup page once (a detached
+// `connect`), and say so in one line. Returns false when it did not run, so the offer can.
+async function openConnectOnce(agent) {
+  if (process.env.BONEZ_CAPTURE_OFFER === "0") return false
+  const state = readOptin()
+  if (state.connectOpenedAt || state.declinedAt || state.enabledAt) return false
+  if (!captureGatewayAllowed(gatewayBaseUrl())) return false
+  const nonce = newNonce()
+  writeOptin({ ...state, connectOpenedAt: Date.now(), connect: { nonce } })
+  if (!startConnectWorker({ opener: CONNECT_OPENER_FOR[agent] ?? "installer", nonce })) {
+    const { connectOpenedAt: _at, connect: _c, ...rest } = readOptin()
+    writeOptin(rest)
+    return false
+  }
+  let url
+  const deadline = Date.now() + OFFER_WAIT_MS
+  while (Date.now() < deadline) {
+    await sleep(100)
+    const c = readOptin().connect
+    if (c?.nonce !== nonce) break
+    if (c.url) {
+      url = c.url
+      break
+    }
+    if (c.error) return true // nothing to say; a later start offers capture instead
+  }
+  const lead = "Bonez opened a setup page in your browser to finish connecting."
+  emitNotice(agent, url ? `${lead} If it did not open: ${url}` : `${lead} If it did not open, run ${captureCmd(agent, "on")}`)
+  return true
+}
+
 // -------------------------------------------------------------------------------- human-facing commands
 
 function parseInstallArgs(rest) {
@@ -1928,7 +3052,7 @@ function cmdLogout() {
   console.log("bonez session capture: credential removed and capture disabled. Run `login` to set it up again.")
 }
 
-// A deliberate, human-run sweep of local Claude Code history. Deliberately NOT reachable from
+// A deliberate, human-run sweep of local Claude Code, Codex and Cursor history. NOT reachable from
 // any hook: it publishes a large volume of past conversation to the org's System Model in one go, and
 // that is a decision someone makes on purpose, once, not a side effect of opening a terminal.
 //
@@ -1940,6 +3064,21 @@ async function cmdBackfill(rest) {
   const limitArg = args.find((a) => a.startsWith("--limit="))
   const parsedLimit = limitArg ? Number.parseInt(limitArg.slice("--limit=".length), 10) : Number.NaN
   const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : CLAUDE_BACKFILL_BATCH
+  const agentArg = args.find((a) => a.startsWith("--agent="))?.slice("--agent=".length)
+  if (agentArg && !BACKFILL_AGENTS.includes(agentArg)) {
+    console.error(`--agent must be one of: ${BACKFILL_AGENTS.join(", ")}`)
+    process.exitCode = 1
+    return
+  }
+  const agents = agentArg ? [agentArg] : BACKFILL_AGENTS
+  const sinceArg = args.find((a) => a.startsWith("--since-days="))
+  const sinceDays = sinceArg ? Number.parseInt(sinceArg.slice("--since-days=".length), 10) : 0
+  if (sinceArg && !(Number.isFinite(sinceDays) && sinceDays > 0)) {
+    console.error("--since-days must be a whole number of days, 1 or more")
+    process.exitCode = 1
+    return
+  }
+  const since = sinceDays ? Date.now() - sinceDays * DAY_MS : 0
 
   if (disabledByEnv()) {
     console.error("BONEZ_SESSION_SYNC=0 is set — unset it before running a backfill.")
@@ -1948,20 +3087,26 @@ async function cmdBackfill(rest) {
   }
   const cfg = loadConfig()
   if (!cfg || !cfg.enabled || !hasCredential(cfg)) {
-    console.error("Session capture is not installed or is disabled. Run `login` (or `install`) first.")
+    console.error("Session capture is not on. Run `on` (or `login --global`) first.")
     process.exitCode = 1
     return
   }
 
-  const targets = findClaudeBackfillTargets(loadState())
+  // One list across every harness, newest first, so a run sends the most recent work wherever it ran.
+  const names = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" }
+  const { perAgent, targets } = allBackfillTargets(agents, loadState(), since)
+  const unreadable = agents.includes("codex") ? unreadableCodexRollouts() : 0
+  if (unreadable) console.log(zstdNotice(unreadable))
   if (!targets.length) {
-    console.log("Nothing to backfill — every Claude Code transcript on this machine is already current.")
+    console.log("Nothing to backfill: every session on this machine is already uploaded at its current content.")
     return
   }
 
   const batch = targets.slice(0, limit)
-  console.log(`Claude Code transcripts not yet uploaded at their current content: ${targets.length}`)
-  console.log(`This run would upload ${batch.length} of them (newest first).`)
+  console.log(`Sessions not yet uploaded at their current content: ${targets.length}`)
+  for (const { agent, targets: ts } of perAgent) if (ts.length) console.log(`  ${names[agent]}: ${ts.length}`)
+  console.log(`This run ${dryRun ? "would upload" : "uploads"} ${batch.length} of them (newest first):`)
+  for (const t of batch) console.log(`  ${new Date(t.mtime).toISOString().slice(0, 16).replace("T", " ")}  ${names[t.agent].padEnd(11)} ${t.sessionId}`)
   if (targets.length > batch.length) {
     console.log(`Re-run to continue; each run picks up where the last one stopped.`)
   }
@@ -1979,9 +3124,12 @@ async function cmdBackfill(rest) {
       // Sequential and one-at-a-time on purpose: every upload writes sync-state, so an
       // interrupt (Ctrl-C, a dropped network) leaves everything already done recorded as done
       // and the rest simply not started. That is what makes re-running safe.
-      await uploadOne({ agent: "claude", cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
-      uploaded++
-      console.log("ok")
+      if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) {
+        uploaded++
+        console.log("ok")
+      } else {
+        console.log("skipped (see the log)")
+      }
     } catch (err) {
       // One unreadable or rejected transcript must not end the sweep — the whole value here is
       // draining a backlog unattended. sync.log carries the detail.
@@ -2061,6 +3209,8 @@ function cmdStatus() {
     `  last successful upload: ${lastOk ? when(lastOk) : "never"}`,
     `  log:      ${logFilePath()}`,
   )
+  const unreadable = unreadableCodexRollouts()
+  if (unreadable) lines.push(`  ${zstdNotice(unreadable)}`)
   console.log(lines.join("\n"))
 }
 
@@ -2107,6 +3257,60 @@ async function main() {
       // it either way, but exiting promptly is still the tidier default.
       process.exit(0)
       break
+    case "_optin":
+      try {
+        await cmdOptinWorker(rest[0])
+      } catch {
+        /* logged inside; a detached worker has nobody to tell */
+      }
+      process.exit(0)
+      break
+    case "decline":
+      cmdDecline()
+      break
+    case "on":
+      await cmdOn()
+      break
+    // install.sh (the application repository, mcp_install_assets) finds out what this plugin can do by grepping this file for
+    // `case "connect":` and `case "install-ui":`. Keep those two lines exactly as they are (tests pin them).
+    case "connect":
+      try {
+        await cmdConnect(rest)
+      } catch (err) {
+        if (rest.includes("--quiet")) await log(`connect: ${err instanceof Error ? err.message : String(err)}`)
+        else {
+          const why = `Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`
+          const { activeView } = await import("./lib/connect-tui.mjs")
+          if (activeView()) activeView().fail(why)
+          else console.error(why)
+        }
+        process.exitCode = 1
+      }
+      // An idle keep-alive socket would hold the process open for seconds after the last line.
+      process.exit(process.exitCode ?? 0)
+      break
+    case "install-ui":
+      try {
+        await cmdInstallUi()
+      } catch (err) {
+        const { activeView } = await import("./lib/connect-tui.mjs")
+        const why = `Could not finish the Bonez setup: ${err instanceof Error ? err.message : String(err)}`
+        if (activeView()) activeView().fail(why)
+        else console.error(why)
+        process.exitCode = 1
+      }
+      process.exit(process.exitCode ?? 0)
+      break
+    case "_connect-wait":
+    case "_connect-backfill":
+      try {
+        if (cmd === "_connect-wait") await cmdConnectWaitWorker(rest[0])
+        else await cmdConnectBackfillWorker()
+      } catch (err) {
+        await log(`connect: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      process.exit(0)
+      break
     case "_upload":
       try {
         await cmdUpload(rest[0], rest[1], rest[2])
@@ -2145,9 +3349,17 @@ async function main() {
       await cmdBackfill(rest)
       return
     default:
-      console.log("bonez-session-sync — capture Claude Code / Codex sessions into bonez")
+      console.log("bonez-session-sync — capture Claude Code, Codex and Cursor sessions into bonez")
       console.log("")
       console.log("usage:")
+      console.log("  bonez-session-sync.mjs connect [--opener <tool>] [--no-open] [--detach] [--pair CODE.SECRET]")
+      console.log("                                                                  set up Bonez in the browser")
+      console.log("  bonez-session-sync.mjs connect --demo [--joining] [--until=adding|tools|waiting|signin|backfill|done]")
+      console.log("                                                                  preview the installer's screen")
+      console.log("  bonez-session-sync.mjs install-ui                               the installer's screen: install.sh's events on stdin,")
+      console.log("                                                                  then `connect` on the same screen")
+      console.log("  bonez-session-sync.mjs on                                       one-click sign-in link, every repo")
+      console.log("  bonez-session-sync.mjs decline                                  off, and never ask again")
       console.log("  bonez-session-sync.mjs login [--repo <path>]... [--global]     browser sign-in")
       console.log("  bonez-session-sync.mjs logout")
       console.log("  bonez-session-sync.mjs install <bnz_...key> [--repo <path>]... [--global]")
@@ -2155,11 +3367,9 @@ async function main() {
       console.log("  bonez-session-sync.mjs status")
       console.log("  bonez-session-sync.mjs disable")
       console.log("  bonez-session-sync.mjs enable")
-      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N]")
-      console.log("                                                                  upload past")
-      console.log("                                                                  Claude Code")
-      console.log("                                                                  history")
-      process.exitCode = cmd ? 1 : 0
+      console.log("  bonez-session-sync.mjs backfill [--dry-run] [--limit=N] [--agent=claude|codex|cursor] [--since-days=N]")
+      console.log("                                                                  upload past sessions")
+      process.exitCode = !cmd || ["--help", "-h", "help"].includes(cmd) ? 0 : 1
   }
 }
 
@@ -2199,6 +3409,9 @@ export {
   dataDir,
   migrateLegacyData,
   findCodexCatchupTarget,
+  codexRollouts,
+  normalizeCodexLine,
+  parseCodexRollout,
   findCursorCatchupTargets,
   findClaudeCatchupTargets,
   findClaudeBackfillTargets,
@@ -2206,6 +3419,8 @@ export {
   cursorProjectSlug,
   claudeProjectSlug,
   cmdBackfill,
+  detectTools,
+  safeBrowserUrl,
   gatewayBaseUrl,
   recordUpload,
   withStateLock,

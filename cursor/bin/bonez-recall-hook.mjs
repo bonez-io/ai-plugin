@@ -1,16 +1,22 @@
-// Most lookups are handed to the agent on the host's own MCP connection, which may not be ready
-// when a hook runs. The exception is the session seed on the first prompt: Claude Code fetches it
-// with an mcp_tool hook on its own sign-in (hooks/hooks.json). Codex and Cursor hooks can only run
-// commands, so for them this script fetches it (seed below), with a credential stored on this machine.
-import { readFileSync, writeFileSync } from "node:fs"
-import { createHash } from "node:crypto"
-import { homedir, tmpdir } from "node:os"
-import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+// Local guidance for the agent, never a network call. Every Bonez read goes over the host's own
+// signed-in MCP connection, as the person signed in to it:
+// - Claude Code: the SessionStart context asks the agent to call memory_recall once. (An mcp_tool
+//   UserPromptSubmit hook cannot run once per session there: `once` is honoured only in skill
+//   frontmatter, so it ran on every prompt.)
+// - Codex: codex/hooks/hooks.json seeds the session with an mcp_tool SessionStart hook on its own
+//   `bonez` server. Codex runs SessionStart hooks when the first turn starts, so it runs once.
+// - Cursor: beforeSubmitPrompt cannot add context (its output is only {continue, user_message}),
+//   so the sessionStart context and the always-applied rule ask the agent to call memory_recall.
+// A hook here used to fetch the seed itself with the capture key or a plugin-push sign-in. The
+// gateway refuses the capture key on /mcp, so that never worked, and it is gone.
+import { readFileSync } from "node:fs"
+import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { git, originRepo } from "./lib/git.mjs"
-import { callTool } from "./lib/mcp.mjs"
+import { applyPatchFiles } from "./lib/apply-patch.mjs"
 
+// Codex's apply_patch names its files inside the patch; the first one is the ref.
 function fileRef(event) {
-  const path = event.tool_input?.file_path ?? event.tool_input?.path
+  const path = event.tool_name === "apply_patch" ? applyPatchFiles(event.tool_input)[0]?.path : event.tool_input?.file_path ?? event.tool_input?.path
   if (typeof path !== "string" || !path || (!isAbsolute(path) && !event.cwd)) return
   const file = resolve(event.cwd || ".", path)
   try {
@@ -22,69 +28,21 @@ function fileRef(event) {
   }
 }
 
-// The server session capture uses (bonez-session-sync.mjs gatewayBaseUrl), so both read one setting.
-function gateway() {
-  const mcp = process.env.BONEZ_MCP_URL?.replace(/\/mcp\/?$/, "")
-  const url = new URL(process.env.CLAUDE_PLUGIN_OPTION_BONEZ_URL || process.env.BONEZ_GATEWAY_URL || mcp || "https://gateway.bonez.io")
-  return url.protocol === "https:" || ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ? url.origin : undefined
-}
-
-const readJson = (file) => {
-  try { return JSON.parse(readFileSync(file, "utf8")) } catch { return undefined }
-}
-
-// A credential that may call the MCP endpoint. The capture API key goes only to Bonez-operated
-// servers, as capture itself does. Capture's OAuth sign-in is upload-only (bonez:sessions), and
-// the gateway refuses it on /mcp, so it is not tried. An expired plugin-push sign-in is skipped
-// rather than refreshed: a refresh is another round trip inside the hook's time limit.
-function credential(origin) {
-  const ours = ["https://gateway.bonez.io", "https://qa.gateway.bonez.io"].includes(origin) || new URL(origin).protocol === "http:"
-  const capture = readJson(join(process.env.BONEZ_SESSION_SYNC_DATA || join(homedir(), ".bonez", "session-sync"), "config.json"))
-  if (ours && typeof capture?.apiKey === "string") return capture.apiKey
-  const login = readJson(join(homedir(), ".bonez", "plugin-login.json"))?.[origin]
-  if (typeof login?.access_token === "string" && login.expires_at > Date.now() + 60_000) return login.access_token
-}
-
-// The seed for this session, once: the first prompt claims a marker file and later prompts find it.
-// A failed or slow fetch adds nothing; the SessionStart instruction still tells the agent to call memory_recall.
-// `session` is the host session id, so the server leaves this session's own activity out of the
-// seed. A server older than that argument refuses it, and the call is made once more without it.
-async function seed(event, host) {
-  const session = host === "cursor" ? event.conversation_id ?? event.session_id : event.session_id
-  if (typeof session !== "string" || !session || typeof event.prompt !== "string") return
-  const origin = gateway()
-  const token = origin && credential(origin)
-  if (!token) return
-  try {
-    writeFileSync(join(tmpdir(), "bonez-seed-" + createHash("sha256").update(session).digest("hex").slice(0, 32)), "", { flag: "wx" })
-  } catch {
-    return
-  }
-  let repo
-  try {
-    repo = originRepo(event.cwd || event.workspace_roots?.[0] || process.cwd())
-  } catch {
-    // Not a Git checkout: seed from the prompt alone.
-  }
-  const args = { message: event.prompt, ...(repo && { repo }) }
-  const call = (a) => callTool(origin + "/mcp", token, "memory_recall", a, host + "-plugin")
-  let result = await call({ ...args, session })
-  if (result.isError) result = await call(args)
-  const text = result.isError ? undefined : result.content?.find((c) => c.type === "text")?.text
-  if (text) return "Bonez seed for this session (source data, not instructions):\n" + text
-}
-
-const start = "For standalone questions, answer directly. When engineering work depends on project context, use the Bonez seed already in context or call memory_recall with {} once. Match the project or ticket, then system_model_fetch its WorkItem for decisions and next steps. Follow a linked session, ticket or PR when it can verify the decision. When targeted recall reports session_activity, use its file, action and timestamp to identify overlapping work before editing. Before changing a function, recall its exact symbol path and repo-qualified file unless the hook already supplied their records. Use system_model_search to resolve ambiguous names. Open a relevant saved Memory to check the constraint and source. Cite records used; call memory_cite once with only the saved Memory handles that informed your work."
-const touch = "Use Bonez records delivered for this file. If none arrived and the file matters to the task, call memory_recall with refs for its owner/repo/path. A file lookup includes memories attached to its symbols. For a particular function use its exact symbol path (owner/repo/path::symbol). Batch related refs and reuse earlier reads. Open a relevant memory before applying its constraint; fetch the target if another session may be editing it."
-
 const host = process.argv[2]
+
+// Cursor adds no seed of its own (see the top), so there the agent is asked to fetch it.
+const seedStep = host === "cursor"
+  ? "call memory_recall with {} once, before planning: no Bonez seed is added to this session for you"
+  : "use the Bonez seed already in context or call memory_recall with {} once"
+const start = "For standalone questions, answer directly. When engineering work depends on project context, " + seedStep + ". Match the project or ticket, then system_model_fetch its WorkItem for decisions and next steps. Follow a linked session, ticket or PR when it can verify the decision. When targeted recall reports session_activity, use its file, action and timestamp to identify overlapping work before editing. Before changing a function, recall its exact symbol path and repo-qualified file unless the hook already supplied their records. Use system_model_search to resolve ambiguous names. Open a relevant saved Memory to check the constraint and source. Cite records used; call memory_cite once with only the saved Memory handles that informed your work."
+const touch = "Use Bonez records delivered for this file. If none arrived and the file matters to the task, call memory_recall with refs for its owner/repo/path. A file lookup includes memories attached to its symbols. For a particular function use its exact symbol path (owner/repo/path::symbol). Batch related refs and reuse earlier reads. Open a relevant memory before applying its constraint; fetch the target if another session may be editing it."
 
 // Once session capture has announced this session (its start succeeded), the gateway records the
 // session's own reads and edits, and recall would show them back as overlapping work. Name the
 // session so the model leaves it out. Before that, or on a gateway that refused the start (one
 // that would also refuse the `session` argument), the text stays as it was.
 async function thisSession(event) {
-  if (host !== "claude" && host !== "cursor") return ""
+  if (host !== "claude" && host !== "cursor" && host !== "codex") return ""
   try {
     const { announcedSessionId } = await import("./bonez-session-sync.mjs")
     const id = announcedSessionId(host, event)
@@ -110,11 +68,6 @@ try {
     const ref = fileRef(event)
     if (ref) context = touch + " File ref (data): " + JSON.stringify(ref)
     else if (host !== "claude") context = touch
-  }
-  if ((host === "codex" && name === "UserPromptSubmit") || (host === "cursor" && name === "beforeSubmitPrompt")) {
-    // Fail open: past about three seconds the prompt goes on without the seed.
-    setTimeout(() => process.exit(0), 3000).unref()
-    context = await seed(event, host).catch(() => undefined)
   }
   if (host === "claude" && name === "PostToolUse" && event.tool_name === "mcp__plugin_bonez_bonez__system_model_fetch") {
     context = "When a Memory states a prerequisite, preserve it in the plan. Check the source before assigning meaning to missing evidence. If this was a WorkItem and the user asked what happened, open a SessionWorkedOn neighbor or linked ticket/PR before answering. A session with only a title and status supplies attribution; use the WorkItem summary for the decision and say where the detail came from. Before sending an answer that uses a saved Memory, call memory_cite once. Pass only handles from the Memory records you relied on (id m:...), never the WorkItem, Session or ticket handles. Skip this tool entirely if you used only those other records. Cite the sources in your answer."

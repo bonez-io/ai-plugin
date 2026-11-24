@@ -1,7 +1,7 @@
 {
   "name": "bonez",
   "displayName": "Bonez",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Bring your organization's System Model into Cursor — search across code, decisions, tickets, PRs, docs, and people; code navigation (callers, blast radius, tests-for); standing org rules and durable memories, served over the bonez MCP.",
   "author": {
     "name": "Bonez",
