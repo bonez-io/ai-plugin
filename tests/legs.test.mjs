@@ -46,8 +46,8 @@ const LEGS = {
     others: [/Cursor/, /Claude Code/, /(^|[\s`(])\/bonez-[a-z]/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/, /\/prompts:/, /\$ARGUMENTS/],
   },
 }
-// The tools every leg ships, as bin/ paths (the push tool's helpers included: net, sign-in, MCP call).
-const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs", "lib/net.mjs", "lib/signin.mjs", "lib/mcp.mjs"]
+// The tools every leg ships, as bin/ paths (the push tool's helpers included: net, sign-in, its client id, MCP call).
+const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs", "lib/net.mjs", "lib/signin.mjs", "lib/client-id.mjs", "lib/mcp.mjs"]
 
 const roots = []
 process.on("exit", () => roots.forEach((d) => rmSync(d, { recursive: true, force: true })))

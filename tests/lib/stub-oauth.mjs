@@ -17,8 +17,13 @@ export function startStubOAuth({
   refreshTokenOnLogin = "rt-1",
   rotateRefreshToken = null,
   denyWith = null,
+  // What /auth/config names as the Bonez CLI client (auth0.cli_client_id), as a server whose
+  // sign-in uses a different Auth0 tenant does; unset, it names none, as a gateway from before that field.
+  cliClientId = undefined,
+  // The auth0.domain it says; by default this origin's host, the authorization server above.
+  authDomain = undefined,
 } = {}) {
-  const calls = { device: [], token: [], prm: 0, oidc: 0 }
+  const calls = { device: [], token: [], prm: 0, oidc: 0, authConfig: 0 }
   let polls = 0
   let issued = 0
 
@@ -42,6 +47,13 @@ export function startStubOAuth({
           authorization_servers: [`${origin}/`],
           scopes_supported: ["bonez:read", "bonez:memory", "bonez:write", "bonez:sessions"],
         })
+      }
+
+      if (path === "/auth/config") {
+        calls.authConfig += 1
+        const auth0 = { domain: authDomain ?? new URL(origin).host, client_id: "web-app-client", audience: origin }
+        if (cliClientId !== undefined) auth0.cli_client_id = cliClientId
+        return json(res, 200, { mode: "auth0", auth0 })
       }
 
       if (path === "/.well-known/openid-configuration") {

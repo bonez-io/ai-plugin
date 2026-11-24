@@ -150,6 +150,9 @@ export function vetUpload(files, { claimedSha256, claimedName, builtIn = [] } = 
 //   interval       the device flow's polling interval in seconds (default 0.05, so a test does not wait)
 //   noPublish      an older server: bonez.plugin.publish.v1 is an unknown operation
 //   echoToken      /mcp refuses with a body that repeats the bearer back (a proxy that reflects headers)
+//   cliClientId    /auth/config names this Bonez CLI client (auth0.cli_client_id), as a server whose sign-in uses a
+//                  different Auth0 tenant does; unset, it names none, as a gateway from before that field
+//   authDomain     the auth0.domain /auth/config says (default: this server's own host, the authorization server)
 export function startFakePluginServer({ key, computers = 2, state = "ready", builtIn = [], oauth } = {}) {
   const requests = [] // what arrived, in order: { method, url, auth, paths, claimed, recomputed, outcome, rpc, tool, session }
   const held = new Map() // name -> [{ version, sha256, size, active }]
@@ -258,6 +261,11 @@ export function startFakePluginServer({ key, computers = 2, state = "ready", bui
     const meta = { issuer: `${origin}/`, device_authorization_endpoint: `${origin}/oauth/device/code`, token_endpoint: `${origin}/oauth/token` }
     if (path === "/.well-known/oauth-protected-resource/mcp") {
       return reply(res, 200, { resource: `${origin}/mcp`, authorization_servers: [`${origin}/`], scopes_supported: ["bonez:read", "bonez:write"] })
+    }
+    if (path === "/auth/config" && req.method === "GET") {
+      const auth0 = { domain: idp.opts.authDomain ?? new URL(origin).host, client_id: "web-app-client", audience: origin }
+      if (idp.opts.cliClientId !== undefined) auth0.cli_client_id = idp.opts.cliClientId
+      return reply(res, 200, { mode: "auth0", auth0 })
     }
     if (path === "/.well-known/oauth-authorization-server" || path === "/.well-known/openid-configuration") {
       return path.endsWith(idp.opts.metadataAt ?? "oauth-authorization-server") ? reply(res, 200, meta) : reply(res, 404, { error: "not_found" })

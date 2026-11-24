@@ -22,6 +22,9 @@ const FORBIDDEN = [/\bhooks?\b/i, /\bgate\b/i, /bonez-plugin/, /CLAUDE_PLUGIN_RO
 
 fs.rmSync(out, { recursive: true, force: true });
 write(".cursor-plugin/plugin.json", JSON.stringify({ ...manifest, logo: "assets/logo.svg" }, null, 2) + "\n");
+// The URL and the OAuth client stay those of Bonez's hosted service: the Marketplace copy cannot ask a gateway (Cursor expands no
+// variables, and no install script rewrites it), and people on another server install from its install page, which
+// copies cursor/ and swaps in that server's client (README: Which sign-in client).
 mcp.mcpServers.bonez.headers["x-bonez-mcp-consumer"] = "cursor-directory-plugin";
 write("mcp.json", JSON.stringify(mcp, null, 2) + "\n");
 
