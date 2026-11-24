@@ -92,7 +92,7 @@ update signal for a tool that cannot update itself.
 ### What is new in 0.10.9
 
 - **The first prompt brings its context.** The Bonez seed (your memories, work in flight, what is relevant to this repository and prompt) is added on a session's first prompt, and it leaves the session's own activity out (1SI-3585).
-- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only (1SI-3763).
+- **Teammates see a session while it runs.** With session capture on and the repository in scope, Claude Code, Codex and Cursor tell Bonez the session started and which repository files it reads and edits, by repository-relative path only (1SI-3763).
 - **Capture says when it is off.** `status` gives the same answer everywhere and shows the last upload attempt and success; a failed upload logs its cause; Claude Code shows one line a day when capture is set up but not uploading (1SI-3775).
 - **Catch-up sends current work first.** Sub-agent transcripts are never uploaded as sessions, the catch-up and `backfill` go newest first, and a transcript written in the last 10 minutes waits until its session is quiet (1SI-3784).
 
@@ -608,13 +608,15 @@ location outright.
   `CURSOR_TRANSCRIPT_PATH` and then to a walk of `~/.cursor/projects/*/agent-transcripts/`, but
   if Cursor has written nothing there is nothing to capture and the hook is a silent no-op.
 
-**Live sessions (Claude Code and Cursor).** While capture is on, and only for a session whose
+**Live sessions (Claude Code, Codex and Cursor).** While capture is on, and only for a session whose
 repository is inside your capture scope, the plugin also tells Bonez that the session is running,
 so teammates can see "working here now, edited `src/x.py`". It sends:
 
 - when the session starts: the session's id, the repository's name as `owner/name` (from the Git
-  origin), and which tool it is (`claude-code` or `cursor`);
-- after a Read, Edit or Write: whether the file was read or changed, its path **inside the
+  origin), and which tool it is (`claude-code`, `codex` or `cursor`). A Codex session's id is its
+  rollout file's name (`rollout-<time>-<id>`), the id its transcript upload is filed under;
+- after a Read, Edit or Write (in Codex, an `apply_patch`: each file on its `*** Add File:` and
+  `*** Update File:` lines): whether the file was read or changed, its path **inside the
   repository** (`owner/name/src/x.py`), and the time.
 
 Nothing else: no file content, no prompt, no command line, no title, no path on your laptop. A
@@ -629,8 +631,7 @@ the plugin gives the model name the session's id and ask it to pass it as `sessi
 `memory_recall`, so the session's own reads and edits are not shown back to it as someone else's
 work; before that, or when the server refused, the hints are unchanged. A session's local
 bookkeeping (under `presence/` beside the credential) is removed at its end, and anything older
-than three days is swept at the next start. Codex is not announced: its transcript id is
-not its hook's session id, so the announcement would never meet its own upload.
+than three days is swept at the next start.
 
 **Codex leg:** the plugin bundles SessionStart, PostToolUse and SessionEnd hooks. Codex skips a plugin's hooks until you trust them: open `/hooks` (CLI) or **Review hooks** (app) once after installing or updating. Remove any manually copied Bonez capture entries from older installs to avoid duplicate triggers. Upload still requires capture to be on (the offer's link, `on`, or `login`).
 

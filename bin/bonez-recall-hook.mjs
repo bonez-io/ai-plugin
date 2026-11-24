@@ -9,9 +9,11 @@ import { homedir, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { git, originRepo } from "./lib/git.mjs"
 import { callTool } from "./lib/mcp.mjs"
+import { applyPatchFiles } from "./lib/apply-patch.mjs"
 
+// Codex's apply_patch names its files inside the patch; the first one is the ref.
 function fileRef(event) {
-  const path = event.tool_input?.file_path ?? event.tool_input?.path
+  const path = event.tool_name === "apply_patch" ? applyPatchFiles(event.tool_input)[0]?.path : event.tool_input?.file_path ?? event.tool_input?.path
   if (typeof path !== "string" || !path || (!isAbsolute(path) && !event.cwd)) return
   const file = resolve(event.cwd || ".", path)
   try {
@@ -85,7 +87,7 @@ const host = process.argv[2]
 // session so the model leaves it out. Before that, or on a gateway that refused the start (one
 // that would also refuse the `session` argument), the text stays as it was.
 async function thisSession(event) {
-  if (host !== "claude" && host !== "cursor") return ""
+  if (host !== "claude" && host !== "cursor" && host !== "codex") return ""
   try {
     const { announcedSessionId } = await import("./bonez-session-sync.mjs")
     const id = announcedSessionId(host, event)

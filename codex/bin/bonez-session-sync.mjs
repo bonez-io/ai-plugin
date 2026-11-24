@@ -49,7 +49,7 @@ import {
 } from "node:fs"
 import { appendFile } from "node:fs/promises"
 import { hostname, homedir, platform, tmpdir } from "node:os"
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import zlib, { gzipSync } from "node:zlib"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
@@ -66,6 +66,7 @@ import {
   walkFiles,
 } from "./vendor/agent-import.bundle.mjs"
 import { git, originRepo } from "./lib/git.mjs"
+import { applyPatchFiles } from "./lib/apply-patch.mjs"
 
 const SELF_PATH = fileURLToPath(import.meta.url)
 
@@ -308,7 +309,23 @@ function hasCredential(cfg) {
   return Boolean(cfg?.apiKey || cfg?.oauth?.refreshToken || cfg?.oauth?.accessToken)
 }
 
-const loadState = () => readJsonSafe(statePath(), {})
+// sync-state keys a Codex session by its UUID (1SI-4111). Older plugins keyed an upload by the
+// rollout stem `rollout-<ts>-<uuid>` while backfill and its counts used the UUID, so one session
+// could be listed, counted and sent twice. Those keys are moved to the UUID on read (the newer
+// entry wins when both exist); the next write saves the result.
+const ROLLOUT_KEY_RE = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+function migrateStateKeys(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return {}
+  for (const key of Object.keys(state)) {
+    const uuid = ROLLOUT_KEY_RE.exec(key)?.[1]
+    if (!uuid || (state[key]?.agent && state[key].agent !== "codex")) continue
+    const entry = state[key]
+    delete state[key]
+    if (!state[uuid] || (state[uuid].lastUploadedAt ?? 0) < (entry?.lastUploadedAt ?? 0)) state[uuid] = entry
+  }
+  return state
+}
+const loadState = () => migrateStateKeys(readJsonSafe(statePath(), {}))
 function saveState(state) {
   writeJsonAtomic(statePath(), state, 0o600)
 }
@@ -590,7 +607,7 @@ async function cmdHook(agent, event) {
     }
   }
   // The upload ends the session for teammates; its presence is no longer needed.
-  const id = hostSessionId(agent, payload)
+  const id = liveSessionId(agent, payload)
   if (event === "session-end" && typeof id === "string" && SESSION_ID_RE.test(id)) forgetPresence(id)
 }
 
@@ -896,8 +913,9 @@ function findClaudeBackfillTargets(state, since = 0) {
 }
 
 // A transcript's session id is its file name, except for Codex, whose rollout files are named
-// `rollout-<timestamp>-<session id>.jsonl`: the id is the UUID at the end, the same `session_id`
-// its SessionEnd hook uploads under, so a backfill never sends a session a second time.
+// `rollout-<timestamp>-<session id>.jsonl`: there the plugin's own bookkeeping (sync-state, the
+// backfill list and its counts) uses the UUID at the end, the hooks' `session_id`, so a session
+// is one entry however it was found. The id uploaded to the server stays the stem (uploadOne).
 const transcriptId = (p) => p.split(/[\\/]/).pop()?.replace(/\.jsonl(?:\.zst)?$/, "") ?? p
 const UUID_TAIL_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
 const codexTranscriptId = (p) => transcriptId(p).match(UUID_TAIL_RE)?.[1] ?? transcriptId(p)
@@ -1413,18 +1431,15 @@ async function uploadOne({ agent, cfg, sessionId, transcriptPath, cwd }) {
     return
   }
 
-  // The local dedup key is the CONVERSATION's own sessionId (parseClaudeFile/parseCodexFile's
-  // filename-derived id — for Claude that's the same string as the hook's session_id, since
-  // Claude transcript filenames ARE `<session_id>.jsonl`; for Codex it's the whole
-  // `rollout-<timestamp>-<session_id>` stem, NOT the bare id the SessionEnd hook payload
-  // carries). Keying on the caller-supplied `sessionId` instead would work fine for the normal
-  // SessionEnd path, but the SessionStart catch-up path (findCodexCatchupTarget) has no hook-
-  // provided id for the OLD session to begin with and can only ever derive this same filename
-  // stem — so the two paths would file the same file under two different local keys and never
-  // recognize each other's work as "already synced" (the server-side unit_key, which IS this
-  // conversation.sessionId, would still MERGE-converge correctly either way; this only affects
-  // local bookkeeping, i.e. whether we needlessly re-upload).
-  const dedupKey = conversation.sessionId || sessionId
+  // The local dedup key comes from the CONVERSATION, never the caller, so every path that finds
+  // one file (a hook's id, the catch-up, backfill) files it under one key. For Claude and Cursor
+  // that is the file name, the hook's session id. For Codex it is the UUID at the end of the
+  // rollout stem (1SI-4111): the hooks' `session_id`, and the id backfill lists and counts.
+  //
+  // The Codex conversation still UPLOADS under the whole stem `rollout-<ts>-<uuid>`. The pipeline
+  // keys the Session node on it (`user:<user id>:<sessionId>`, import_activities._session_key),
+  // so a session uploaded before as the stem would come back as a second Session under the UUID.
+  const dedupKey = agent === "codex" ? codexTranscriptId(conversation.sessionId) : conversation.sessionId || sessionId
   const messageCount = conversation.messages.length
   const contentHash = contentHashOf(conversation)
   const state = loadState()
@@ -1534,6 +1549,7 @@ async function cmdUpload(agent, event, payloadFile) {
   }
 
   if (agent === "codex" && event === "session-start") {
+    await announceSession(agent, cfg, payload, typeof payload.cwd === "string" && payload.cwd ? payload.cwd : undefined)
     const target = findCodexCatchupTarget(payload.session_id ?? "")
     if (!target) {
       await log("upload: codex session-start — no other session to catch up")
@@ -1624,8 +1640,8 @@ function workspaceRootFrom(payload) {
 // `owner/name`, the surface, and repository-relative file paths. Never content, a prompt, a
 // command, a title or a laptop path. There is no end call: the transcript upload ends it.
 //
-// Claude Code and Cursor only. Codex's transcript id (the rollout file stem) is not its hook
-// session id, so an announced Codex session would never meet its own upload.
+// Codex too (1SI-4111), under the id its upload is filed under: the rollout stem, not the hook's
+// session_id (liveSessionId). The two must be one id, or the live session never ends.
 //
 // Files under <data>/presence/, per host session id:
 //   <id>.json    written by the start worker: {repo, root} once announced, {refused} after a
@@ -1651,9 +1667,22 @@ function hostSessionId(agent, payload) {
     payload.session_id
 }
 
-// The host session id, when capture's start succeeded for it (the recall hook names it to the model).
+// The id the gateway knows this session by, live and once uploaded: the Session node's key is
+// `user:<user id>:<id>` both ways. For Claude Code and Cursor it is the host's session id. A Codex
+// session uploads under its rollout stem `rollout-<ts>-<uuid>` (uploadOne), so it is announced under
+// that too, read off `transcript_path`, which every Codex hook carries (SessionStart included: Codex
+// writes the rollout before it runs the hook, codex-rs/core session hook_transcript_path). Without a
+// rollout whose name ends in the hook's session_id there is no id, and nothing is announced.
+function liveSessionId(agent, payload) {
+  if (agent !== "codex") return hostSessionId(agent, payload)
+  const uuid = payload?.session_id
+  const stem = typeof payload?.transcript_path === "string" ? transcriptId(payload.transcript_path) : ""
+  return typeof uuid === "string" && UUID_TAIL_RE.test(uuid) && stem.startsWith("rollout-") && stem.endsWith(uuid) ? stem : undefined
+}
+
+// The live id, when capture's start succeeded for it (the recall hook names it to the model).
 function announcedSessionId(agent, payload) {
-  const id = hostSessionId(agent, payload)
+  const id = liveSessionId(agent, payload)
   if (typeof id !== "string" || !SESSION_ID_RE.test(id)) return undefined
   const announced = readJsonSafe(presencePath(id, "json"), null)
   return announced && !announced.refused ? id : undefined
@@ -1706,8 +1735,8 @@ async function sessionsCall(cfg, gatewayUrl, id, route, body) {
 
 // Runs in the session-start worker, never in the hook.
 async function announceSession(agent, cfg, payload, cwd) {
-  if (agent !== "claude" && agent !== "cursor") return
-  const id = hostSessionId(agent, payload)
+  if (agent !== "claude" && agent !== "cursor" && agent !== "codex") return
+  const id = liveSessionId(agent, payload)
   prunePresence()
   // Every start that is not announced says why, in one line.
   const skip = (why) => log(`presence: start session=${typeof id === "string" ? id.slice(0, 128) : "?"} agent=${agent} not announced — ${why}`)
@@ -1743,27 +1772,45 @@ async function announceSession(agent, cfg, payload, cwd) {
   }
 }
 
+// The files one tool call touched, as { tool, path } with the path as the tool was given it. Codex
+// edits through apply_patch, whose input is a patch naming any number of files.
+function touchedFiles(agent, payload) {
+  if (agent === "codex") return payload.tool_name === "apply_patch" ? applyPatchFiles(payload.tool_input) : []
+  const tool = PRESENCE_TOOLS[payload.tool_name]
+  const path = payload.tool_input?.file_path ?? payload.tool_input?.path
+  return tool && typeof path === "string" && path ? [{ tool, path }] : []
+}
+
 // The tool hook's whole job: local reads, one append, at most one spawn. No Git, no network.
 function recordTouch(agent, payload) {
-  if (agent !== "claude" && agent !== "cursor") return
-  const tool = PRESENCE_TOOLS[payload.tool_name]
-  const id = hostSessionId(agent, payload)
-  if (!tool || typeof id !== "string" || !SESSION_ID_RE.test(id)) return
+  if (agent !== "claude" && agent !== "cursor" && agent !== "codex") return
+  const touched = touchedFiles(agent, payload)
+  const id = liveSessionId(agent, payload)
+  if (!touched.length || typeof id !== "string" || !SESSION_ID_RE.test(id)) return
   const announced = readJsonSafe(presencePath(id, "json"), null)
   if (typeof announced?.repo !== "string" || typeof announced.root !== "string") return
-  const given = payload.tool_input?.file_path ?? payload.tool_input?.path
   const base = (typeof payload.cwd === "string" && payload.cwd) || workspaceRootFrom(payload)
-  if (typeof given !== "string" || !given || (!isAbsolute(given) && !base)) return
-  let file = resolve(base || "", given)
-  try {
-    file = realpathSync.native(file)
-  } catch {
-    /* a file deleted since keeps the path it was given */
+  const at = new Date().toISOString()
+  let lines = ""
+  for (const { tool, path: given } of touched) {
+    if (!isAbsolute(given) && !base) continue
+    let file = resolve(base || "", given)
+    try {
+      file = realpathSync.native(file)
+    } catch {
+      // A file deleted since keeps its name, in its folder's real path (the root is a real path too).
+      try {
+        file = join(realpathSync.native(dirname(file)), basename(file))
+      } catch {
+        /* its folder is gone too: the path as given */
+      }
+    }
+    const rel = relative(announced.root, file)
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || /[\x00-\x1f\x7f]/.test(rel)) continue
+    lines += `${JSON.stringify({ tool, args: { path: `${announced.repo}/${rel.split(sep).join("/")}` }, at })}\n`
   }
-  const rel = relative(announced.root, file)
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || /[\x00-\x1f\x7f]/.test(rel)) return
-  const path = `${announced.repo}/${rel.split(sep).join("/")}`
-  appendFileSync(presencePath(id, "ndjson"), `${JSON.stringify({ tool, args: { path }, at: new Date().toISOString() })}\n`, { mode: 0o600 })
+  if (!lines) return
+  appendFileSync(presencePath(id, "ndjson"), lines, { mode: 0o600 })
   if (takePresenceLock(id)) spawnWorker(["_presence", id])
 }
 
@@ -3042,9 +3089,12 @@ async function cmdBackfill(rest) {
       // Sequential and one-at-a-time on purpose: every upload writes sync-state, so an
       // interrupt (Ctrl-C, a dropped network) leaves everything already done recorded as done
       // and the rest simply not started. That is what makes re-running safe.
-      await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })
-      uploaded++
-      console.log("ok")
+      if (await uploadOne({ agent: t.agent, cfg, sessionId: t.sessionId, transcriptPath: t.transcriptPath })) {
+        uploaded++
+        console.log("ok")
+      } else {
+        console.log("skipped (see the log)")
+      }
     } catch (err) {
       // One unreadable or rejected transcript must not end the sweep — the whole value here is
       // draining a backlog unattended. sync.log carries the detail.

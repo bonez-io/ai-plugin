@@ -2131,9 +2131,61 @@ describe("live session: start once, then repository-relative reads and edits", (
     await waitFor(() => existsSync(join(dataDir, "presence", "live-recall-1.json")))
     const note = ' This session\'s id is "live-recall-1". Pass "session": "live-recall-1" to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.'
     assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => t + note))
-    // Codex is never announced, so its text never changes.
+    // A Codex session is known by its rollout stem; a payload with no rollout names no session.
     const codex = { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }
     assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
+  })
+
+  test("codex: announced under its rollout stem, the id its upload is filed under; apply_patch touches the files it names (1SI-4111)", async () => {
+    const { repo, outside } = makeRepo()
+    const dataDir = freshDir("live-codex")
+    await install(dataDir, ["--global"])
+    const home = freshDir("live-codex-home")
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a70"
+    const id = `rollout-2026-11-24T09-00-00-${uuid}`
+    const rollout = join(home, ".codex", "sessions", "2026", "11", "24", `${id}.jsonl`)
+    mkdirSync(dirname(rollout), { recursive: true })
+    cpSync(join(FIXTURES, "codex-rollout-v2.jsonl"), rollout)
+    const env = { CLAUDE_PLUGIN_DATA: dataDir, BONEZ_GATEWAY_URL: gateway.url, HOME: home, USERPROFILE: home, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const codexHook = (event, payload) =>
+      runCli(["hook", "codex", event], { env, input: JSON.stringify({ session_id: uuid, transcript_path: rollout, cwd: repo, ...payload }) })
+
+    await codexHook("session-start", { hook_event_name: "SessionStart", source: "startup" })
+    await started(dataDir, "codex")
+    assert.deepEqual(forId("start", id).map((c) => c.body), [{ surface: "codex", repo: "acme/api" }])
+    assert.equal(forId("start", uuid).length, 0, "never under the bare UUID, which no upload uses")
+
+    const patch = [
+      "*** Begin Patch", "*** Update File: src/a.py", "@@", "-a = 1", "+a = 2", "*** Add File: src/c.py", "+c = 1",
+      "*** Delete File: src/b.py", `*** Update File: ${outside}`, "@@", "-private", "+x", "*** End Patch", "",
+    ].join("\n")
+    const res = await codexHook("tool-use", { hook_event_name: "PostToolUse", tool_name: "apply_patch", tool_input: { command: patch } })
+    assert.equal(res.stdout, "")
+    assert.ok(res.ms < 1000, `hook wall time was ${res.ms.toFixed(1)}ms`)
+    await waitFor(() => forId("events", id).length)
+    await drained(dataDir, id)
+    assert.deepEqual(forId("events", id).flatMap((c) => c.body.events).map((e) => [e.tool, e.args.path]),
+      [["edit", "acme/api/src/a.py"], ["write", "acme/api/src/c.py"]])
+
+    // The recall hook gives the patch's first file as the ref, and names the session by the same id.
+    const out = spawnSync(process.execPath, [join(REPO_ROOT, "bin", "bonez-recall-hook.mjs"), "codex"], {
+      encoding: "utf8", env: { ...process.env, HOME: SANDBOX_HOME, USERPROFILE: SANDBOX_HOME, BONEZ_SESSION_SYNC_DATA: dataDir },
+      input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: uuid, transcript_path: rollout, cwd: repo, tool_name: "apply_patch", tool_input: { command: patch } }),
+    })
+    const context = JSON.parse(out.stdout).hookSpecificOutput.additionalContext
+    assert.match(context, /File ref \(data\): "acme\/api\/src\/a\.py"/)
+    assert.ok(context.includes(`Pass "session": "${id}" to every memory_recall call.`), context)
+
+    // The end uploads under that same id, forgets the presence, and sync-state keys it by the UUID.
+    const puts = gateway.calls.put.length
+    await codexHook("session-end", { hook_event_name: "SessionEnd", reason: "other" })
+    assert.ok(!existsSync(join(dataDir, "presence", `${id}.json`)))
+    await waitFor(() => gateway.calls.put.length > puts)
+    const [, conversation] = ndjsonLinesFromGzip(gateway.calls.put.at(-1).body)
+    assert.equal(conversation.sessionId, id)
+    const state = () => (existsSync(join(dataDir, "sync-state.json")) ? JSON.parse(readFileSync(join(dataDir, "sync-state.json"), "utf8")) : {})
+    await waitFor(() => state()[uuid])
+    assert.deepEqual(Object.keys(state()), [uuid])
   })
 
   test("a 404 or 409 on events refuses the session: one failed call, not one per burst", async () => {
@@ -2732,6 +2784,50 @@ describe("backfill covers Claude Code, Codex and Cursor (1SI-4098)", () => {
     const recent = await runCli(["backfill", "--dry-run", "--since-days=2"], { env })
     assert.match(recent.stdout, /Sessions not yet uploaded at their current content: 1\n {2}Cursor: 1/)
     assert.equal((await runCli(["backfill", "--since-days=0"], { env })).status, 1)
+  })
+
+  // Uploads used to key a Codex session by its rollout stem while backfill used the UUID, so a session sent once
+  // was listed, counted and sent again (1SI-4111).
+  test("a Codex session is one sync-state entry, keyed by its UUID; an older plugin's stem key is moved on read", async () => {
+    const home = freshDir("backfill-codex-id")
+    const dataDir = join(home, ".bonez", "session-sync")
+    mkdirSync(dataDir, { recursive: true })
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({ enabled: true, scope: "global", repos: [], apiKey: TEST_KEY }))
+    const uuid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a71"
+    const stem = `rollout-2026-11-20T10-00-00-${uuid}`
+    const rollout = join(home, ".codex", "sessions", "2026", "11", "20", `${stem}.jsonl`)
+    mkdirSync(dirname(rollout), { recursive: true })
+    cpSync(join(FIXTURES, "codex-rollout.jsonl"), rollout)
+    const t = new Date(Date.now() - 2 * 86_400_000)
+    utimesSync(rollout, t, t)
+    const env = { HOME: home, USERPROFILE: home, CLAUDE_PLUGIN_DATA: "", BONEZ_GATEWAY_URL: gateway.url, BONEZ_SESSION_SYNC_DEBOUNCE_MS: "0" }
+    const statePath = join(dataDir, "sync-state.json")
+
+    const sent = await runCli(["backfill", "--agent=codex"], { env })
+    assert.ok(sent.stdout.includes(`[1/1] ${uuid} … ok\n\nDone: 1/1 uploaded`), sent.stdout)
+    const entry = JSON.parse(readFileSync(statePath, "utf8"))[uuid]
+    assert.ok(entry?.contentHash)
+
+    // What an older plugin wrote: the same upload under the stem, next to another tool's entry.
+    writeFileSync(statePath, JSON.stringify({ [stem]: entry, "claude-1": { agent: "claude", lastUploadedAt: 1 } }))
+    assert.match((await runCli(["backfill", "--dry-run", "--agent=codex"], { env })).stdout, /Nothing to backfill/)
+    assert.match((await runCli(["status"], { env })).stdout, /sessions synced: 2\n/)
+    // The same session from its hook is unchanged, so nothing is sent, and the stem key is gone for good.
+    const puts = gateway.calls.put.length
+    const payloadFile = join(home, "payload.json")
+    writeFileSync(payloadFile, JSON.stringify({ session_id: uuid, transcript_path: rollout, cwd: "/tmp/x" }))
+    assert.equal((await runCli(["_upload", "codex", "session-end", payloadFile], { env })).status, 0)
+    assert.equal(gateway.calls.put.length, puts)
+    assert.match(readFileSync(join(dataDir, "sync.log"), "utf8"), new RegExp(`session=${uuid} agent=codex skipped — unchanged since last upload`))
+    // A backfill that sends nothing says so, rather than counting it as uploaded.
+    utimesSync(rollout, new Date(), new Date())
+    const again = await runCli(["backfill", "--agent=codex"], { env })
+    assert.match(again.stdout, /skipped \(see the log\)\n\nDone: 0\/1 uploaded/)
+    // The next write saves the moved key: one entry for the session.
+    writeFileSync(rollout, `${readFileSync(rollout, "utf8")}{"timestamp":"2026-11-20T12:00:00.000Z","payload":{"role":"user","content":"One more thing."}}\n`)
+    assert.ok((await runCli(["backfill", "--agent=codex"], { env })).stdout.includes("Done: 1/1 uploaded"))
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(statePath, "utf8"))).sort(), ["claude-1", uuid].sort())
+    rmSync(home, { recursive: true, force: true })
   })
 })
 
