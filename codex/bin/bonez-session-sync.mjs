@@ -25,8 +25,7 @@
 // `install` / `status` / `enable` / `disable` are the human-facing subcommands — those DO
 // print, since a person typed the command and is waiting on the answer.
 //
-// Vendors @bonez/agent-import's prebuilt bundle verbatim from bonez-io/bonez-core
-// (libs/agent-import/bundle/agent-import.bundle.mjs, commit 7dbcbb44e) at
+// Vendors @bonez/agent-import's prebuilt bundle verbatim at
 // bin/vendor/agent-import.bundle.mjs — Node builtins only, no npm install needed.
 // Do not hand-edit that file; re-vendor it verbatim when that library's source changes.
 import {
@@ -110,7 +109,7 @@ const CLAUDE_BACKFILL_BATCH = 25
 // PUBLIC by design and safe to ship in a distributed CLI: it is an identifier, not a secret
 // (RFC 8252 §8.5), and it grants nothing on its own — every token still requires the user's
 // own browser sign-in, and the scope it may ask for (`bonez:sessions`) is upload-only.
-// Verified 2026-08-25 against both the prod and qa MCP audiences: POST /oauth/device/code
+// Verified 2026-08-25 against Bonez's hosted MCP audiences: POST /oauth/device/code
 // returns a device_code + user_code rather than "unknown client".
 // Empty would make `login` refuse with a pointer at the key lane instead of failing deep in
 // the flow. BONEZ_OAUTH_CLIENT_ID overrides it for testing against another Auth0 app.
@@ -643,7 +642,7 @@ function findCodexCatchupTarget(currentSessionId) {
 //
 //     Hook step requested: sessionEnd
 //     Found 2 hook(s) to execute for step: sessionEnd
-//     Running script in directory: /Users/shay/.cursor/plugins/local/bonez
+//     Running script in directory: /Users/alex/.cursor/plugins/local/bonez
 //     STDERR: Error: MainThreadShellExec not initialized
 //     ERROR: Error executing hook 2
 //
@@ -833,7 +832,7 @@ async function fetchJson(url, init) {
 
 // Everything about the authorization server is DISCOVERED, never hardcoded: the gateway's
 // RFC 9728 metadata names its AS, and that AS's own OIDC metadata names the two endpoints.
-// So pointing this at qa (BONEZ_GATEWAY_URL) or at a future tenant needs no code change, and
+// So pointing this at another gateway (BONEZ_GATEWAY_URL) or a future tenant needs no code change, and
 // the uploader can never end up talking to an AS the resource server doesn't actually trust.
 async function discoverAuthServer(gatewayUrl) {
   const prm = await fetchJson(`${gatewayUrl}/.well-known/oauth-protected-resource`)
@@ -1038,17 +1037,15 @@ async function completeUpload(gatewayUrl, apiKey, uploadId) {
   return { ok: res.ok, status: res.status }
 }
 
-// Builds the gzipped-NDJSON bundle the desktop importer's own producer writes
-// (packages/desktop/src/main/import/index.ts): one `manifest` line, then one `conversation`
-// line. The pipeline's agent-convos adapter only actually reads the `type` discriminator plus
+// Builds the gzipped-NDJSON bundle the desktop importer's own producer writes: one `manifest`
+// line, then one `conversation` line. The pipeline's agent-convos adapter only actually reads the `type` discriminator plus
 // the per-conversation record's own fields (sessionId/createdAt/updatedAt/workspacePath/
 // sourcePath get camelCase→snake_case normalized; agent/title/repo/messages pass through) — the
-// manifest's OWN fields aren't parsed by the adapter today (verified against
-// bonez-pipeline src/pipeline/adapters/agent_convos.py — `_read_conversations` only branches on
-// `rec.get("type") == "conversation"`). Built to match anyway: it's what a human or a future
+// manifest's OWN fields aren't parsed by the adapter today (it only branches on a record's
+// `type` being "conversation"). Built to match anyway: it's what a human or a future
 // consumer sees browsing the archive, and it costs nothing to get right.
-// The gateway validates this against its own allow-list (control/import_presign.py `_AGENTS`
-// = {"cursor", "claude-code", "codex", "all"}), and the pipeline stores it verbatim on the
+// The gateway validates this against its own allow-list
+// ({"cursor", "claude-code", "codex", "all"}), and the pipeline stores it verbatim on the
 // :Convo node. Only the Claude leg's name differs from our internal short name.
 const WIRE_AGENT = { claude: "claude-code", codex: "codex", cursor: "cursor" }
 function wireAgentFor(agent) {
@@ -1105,7 +1102,7 @@ function shouldSkip(state, sessionId, messageCount, contentHash) {
 // parseClaudeFile — that reads role from `message.role` (absent here; Cursor puts it on the
 // OUTER record), which would silently label every single message "user".
 //
-// Rather than diverge the vendored bundle (it is re-vendored verbatim from harness-ui — see the
+// Rather than diverge the vendored bundle (it is re-vendored verbatim — see the
 // file header), the walk is reimplemented here against the same output contract, and the
 // envelope fields Cursor omits are recovered from the two sources that do have them: the hook
 // payload (workspace root) and the file's own mtime/birthtime (timestamps).
@@ -1452,7 +1449,7 @@ async function cmdUpload(agent, event, payloadFile) {
 //     upload nothing at all;
 //   - server-side, the pipeline's scope routing matches an org scope's repo hints against
 //     `workspace_path` + `repo` and drops anything with "no workspace recorded"
-//     (bonez-pipeline agent_convos.py `_to_unit`) — so a Cursor conversation with an empty
+//     — so a Cursor conversation with an empty
 //     workspacePath would upload cleanly, report OK, and then be silently discarded at ingest.
 //     That is the worst failure shape available here: it looks like it works.
 //
@@ -1475,7 +1472,7 @@ function workspaceRootFrom(payload) {
 //
 // While capture is on and the session's repository is in the capture scope, the gateway is told
 // that the session is running and which of the repository's files it reads and edits, so
-// teammates see it live (1SI-3763). What is sent: the host's session id, the repository as
+// teammates see it live. What is sent: the host's session id, the repository as
 // `owner/name`, the surface, and repository-relative file paths. Never content, a prompt, a
 // command, a title or a laptop path. There is no end call: the transcript upload ends it.
 //

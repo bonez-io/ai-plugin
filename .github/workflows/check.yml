@@ -300,14 +300,12 @@ jobs:
           echo "ok: marketplace entry logo resolves from both roots"
 
           # OAuth is pinned to the Bonez CLI application rather than left to dynamic
-          # registration. DCR is enabled on the tenant, but it creates THIRD-PARTY
-          # clients and that quota is already spent by the two Claude Code and Codex
-          # clients registered earlier (tpc_* in the Auth0 app list) — a third
-          # registration returns 403 "reached the limit of entities of this type",
-          # and Cursor then shows an Authenticate button that does nothing at all.
-          # Pinning a first-party client sidesteps the quota entirely.
+          # registration. DCR creates THIRD-PARTY clients, which an Auth0 tenant caps;
+          # past the cap a registration returns 403 "reached the limit of entities of
+          # this type", and Cursor then shows an Authenticate button that does nothing
+          # at all. Pinning a first-party client avoids the cap entirely.
           jq -e '.mcpServers.bonez.auth.CLIENT_ID | type == "string" and length > 0' cursor/mcp.json >/dev/null \
-            || { echo "::error::cursor/mcp.json needs auth.CLIENT_ID (third-party DCR quota is full)"; exit 1; }
+            || { echo "::error::cursor/mcp.json needs auth.CLIENT_ID (pinned first-party client, not DCR)"; exit 1; }
           # The url must also be literal: Cursor expands neither ${VAR} nor ~, and the
           # Claude leg's .mcp.json uses ${BONEZ_MCP_URL:-...} which would leave no
           # reachable server here at all.
@@ -423,7 +421,7 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Tree hash on the shared vectors, push CLI against a fake gateway, Windows paths
-        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/plugin_signin.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs tests/client_id.test.mjs
+        run: node --test tests/plugin_tree.test.mjs tests/windows_portability.test.mjs tests/package_hash.test.mjs tests/plugin_push.test.mjs tests/plugin_signin.test.mjs tests/fake_plugin_server.test.mjs tests/legs.test.mjs tests/codex_approval.test.mjs tests/client_id.test.mjs tests/public_hygiene.test.mjs
 
       - name: Push smoke test (fake gateway and sign-in on 127.0.0.1)
         run: node tests/lib/push-smoke.mjs

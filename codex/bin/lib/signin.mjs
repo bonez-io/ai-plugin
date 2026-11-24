@@ -105,7 +105,7 @@ const why = ({ status, body, text }) =>
   clean(body?.error ? `${body.error}${body.error_description ? `: ${body.error_description}` : ""}` : `HTTP ${status}: ${text.slice(0, 200).trim() || "(empty body)"}`)
 
 // The server names its authorization server (RFC 9728), which names its two endpoints (RFC 8414, else OIDC).
-// Nothing about either is held here, so a qa or a customer server needs no change.
+// Nothing about either is held here, so another Bonez server needs no change.
 // The client id comes from the server too, when it names one (startLogin).
 async function discover(origin, mcpPath) {
   const prm = await getJson(`${origin}/.well-known/oauth-protected-resource${mcpPath}`)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // bonez-package-hash <folder> — prints the tree hash of a Bonez plugin folder (the sha256 an admin
-// puts in BONEZ_PI_PACKAGES_SHA256). The loader in bonez-core implements this SAME algorithm; the
+// puts in BONEZ_PI_PACKAGES_SHA256). The Bonez server's loader implements this SAME algorithm; the
 // steps are written out in lib/plugin-tree.mjs, which this script and bonez-plugin-push.mjs share.
 //
 // Prints the hash and a newline on stdout, nothing else. Errors go to stderr: exit 1 for a folder

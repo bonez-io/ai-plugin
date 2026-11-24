@@ -561,7 +561,7 @@ describe("standalone capture and memory hooks", () => {
   }
 })
 
-describe("first-prompt seed (1SI-3585)", () => {
+describe("first-prompt seed", () => {
   test("Claude fetches it with an mcp_tool hook on its own sign-in, once, within three seconds", () => {
     const hooks = JSON.parse(read("", "hooks/hooks.json")).hooks
     const seed = hooks.UserPromptSubmit.flatMap((g) => g.hooks).filter((h) => h.type === "mcp_tool")

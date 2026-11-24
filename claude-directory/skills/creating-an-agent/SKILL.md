@@ -22,7 +22,7 @@ Before making one, look for an agent that already does the job: `bonez.agent.lis
 Do not count on the app's tool-permission prompt for `vendor_write`: your own question is the guard. BEFORE you call the create operation, tell the user in plain words:
 
 - the **name**: lowercase letters, digits and hyphens, starting with a letter, at most 59. Never overwritten: a taken name, a retired agent's too, is refused;
-- **what starts it**, in words: "only when someone starts it"; a schedule in words and as cron (`every night at 03:00 UTC`, `0 3 * * *`; the timezone is UTC unless the user names one); or an event ("each time a Linear issue is created with the label `agent-ready`, or is given it later");
+- **what starts it**, in words: "only when someone starts it"; a schedule in words and as cron (`every night at 03:00 UTC`, `0 3 * * *`; the timezone is UTC unless the user names one); or an event ("each time a Linear issue is created with the label `needs-repro`, or is given it later");
 - the **plugins** it will use, by name, if any, its **environment** if it needs one, and whether it may **write memories** (`graph:write`);
 - what the **instructions** will say, in two or three lines (the full text if they ask);
 - the **model** only if the user names one, and what a run costs in words ("one run per night on the org's default models", "one run for each matching ticket"), never a number you cannot know.
