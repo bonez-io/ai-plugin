@@ -1,8 +1,8 @@
-// The installer's terminal view (1SI-4098): the screen install.sh hands over to (`install-ui`), what `connect`
+// The installer's terminal view: the screen install.sh hands over to (`install-ui`), what `connect`
 // shows while it waits for the person in the browser, and the demo that plays it all with fake timing
 // (`connect --demo`).
 //
-// Bonez's look, as in libs/ui/DESIGN.md §2 of bonez-core: ink and paper, sentence case, colour only for
+// Bonez's look, as in libs/ui/DESIGN.md §2 of the application repository: ink and paper, sentence case, colour only for
 // state. Titles are bold, everything secondary is dim, and only the marks are coloured: ✓ green (done),
 // ✗ red (failed), the spinner yellow (working), · and – grey (to do, skipped). Words and the wordmark are
 // never coloured. Everything sits on one left margin and stays inside the terminal's width.
@@ -18,7 +18,7 @@
 
 const ESC = "\x1b["
 
-// The Bonez wordmark, the mark and "bonez" (`Logo` in bonez-core libs/ui/src/components/logo.tsx, viewBox
+// The Bonez wordmark, the mark and "bonez" (`Logo` in the application repository libs/ui/src/components/logo.tsx, viewBox
 // 0 0 154 34), drawn in quadrant blocks by scripts/terminal-mark.mjs from its SVG paths, 4 rows tall (at 3 its
 // letters do not read). Regenerate with that script when the logo changes, and copy the --sh form into install.sh.
 export const WORDMARK = [

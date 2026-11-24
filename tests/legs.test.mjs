@@ -46,8 +46,8 @@ const LEGS = {
     others: [/Cursor/, /Claude Code/, /(^|[\s`(])\/bonez-[a-z]/, /CLAUDE_PLUGIN_ROOT/, /\/bonez:/, /\/prompts:/, /\$ARGUMENTS/],
   },
 }
-// The tools every leg ships, as bin/ paths (the push tool's helpers included: net, sign-in, MCP call).
-const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs", "lib/net.mjs", "lib/signin.mjs", "lib/mcp.mjs"]
+// The tools every leg ships, as bin/ paths (the push tool's helpers included: net, sign-in, its client id, MCP call).
+const TOOLS = ["bonez-package-hash.mjs", "bonez-plugin-push.mjs", "lib/plugin-tree.mjs", "lib/net.mjs", "lib/signin.mjs", "lib/client-id.mjs", "lib/mcp.mjs"]
 
 const roots = []
 process.on("exit", () => roots.forEach((d) => rmSync(d, { recursive: true, force: true })))
@@ -561,7 +561,7 @@ describe("standalone capture and memory hooks", () => {
   }
 })
 
-describe("first-prompt seed (1SI-3585)", () => {
+describe("first-prompt seed", () => {
   test("Claude makes no Bonez call per prompt: the agent recalls once on its own sign-in, as the SessionStart context asks", () => {
     // Claude Code honours `once` only in skill frontmatter, and `if` only on tool events
     // (code.claude.com/docs/en/hooks, "Common fields"), so an mcp_tool UserPromptSubmit hook runs, and blocks,

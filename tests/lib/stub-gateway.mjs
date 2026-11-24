@@ -1,7 +1,6 @@
 // A minimal, dependency-free stand-in for the bonez gateway's import surface
 // (POST /api/import/presign, PUT <presigned url>, POST /api/import/{id}/complete) —
-// used because the real gateway change (1SI-1019) is merged but not yet deployed, and there's
-// no accessible sessions-scoped key to test against (see the PR body for what real E2E needs).
+// used so the tests need no deployed gateway and no sessions-scoped key.
 // Records every call so tests can assert on headers, bodies, and call sequencing/counts.
 import { createServer } from "node:http"
 

@@ -64,7 +64,7 @@ if [ "$EVENT" = recall ]; then
 fi
 
 # stdin (the hook payload JSON) passes straight through. A session start may answer with the
-# capture offer (1SI-4098): one `additional_context` JSON object the .mjs writes only when it
+# capture offer: one `additional_context` JSON object the .mjs writes only when it
 # has something to say, so its stdout passes through on that event. Every other event stays quiet.
 if [ "$EVENT" = session-start ]; then
   "$NODE_BIN" "$SYNC" hook cursor "$EVENT" 2>/dev/null

@@ -2,7 +2,7 @@
 // One copy, so the number the hash tool prints is the number the push tool sends, on every OS.
 //
 // The algorithm is pinned for four other implementations (the gateway, the harness loader, the
-// runner; see libs/wire/contracts/computers/fixtures/plugin-tree.json in bonez-core) and tested
+// runner; tests/fixtures/plugin-tree.json holds their shared vectors) and tested
 // against those vectors in tests/plugin_tree.test.mjs. Do not change it without changing them:
 //
 //   1. Walk the folder recursively; collect every regular file, skipping anything under a `.git/` directory.

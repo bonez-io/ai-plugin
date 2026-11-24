@@ -6,12 +6,10 @@
 // MCP endpoint (POST /mcp: initialize, notifications/initialized, tools/call of `vendor_write` with operation
 // bonez.plugin.publish.v1, which runs the SAME vetUpload as the route). `server.signin` drives the browser's part.
 //
-// `vetUpload` is a line-for-line port of `vet()` and `_check_path()` in bonez-core's
-// services/gateway/src/bonez_gateway/computers/plugins.py, with the same order of checks, the same limits
+// `vetUpload` is a line-for-line port of the Bonez server's upload checks, with the same order of checks, the same limits
 // and the same refusal codes and wording, so a package that passes the CLI's tests here cannot be refused by
-// the real server for a rule this file does not know. Port a change to plugins.py here in the same pull
-// request; tests/fake_plugin_server.test.mjs holds the cases of the real server's own test-suite
-// (services/gateway/tests/computers/test_plugins.py).
+// the real server for a rule this file does not know. Port a change to those checks here in the same pull
+// request; tests/fake_plugin_server.test.mjs holds the cases of the real server's own test-suite.
 //
 // The tree-hash recomputation is deliberately a second, independent implementation: it does not import
 // bin/lib/plugin-tree.mjs.
@@ -21,7 +19,7 @@ import { posix } from "node:path"
 
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex")
 
-// plugins.py: MAX_BYTES, MAX_FILES, MAX_NAME_LEN, MAX_PATH_LEN, NAME, PATH, DIST_EXTENSIONS, ENTRY_EXTENSIONS.
+// The server's limits: MAX_BYTES, MAX_FILES, MAX_NAME_LEN, MAX_PATH_LEN, NAME, PATH, DIST_EXTENSIONS, ENTRY_EXTENSIONS.
 export const LIMITS = { MAX_BYTES: 8 * 1024 * 1024, MAX_FILES: 32, MAX_NAMES: 50, MAX_VERSIONS: 5, MAX_NAME_LEN: 128, MAX_PATH_LEN: 200 }
 const NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/
 const PATH = /^[A-Za-z0-9._/-]+$/
@@ -150,6 +148,9 @@ export function vetUpload(files, { claimedSha256, claimedName, builtIn = [] } = 
 //   interval       the device flow's polling interval in seconds (default 0.05, so a test does not wait)
 //   noPublish      an older server: bonez.plugin.publish.v1 is an unknown operation
 //   echoToken      /mcp refuses with a body that repeats the bearer back (a proxy that reflects headers)
+//   cliClientId    /auth/config names this Bonez CLI client (auth0.cli_client_id), as a server whose sign-in uses a
+//                  different Auth0 tenant does; unset, it names none, as a gateway from before that field
+//   authDomain     the auth0.domain /auth/config says (default: this server's own host, the authorization server)
 export function startFakePluginServer({ key, computers = 2, state = "ready", builtIn = [], oauth } = {}) {
   const requests = [] // what arrived, in order: { method, url, auth, paths, claimed, recomputed, outcome, rpc, tool, session }
   const held = new Map() // name -> [{ version, sha256, size, active }]
@@ -258,6 +259,11 @@ export function startFakePluginServer({ key, computers = 2, state = "ready", bui
     const meta = { issuer: `${origin}/`, device_authorization_endpoint: `${origin}/oauth/device/code`, token_endpoint: `${origin}/oauth/token` }
     if (path === "/.well-known/oauth-protected-resource/mcp") {
       return reply(res, 200, { resource: `${origin}/mcp`, authorization_servers: [`${origin}/`], scopes_supported: ["bonez:read", "bonez:write"] })
+    }
+    if (path === "/auth/config" && req.method === "GET") {
+      const auth0 = { domain: idp.opts.authDomain ?? new URL(origin).host, client_id: "web-app-client", audience: origin }
+      if (idp.opts.cliClientId !== undefined) auth0.cli_client_id = idp.opts.cliClientId
+      return reply(res, 200, { mode: "auth0", auth0 })
     }
     if (path === "/.well-known/oauth-authorization-server" || path === "/.well-known/openid-configuration") {
       return path.endsWith(idp.opts.metadataAt ?? "oauth-authorization-server") ? reply(res, 200, meta) : reply(res, 404, { error: "not_found" })

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Draws the Bonez wordmark (the mark and "bonez") as terminal art, for bin/lib/connect-tui.mjs and the installer
-// (bonez-core services/gateway/src/bonez_gateway/mcp_install_assets/install.sh). Run by hand when the
+// (the application repository services/gateway/src/bonez_gateway/mcp_install_assets/install.sh). Run by hand when the
 // logo changes; nothing runs it at install time.
 //
-//   node scripts/terminal-mark.mjs <bonez-core>/libs/ui/src/components/logo.tsx
+//   node scripts/terminal-mark.mjs <the application repository>/libs/ui/src/components/logo.tsx
 //
 // It takes the SVG paths of `Logo` (viewBox 0 0 154 34) from logo.tsx, fills them on a
 // canvas in headless Chrome (no dependency to install), and maps each terminal cell to a quadrant block

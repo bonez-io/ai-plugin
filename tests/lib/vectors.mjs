@@ -1,5 +1,5 @@
-// The shared tree-hash vectors (tests/fixtures/plugin-tree.json, copied from bonez-core's
-// libs/wire/contracts/computers/fixtures/plugin-tree.json) as bytes and as folders on disk.
+// The shared tree-hash vectors (tests/fixtures/plugin-tree.json, copied from the Bonez server's
+// contract fixture) as bytes and as folders on disk.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"

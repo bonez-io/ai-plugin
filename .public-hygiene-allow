@@ -1,0 +1,22 @@
+# Exceptions to scripts/check-public-hygiene.mjs. This repository is public; every entry says why its text stays.
+# <path> | <rule id> | <exact text, case-insensitive> | <reason>
+
+# Session capture and the recall hook send credentials only to Bonez-operated gateways. This host is one of them;
+# removing it changes which gateways the plugin trusts, which is a behaviour change, not a wording one.
+bin/bonez-session-sync.mjs | internal-host | qa.gateway.bonez.io | Bonez-operated gateway in the capture allow-list (behaviour)
+cursor/bin/bonez-session-sync.mjs | internal-host | qa.gateway.bonez.io | byte copy of bin/bonez-session-sync.mjs
+codex/bin/bonez-session-sync.mjs | internal-host | qa.gateway.bonez.io | byte copy of bin/bonez-session-sync.mjs
+bin/bonez-recall-hook.mjs | internal-host | qa.gateway.bonez.io | Bonez-operated gateway the recall hook may send a key to (behaviour)
+cursor/bin/bonez-recall-hook.mjs | internal-host | qa.gateway.bonez.io | byte copy of bin/bonez-recall-hook.mjs
+codex/bin/bonez-recall-hook.mjs | internal-host | qa.gateway.bonez.io | byte copy of bin/bonez-recall-hook.mjs
+tests/session_sync.test.mjs | internal-host | qa.gateway.bonez.io | tests the capture allow-list above
+README.md | internal-host | qa.gateway.bonez.io | documents the capture allow-list above
+
+# The OpenAI review cases run against a synthetic demo workspace whose organization and seed repository carry this
+# name. The submitted cases must match what the reviewer sees there; renaming means renaming the demo workspace too.
+openai-submission/metadata.json | customer | payzeno | name of the synthetic review workspace used by the submitted cases
+
+# Source-path comments the bundler wrote into the vendored bundle. The file is re-vendored verbatim, never edited.
+bin/vendor/agent-import.bundle.mjs | private-repo | harness-core | bundler source-path comment in a vendored file
+cursor/bin/vendor/agent-import.bundle.mjs | private-repo | harness-core | byte copy of the vendored bundle
+codex/bin/vendor/agent-import.bundle.mjs | private-repo | harness-core | byte copy of the vendored bundle
