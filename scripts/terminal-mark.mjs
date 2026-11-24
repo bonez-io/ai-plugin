@@ -45,7 +45,7 @@ const dir = mkdtempSync(join(tmpdir(), "bonez-mark-"))
 writeFileSync(join(dir, "mark.html"), page)
 const chrome = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 const dom = execFileSync(chrome, ["--headless=new", "--disable-gpu", "--use-mock-keychain", "--password-store=basic", "--dump-dom", `file://${join(dir, "mark.html")}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-const art = JSON.parse(/<pre id="out">(.*)<\/pre>/s.exec(dom)[1].replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"))
+const art = JSON.parse(/<pre id="out">(.*)<\/pre>/s.exec(dom)[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"))
 // At four rows the e's crossbar falls across two subpixels and fills its counter; drawn by hand as one.
 art.wordmark[2] = art.wordmark[2].replace("▐████▌", "▐█▀▀▀▘")
 
