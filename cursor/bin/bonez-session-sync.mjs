@@ -1525,10 +1525,12 @@ export async function captureOpenCode(session, readMessages) {
     return !disabledByEnv() && cfg?.enabled && hasCredential(cfg) && isAbsolute(cwd) &&
       inCaptureScope(cfg, cwd) && captureGatewayAllowed(gatewayBaseUrl()) && !signInMismatch(cfg, gatewayBaseUrl()) && cfg
   }
-  if (!cwd || session.parentID || !session.id || !allowed()) return
+  if (!cwd || session.parentID || session.fork || !session.id || !allowed()) return
   const records = await readMessages()
   const cfg = allowed()
   if (!cfg) return
+  // A moved session may contain history from a directory outside the current opt-in.
+  if (cfg.scope !== "global" && records.some(m => m.type === "location-switched")) return
   const scrubber = new Scrubber()
   const messages = []
   for (const m of records) {

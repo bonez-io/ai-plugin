@@ -22,7 +22,9 @@ test("completed OpenCode turns respect capture scope, redact before upload and s
   await captureOpenCode(session, forbidden)
   configure(true)
   await captureOpenCode({ ...session, parentID: "parent" }, forbidden)
+  await captureOpenCode({ ...session, fork: { sessionID: "original" } }, forbidden)
   await captureOpenCode({ ...session, location: { directory: tmpdir() } }, forbidden)
+  await captureOpenCode(session, () => [{ type: "user", text: "outside the repo" }, { type: "location-switched" }])
   const messages = [
     { type: "system", text: "system-only" },
     { type: "user", text: "password=not-for-upload" },
