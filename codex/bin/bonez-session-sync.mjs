@@ -51,7 +51,7 @@ import { appendFile } from "node:fs/promises"
 import { hostname, homedir, platform, tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import zlib, { gzipSync } from "node:zlib"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
 
@@ -2258,7 +2258,28 @@ function detectTools() {
     }
     ids = CONNECT_TOOL_IDS.filter((id) => found[id])
   }
-  return [...new Set(ids)].map((id) => ({ id, installed: true }))
+  // Codex signs in from the installer and first calls Bonez the next time it starts, so the page cannot see it yet:
+  // it is told Codex holds a sign-in here, or it would ask the person to approve a browser tab that never opened.
+  const codexSigned = ids.includes("codex") && override === undefined && codexSignedIn(gatewayBaseUrl())
+  return [...new Set(ids)].map((id) => ({ id, installed: true, ...(id === "codex" && codexSigned && { signed_in_here: true }) }))
+}
+
+// Whether Codex holds a Bonez sign-in for this server: `codex mcp list` shows OAuth on its bonez row. The ChatGPT
+// app's bundled CLI counts, as it does for the installer. False when it cannot be told.
+function codexSignedIn(base) {
+  const app = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+  const bin = onPath("codex") ? "codex" : process.platform === "darwin" && existsSync(app) ? app : undefined
+  if (!bin) return false
+  try {
+    const out = execFileSync(bin, ["mcp", "list"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
+    const url = `${base.replace(/\/+$/, "")}/mcp`
+    return out.split("\n").some((l) => {
+      const cols = l.trim().split(/\s+/)
+      return cols[0] === "bonez" && cols[1] === url && cols.includes("OAuth")
+    })
+  } catch {
+    return false
+  }
 }
 
 // The version of the plugin this script ships in (any of its three manifests).

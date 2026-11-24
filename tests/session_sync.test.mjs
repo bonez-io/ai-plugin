@@ -2872,6 +2872,26 @@ describe("connect: the setup page in the browser and this machine share a pairin
   }
   const pairUrl = () => `${gw.url}/connect?pair=K7QM-4XPA`
 
+  test("Codex signed in by the installer is reported signed in here, before it ever calls Bonez (lab, 24 Nov)", async () => {
+    const { home, env } = connectEnv()
+    delete env.BONEZ_CONNECT_TOOLS
+    mkdirSync(join(home, ".codex"), { recursive: true })
+    const bin = join(home, "bin")
+    mkdirSync(bin)
+    const list = (url) => `Name   Url   Bearer Token Env Var  Status   Auth\nbonez  ${url}  -  enabled  OAuth\n`
+    const fake = (url) => writeFileSync(join(bin, "codex"), `#!/bin/sh\nprintf '%s' '${list(url)}'\n`, { mode: 0o755 })
+    const tools = async () => {
+      reset({ steps: ["answered"], sessions: { on: false, backfill: false } })
+      await runCli(["connect", "--opener", "installer"], { env: { ...env, PATH: bin } })
+      return gw.calls.pairings[0].body.tools.filter((t) => t.id === "codex")
+    }
+    fake(`${gw.url}/mcp`)
+    assert.deepEqual(await tools(), [{ id: "codex", installed: true, signed_in_here: true }])
+    // Signed in to another Bonez server: not this one.
+    fake("https://gateway.bonez.io/mcp")
+    assert.deepEqual(await tools(), [{ id: "codex", installed: true }])
+  })
+
   test("answer on + backfill: the key is saved and the last 14 days are uploaded", async () => {
     reset({ steps: ["waiting", "claimed", "answered"], sessions: { on: true, backfill: true, key: "bnz_connect_key_1" } })
     const { home, env } = connectEnv()
