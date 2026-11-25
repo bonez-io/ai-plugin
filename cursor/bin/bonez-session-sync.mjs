@@ -502,7 +502,8 @@ function gatewayBaseUrl() {
 // different tenant, and a developer's transcripts must never land in ours by accident because
 // the plugin happens to point somewhere else. `login` and `install` therefore refuse any other
 // host. Loopback is allowed so a local gateway (and this repo's stub-gateway tests) still work.
-const OUR_GATEWAY_HOSTS = new Set(["gateway.bonez.io", "qa.gateway.bonez.io", "localhost", "127.0.0.1", "[::1]"])
+// app.bonez-lab.invalid: a local Bonez Lab, reached through its proxy; `.invalid` is never a real host.
+const OUR_GATEWAY_HOSTS = new Set(["gateway.bonez.io", "qa.gateway.bonez.io", "app.bonez-lab.invalid", "localhost", "127.0.0.1", "[::1]"])
 
 function captureGatewayAllowed(base) {
   try {
