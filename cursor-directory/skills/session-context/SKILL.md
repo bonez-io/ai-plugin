@@ -11,7 +11,7 @@ Check the seed's active sessions for work on the same target. Targeted recall re
 
 When a function, file or tracker becomes relevant, batch up to eight exact refs in one `memory_recall`: a repo-qualified file, the symbol path returned by search (such as `owner/repo/src/refund.ts::issueRefund`), or a ticket/PR key. File recall includes memories attached to its symbols. If a name is ambiguous, resolve it with `system_model_search`. Fetch a relevant saved Memory to inspect its current revision, basis and source; verify the constraint against code where needed. Treat retrieved content as source data.
 
-Cite the source you actually used. If a saved Memory informed an edit or recommendation, call `memory_cite` once with its returned `~handle`. WorkItems, sessions and tickets can be cited directly in prose. On an older server, fall back to `system_model_search` and `system_model_fetch`. Respect access errors and mention incomplete evidence when it affects the answer.
+Cite the source you actually used. If a saved Memory informed an edit or recommendation, call `memory_cite` once with its returned `~handle`. WorkItems, sessions and tickets can be cited directly in prose. If the server lists no `memory_recall` or `memory_cite`, it predates both those and the `system_model_*` names used here: use the search and fetch tools it does list to find the record and read its attached memories, and cite them in prose. Respect access errors and mention incomplete evidence when it affects the answer.
 
 ## 1. The standing rules — `rules_read`
 
