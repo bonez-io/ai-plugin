@@ -567,7 +567,7 @@ describe("standalone capture and memory hooks", () => {
 })
 
 describe("the session seed, over each harness's own sign-in", () => {
-  test("Claude makes no Bonez call per prompt: the agent recalls once on its own sign-in, as the SessionStart context asks", () => {
+  test("Claude makes no Bonez call per prompt: the agent recalls once on its own sign-in, with the task, as the SessionStart context asks", () => {
     // Claude Code honours `once` only in skill frontmatter, and `if` only on tool events
     // (code.claude.com/docs/en/hooks, "Common fields"), so an mcp_tool UserPromptSubmit hook runs, and blocks,
     // on every prompt. No hook of any kind calls a Bonez tool.
@@ -580,7 +580,10 @@ describe("the session seed, over each harness's own sign-in", () => {
       cwd: REPO, encoding: "utf8", env: { ...process.env, CLAUDE_PLUGIN_ROOT: REPO },
       input: JSON.stringify({ hook_event_name: "SessionStart", session_id: "s-1" }),
     })
-    assert.match(JSON.parse(out.stdout).hookSpecificOutput.additionalContext, /call memory_recall with \{\} once/)
+    // Nothing adds a seed in Claude Code, so the context never points at one (tests/recall_args.test.mjs has the arguments).
+    const context = JSON.parse(out.stdout).hookSpecificOutput.additionalContext
+    assert.match(context, /call memory_recall with \{[^}]*"message":"<the task in one sentence>"[^}]*\} once, before planning: no Bonez seed is added/)
+    assert.doesNotMatch(context, /seed already in context/)
   })
 
   // Codex: UserPromptSubmit ignores matchers and mcp_tool hooks run synchronously (developers.openai.com/codex/hooks,
@@ -609,8 +612,8 @@ describe("the session seed, over each harness's own sign-in", () => {
     const out = spawnSync("bash", [join(REPO, "cursor/hooks/session-sync.sh"), "recall"], {
       cwd: REPO, encoding: "utf8", input: JSON.stringify({ hook_event_name: "sessionStart", conversation_id: "c-1" }),
     })
-    assert.match(JSON.parse(out.stdout).additional_context, /call memory_recall with \{\} once, before planning: no Bonez seed is added/)
-    assert.match(read("cursor", "rules", "bonez.mdc"), /When the work needs project context[^\n]*call `memory_recall` once/)
+    assert.match(JSON.parse(out.stdout).additional_context, /call memory_recall with \{[^}]*"message":"<the task in one sentence>"[^}]*\} once, before planning: no Bonez seed is added/)
+    assert.match(read("cursor", "rules", "bonez.mdc"), /When the work needs project context[^\n]*call `memory_recall\(\{repo, message\}\)` once/)
   })
 
   test("no recall hook calls the network or reads a stored credential", async () => {

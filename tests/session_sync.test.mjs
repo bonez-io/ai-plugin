@@ -2197,7 +2197,10 @@ describe("live session: start once, then repository-relative reads and edits", (
     await hook(dataDir, "claude", "session-start", { ...cases[0][1], source: "resume" })
     await waitFor(() => existsSync(join(dataDir, "presence", "live-recall-1.json")))
     const note = ' This session\'s id is "live-recall-1". Pass "session": "live-recall-1" to every memory_recall call. An Active sessions row or session_activity that carries this id is this session itself, not overlapping work.'
-    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => t + note))
+    // The seed call the session start asks for carries the id too; file guidance names no call, so it only gains the note.
+    const named = (t) => t.replace('"message":"<the task in one sentence>"}', '"message":"<the task in one sentence>","session":"live-recall-1"}')
+    assert.match(named(before[0]), /"repo":"acme\/api","message":"<the task in one sentence>","session":"live-recall-1"\} once/)
+    assert.deepEqual(cases.map(([host, payload]) => recall(dataDir, host, payload)), before.map((t) => named(t) + note))
     // A Codex session is known by its rollout stem; a payload with no rollout names no session.
     const codex = { hook_event_name: "SessionStart", session_id: "live-recall-1", cwd: repo }
     assert.doesNotMatch(recall(dataDir, "codex", codex), /live-recall-1/)
