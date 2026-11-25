@@ -23,7 +23,7 @@ Nothing in this plugin gates `vendor_write` on any harness (the write gate cover
 
 - the **name**: lowercase letters, digits and hyphens, starting with a letter, at most 59. Never overwritten: a taken name, a retired agent's too, is refused;
 - **what starts it**, in words: "only when someone starts it"; a schedule in words and as cron (`every night at 03:00 UTC`, `0 3 * * *`; the timezone is UTC unless the user names one); or an event ("each time a Linear issue is created with the label `needs-repro`, or is given it later");
-- the **plugins** it will use, by name, if any, its **environment** if it needs one, and whether it may **write memories** (`graph:write`);
+- the **plugins** it will use, by name, if any, its **environment** if it needs one, and whether it may **save memories in the System Model**;
 - what the **instructions** will say, in two or three lines (the full text if they ask);
 - the **model** only if the user names one, and what a run costs in words ("one run per night on the org's default models", "one run for each matching ticket"), never a number you cannot know.
 
@@ -88,7 +88,7 @@ Only `name` and `instructions` are required. The rest:
 - `description`: one line (default: the first sentence of the instructions). `display_name`: default is the name, title-cased.
 - `plugins`: names of plugins already uploaded to the org's Library, as the Library lists them (the package name, like `@acme/pi-hello-check`; right after the plugin creator it is the package name in its HANDOFF block). At most 20. An unknown name is refused as `unknown_plugin` with the names that exist: choose from those, never invent one.
 - `environment`: the name of one of the org's environments; the run's machine boots from it, in its repository. A name the org does not have is refused with the ones it has. Leave it out otherwise.
-- `capabilities_opt_in`: `["graph:write"]` lets the agent write memories (typed `memory_save` operations, never arbitrary System Model edits). The other opt-ins are `datadog:read` and `datadog:write`. Everything else is granted already. Name it in section 2 when you include it.
+- `capabilities_opt_in`: `["graph:write"]` lets the agent write memories (typed `memory_save` operations, never arbitrary System Model edits). The other opt-ins are `datadog:read` and `datadog:write`. Everything else is granted already. When asking for approval in section 2, describe what the permission allows.
 - `model`: leave it out for the org's default (`{"mode": "auto"}`). When the user asks for a model tier, `{"mode": "rig", "rig": "<id or name of one of the org's rigs>"}`; an unknown one is refused with the list of rigs, so pick from that. `{"mode": "pinned", "catalog_alias": "<alias>"}` only when the user names that model: create does not check the alias against the org's models, so one the org lacks is refused when the first run starts.
 - `limits`: `timeout_seconds` (at most 86400), `max_steps`, `max_concurrency`; unset ones keep the defaults (an hour, 200 steps, one run at a time). Only when the job needs more.
 - `runs_on`: a computer tag, only if the user names the computer the agent must run on; the default is the Bonez box. `enabled`: `false` makes it paused.
