@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Official bonez plugin for Cursor. Your organization's System Model, with search, rules and memories, over MCP.",
-    "version": "0.12.2"
+    "version": "0.12.3"
   },
   "plugins": [
     {
       "name": "bonez",
       "source": "cursor-directory",
-      "version": "0.12.2",
+      "version": "0.12.3",
       "logo": "assets/logo.svg",
       "category": "productivity",
       "license": "MIT",
